@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>MyeeCFO – by Vipin Nair</title>
+<title>MiyeeCFO – by Vipin Nair</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%2300b386'/><text x='50%25' y='54%25' dominant-baseline='middle' text-anchor='middle' font-family='Arial,sans-serif' font-weight='900' font-size='38' fill='white'>₹</text></svg>"/>
 <meta name="description" content="Personal Fund & Budget Manager with Google Drive sync"/>
 <!-- Google Identity Services (for OAuth2 login) -->
@@ -1018,7 +1018,7 @@ function EfCard({data,accounts,avgMonthlyExp:fallbackExp,setPage}){
         <div style={{fontSize:10,opacity:.6,textTransform:'uppercase',letterSpacing:.7,marginBottom:6}}>Emergency Fund</div>
         <div style={{fontSize:15,fontWeight:700,marginBottom:6}}>Not set up yet</div>
         <div style={{fontSize:11.5,opacity:.65,lineHeight:1.5,marginBottom:12,maxWidth:380}}>
-          Choose which of your accounts hold emergency savings and MyeeCFO will track how many
+          Choose which of your accounts hold emergency savings and MiyeeCFO will track how many
           months of expenses they cover.
         </div>
         <button className="btn btn-sm" onClick={()=>setPage&&setPage('master')}
@@ -1979,7 +1979,7 @@ function PageTx({data,setData,toast,type}){
   };
   const downloadTemplate=()=>{
     const blob=new Blob(['date,type,category,description,merchant,paymentMode,amount\n01/04/2026,expense,House Rent,April Rent,,NEFT/Bank Transfer,20500\n01/04/2026,income,Salary / Consultancy,April Salary,,NEFT/Bank Transfer,83550\n05/04/2026,expense,Groceries & Food,Monthly groceries,DMart,UPI,4500\n10/04/2026,expense,Entertainment,OTT subscription,Netflix,Credit Card,649\n'],{type:'text/csv'});
-    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='myeecfo-transactions-template.csv';a.click();
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='miyeecfo-transactions-template.csv';a.click();
   };
   const handleCSV=e=>{
     const f=e.target.files[0];if(!f)return;
@@ -2978,7 +2978,7 @@ function PageProvision({data,setData,toast}){
   };
   const downloadProvTemplate=()=>{
     const b=new Blob(['month,entity,type,narration,amount\n2026-04,Self,Medical,Annual health checkup,8000\n2026-05,Family,Repair,AC servicing,3500\n2026-06,Self,Legal,Property document notarization,5000\n'],{type:'text/csv'});
-    const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='myeecfo-provision-template.csv';a.click();
+    const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='miyeecfo-provision-template.csv';a.click();
   };
   const save=()=>{if(!form.narration)return;if(eid){setData(d=>({...d,provisions:d.provisions.map(p=>p.id===eid?{...p,...form,amount:+form.amount}:p)}));toast('Updated','g');setEid(null);}else{setData(d=>({...d,provisions:[...d.provisions,{id:uid(),...form,amount:+form.amount}]}));toast('Added','g');}setForm(ef);};
   const undoDel=makeUndoDelete(data,setData,toast);
@@ -3257,7 +3257,7 @@ function PageMaster({data,setData,toast}){
         <input type="file" ref={fileRef} accept=".csv" style={{display:'none'}} onChange={handleCSV}/>
         <div style={{display:'flex',gap:8}}>
           <button className="btn btn-s" onClick={()=>fileRef.current.click()}><Ic n="up" s={13}/>Choose CSV &amp; Import</button>
-          <button className="btn btn-g btn-sm" onClick={()=>{const b=new Blob(['date,type,category,description,merchant,paymentMode,amount\n01/04/2026,expense,House Rent,April Rent,,NEFT/Bank Transfer,20500\n01/04/2026,income,Salary / Consultancy,April Salary,,NEFT/Bank Transfer,83550\n05/04/2026,expense,Groceries & Food,Monthly groceries,DMart,UPI,4500\n'],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='myeecfo-template.csv';a.click();}}>
+          <button className="btn btn-g btn-sm" onClick={()=>{const b=new Blob(['date,type,category,description,merchant,paymentMode,amount\n01/04/2026,expense,House Rent,April Rent,,NEFT/Bank Transfer,20500\n01/04/2026,income,Salary / Consultancy,April Salary,,NEFT/Bank Transfer,83550\n05/04/2026,expense,Groceries & Food,Monthly groceries,DMart,UPI,4500\n'],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='miyeecfo-template.csv';a.click();}}>
             <Ic n="dl" s={12}/>Sample Template
           </button>
         </div>
@@ -3482,7 +3482,7 @@ function PageData({data,setData,toast}){
       const netWorth=bankBal+cashBal+fdBal-ccLiab-loanOS-provTotal;
       // Sheet 1: Summary
       const sumRows=[
-        ['MyeeCFO — Export',data.profile.name,new Date().toLocaleDateString('en-IN')],
+        ['MiyeeCFO — Export',data.profile.name,new Date().toLocaleDateString('en-IN')],
         [],
         ['Period',`${data.profile.periodStart} to ${data.profile.periodEnd}`],
         ['Total Income (Period)',totalInc],
@@ -3674,7 +3674,7 @@ function PageData({data,setData,toast}){
           </span>
         </div>
         <p style={{fontSize:12.5,color:'var(--n500)',marginBottom:12}}>
-          A backup writes a JSON snapshot to your Downloads folder. By default MyeeCFO only backs up
+          A backup writes a JSON snapshot to your Downloads folder. By default MiyeeCFO only backs up
           when you press <strong>Export JSON File</strong> below — it never downloads on its own. Opt in here
           if you would rather it save a copy automatically when the app opens.
         </p>
@@ -3724,7 +3724,7 @@ function PageData({data,setData,toast}){
         <div className="alert ai mb2" style={{marginBottom:10}}>
           <Ic n="prov" s={13}/>
           <div style={{fontSize:12}}>
-            Have a JSON export from an older version of MyeeCFO, FundFlow, or any prior release?<br/>
+            Have a JSON export from an older version of MiyeeCFO, FundFlow, or any prior release?<br/>
             This importer <strong>auto-migrates</strong> your data — filling missing fields, converting old field names, and ensuring compatibility with the current schema.<br/>
             <strong>Supported:</strong> FundFlow v3, v4, v5, FinManager v1–v5, and any JSON with transactions/accounts/creditCards arrays.
           </div>
@@ -4726,7 +4726,7 @@ GOALS:${(()=>{
     if(!isChat){setResult('');setActivePrompt(userPrompt);}
 
     const ctx=buildContext();
-    const systemPrompt=`You are an expert CFO and personal finance advisor analyzing real data from "MyeeCFO". The data includes income, expenses, loans, credit cards, savings goals, investment plans with projected corpus, and actual investment transaction logs. ${LOCALE_HINT()} Be specific and actionable. Comment on investment plan health (is corpus sufficient for goals? Is return rate realistic?). Identify if savings goals will be met based on linked investments. Suggest reallocation if needed. 4-6 prioritized insights. Celebrate wins before flagging concerns. Format with short paragraphs and bullet points. Never fabricate data not present in the context.`;
+    const systemPrompt=`You are an expert CFO and personal finance advisor analyzing real data from "MiyeeCFO". The data includes income, expenses, loans, credit cards, savings goals, investment plans with projected corpus, and actual investment transaction logs. ${LOCALE_HINT()} Be specific and actionable. Comment on investment plan health (is corpus sufficient for goals? Is return rate realistic?). Identify if savings goals will be met based on linked investments. Suggest reallocation if needed. 4-6 prioritized insights. Celebrate wins before flagging concerns. Format with short paragraphs and bullet points. Never fabricate data not present in the context.`;
 
     const userMsg=isChat?userPrompt:`Here is my complete financial data:\n\n${ctx}\n\n---\n\nBased on this data, please: ${userPrompt}`;
     const messages=isChat
@@ -6387,7 +6387,7 @@ function App(){
         const b=new Blob([JSON.stringify({...snapshot,_version:'v6',_autoBackupAt:new Date().toISOString()},null,2)],{type:'application/json'});
         const url=URL.createObjectURL(b);
         const a=document.createElement('a');
-        a.href=url;a.download=`myeecfo-autobackup-${today}.json`;
+        a.href=url;a.download=`miyeecfo-autobackup-${today}.json`;
         document.body.appendChild(a);a.click();a.remove();
         setTimeout(()=>URL.revokeObjectURL(url),4000);
         localStorage.setItem('fm_autobackup_last',today);
@@ -6615,7 +6615,7 @@ function App(){
         <div className="sb-head">
           <div className="sb-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg></div>
           <div>
-            <div className="sb-app" style={{fontSize:12}}>MyeeCFO</div>
+            <div className="sb-app" style={{fontSize:12}}>MiyeeCFO</div>
             <div className="sb-period">by Vipin Nair · {periodLabel(data.profile.periodStart,data.profile.periodEnd)}</div>
           </div>
         </div>
@@ -6714,7 +6714,7 @@ function App(){
                 <span aria-hidden="true" style={{position:'absolute',top:-2,right:-2,background:'var(--r)',color:'#fff',borderRadius:'50%',width:13,height:13,fontSize:8,fontWeight:700,display:'grid',placeItems:'center'}}>{ccAlerts}</span>
               </button>
             )}
-            <a href="https://calendar.google.com/calendar/r/eventedit?text=MyeeCFO+Consultation+with+Vipin+Nair&details=Consultation+request+via+MyeeCFO.&location=Google+Meet" target="_blank" rel="noopener noreferrer" style={{textDecoration:'none'}} className="tb-desktop">
+            <a href="https://calendar.google.com/calendar/r/eventedit?text=MiyeeCFO+Consultation+with+Vipin+Nair&details=Consultation+request+via+MiyeeCFO.&location=Google+Meet" target="_blank" rel="noopener noreferrer" style={{textDecoration:'none'}} className="tb-desktop">
               <button className="btn btn-sm" aria-label="Book a consultation" style={{background:'linear-gradient(135deg,#1a73e8,#1557b0)',color:'#fff',border:'none',display:'flex',alignItems:'center',gap:5}}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
                 Book Consultation
@@ -6830,7 +6830,7 @@ function App(){
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 <div id="gfooter" style="position:fixed;bottom:0;left:var(--sb);right:0;background:#0f172a;color:#94a3b8;font-size:10.5px;font-family:'Plus Jakarta Sans',sans-serif;padding:6px 20px;display:flex;align-items:center;justify-content:space-between;z-index:150;border-top:1px solid #1e293b;">
-  <span>© 2024–2026 <strong style="color:#fff">Vipin Nair</strong> · MyeeCFO · All Rights Reserved</span>
+  <span>© 2024–2026 <strong style="color:#fff">Vipin Nair</strong> · MiyeeCFO · All Rights Reserved</span>
   <span>Suggestions &amp; Feedback: <a href="mailto:vipinnair@example.com" style="color:#6ee7b7;text-decoration:none">Send Feedback</a></span>
 </div>
 </body>
