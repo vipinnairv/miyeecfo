@@ -574,8 +574,8 @@ const SEED={
     periodEnd:'2026-03',
   },
   accounts:[
-    {id:'a1',name:'Sample Bank Account',type:'bank',accNo:'XXXX-0000',balance:50000,color:'#003366'},
-    {id:'f1',name:'Sample Fixed Deposit',type:'fd',accNo:'XXXX-0001',balance:100000,color:'#007A62'},
+    {id:'a1',name:'Sample Bank Account',type:'bank',accNo:'XXXX-0000',balance:50000,opening:null,color:'#003366'},
+    {id:'f1',name:'Sample Fixed Deposit',type:'fd',accNo:'XXXX-0001',balance:100000,opening:null,color:'#007A62'},
   ],
   creditCards:[
     {id:'cc1',bank:'Sample Bank',type:'Rewards Card (Visa)',accNo:'XXXX-XXXX-XXXX-0000',limit:100000,payable:5000,provision:0,dueDate:'2026-04-15'},
@@ -1261,6 +1261,151 @@ function computeFin(data,months){
 const useFin=(data,months)=>useMemo(()=>computeFin(data,months),[data,months]);
 
 /* ══════════════════════════════════════
+   RECONCILIATION ENGINE
+   Answers one question: does the money you have recorded moving
+   agree with the balances you say you hold?
+
+     Opening + Money In − Money Out = Expected Closing
+     Expected Closing vs Actual Balance = the difference to explain
+
+   Transactions carry a payment mode, not an account id, so the check runs
+   per FUND TYPE (bank / cash / wallet) rather than per account. Fixed
+   deposits are excluded — they move by maturity and transfer, not by
+   day-to-day spending, so folding them in would only add noise.
+══════════════════════════════════════ */
+
+// Which pot a payment mode draws on. Credit Card is deliberately absent:
+// spending on a card creates a liability, it does not move your own cash
+// until the bill is paid.
+const FUND_OF_MODE={
+  'NEFT/Bank Transfer':'bank',
+  'UPI':'bank',
+  'Debit Card':'bank',
+  'Cash':'cash',
+  'Wallet':'wallet',
+};
+const FUND_BUCKETS=[
+  {key:'bank',  label:'Bank',          types:['bank'],   modes:['NEFT/Bank Transfer','UPI','Debit Card']},
+  {key:'cash',  label:'Cash In Hand',  types:['cash'],   modes:['Cash']},
+  {key:'wallet',label:'Digital Wallet',types:['wallet'], modes:['Wallet']},
+];
+
+function computeReconciliation(data,months){
+  const {accounts=[],transactions=[],investmentTxs=[]}=data;
+  const mSet=new Set(months.map(m=>m.key));
+  const monthOf=t=>t.month||(t.date||'').slice(0,7);
+
+  const blank=()=>({inflow:0,outflow:0,invested:0,inCount:0,outCount:0,invCount:0,byMode:{}});
+  const mv={};FUND_BUCKETS.forEach(b=>{mv[b.key]=blank();});
+  // Movements that never touch your own funds, tracked so the page can say so.
+  let ccSpend=0,ccCount=0;
+  // Anything whose payment mode is missing or unrecognised: the reason a
+  // reconciliation fails to balance more often than not.
+  const unclassified=[];
+  let unclassifiedIn=0,unclassifiedOut=0;
+
+  const note=(bucket,kind,mode,amt)=>{
+    const m=mv[bucket];if(!m)return;
+    m.byMode[mode]=m.byMode[mode]||{in:0,out:0,inv:0};
+    m.byMode[mode][kind]+=amt;
+  };
+
+  for(const t of transactions){
+    if(!mSet.has(monthOf(t)))continue;
+    if(t.type!=='income'&&t.type!=='expense')continue;
+    const amt=t.amount||0;
+    const mode=t.paymentMode||'';
+    if(mode==='Credit Card'){
+      // A card spend hits the card, not your cash. Income on a card is not a
+      // real thing, so only expenses are counted here.
+      if(t.type==='expense'){ccSpend+=amt;ccCount++;}
+      else{unclassified.push({...t,why:'Income marked as paid by credit card'});unclassifiedIn+=amt;}
+      continue;
+    }
+    const bucket=FUND_OF_MODE[mode];
+    if(!bucket){
+      unclassified.push({...t,why:mode?`Unrecognised payment mode "${mode}"`:'No payment mode recorded'});
+      if(t.type==='income')unclassifiedIn+=amt;else unclassifiedOut+=amt;
+      continue;
+    }
+    const m=mv[bucket];
+    if(t.type==='income'){m.inflow+=amt;m.inCount++;note(bucket,'in',mode,amt);}
+    else{m.outflow+=amt;m.outCount++;note(bucket,'out',mode,amt);}
+  }
+
+  // Investment contributions leave the fund they were paid from.
+  for(const t of investmentTxs){
+    if(!mSet.has(monthOf(t)))continue;
+    const amt=t.amount||0;
+    const mode=t.paymentMode||'NEFT/Bank Transfer';
+    const bucket=FUND_OF_MODE[mode];
+    if(!bucket){
+      unclassified.push({...t,type:'investment',category:'Investment contribution',
+        why:mode?`Unrecognised payment mode "${mode}"`:'No payment mode recorded'});
+      unclassifiedOut+=amt;continue;
+    }
+    mv[bucket].invested+=amt;mv[bucket].invCount++;note(bucket,'inv',mode,amt);
+  }
+
+  // ── Per-bucket reconciliation ──
+  const rows=FUND_BUCKETS.map(b=>{
+    const accs=accounts.filter(a=>b.types.includes(a.type));
+    const actual=accs.reduce((s,a)=>s+(a.balance||0),0);
+    const m=mv[b.key];
+    const net=m.inflow-m.outflow-m.invested;
+    // An account contributes to the opening figure only once someone has set one.
+    const withOpening=accs.filter(a=>a.opening!==null&&a.opening!==undefined);
+    const openingSet=accs.length>0&&withOpening.length===accs.length;
+    const opening=withOpening.reduce((s,a)=>s+(a.opening||0),0);
+    // With no opening on file, the ledger still tells you what it must have been.
+    const impliedOpening=actual-net;
+    const expected=opening+net;
+    const diff=actual-expected;
+    return{...b,accounts:accs,actual,opening,openingSet,impliedOpening,net,expected,diff,
+      partialOpening:withOpening.length>0&&withOpening.length<accs.length,
+      accountsWithout:accs.filter(a=>a.opening===null||a.opening===undefined),...m};
+  });
+
+  const tracked=rows.filter(r=>r.accounts.length>0);
+  const totals={
+    actual:tracked.reduce((s,r)=>s+r.actual,0),
+    opening:tracked.reduce((s,r)=>s+r.opening,0),
+    inflow:tracked.reduce((s,r)=>s+r.inflow,0),
+    outflow:tracked.reduce((s,r)=>s+r.outflow,0),
+    invested:tracked.reduce((s,r)=>s+r.invested,0),
+    net:tracked.reduce((s,r)=>s+r.net,0),
+  };
+  // Only buckets with an opening on file can produce a meaningful difference.
+  const reconcilable=tracked.filter(r=>r.openingSet);
+  totals.reconcilable=reconcilable.length;
+  totals.tracked=tracked.length;
+  totals.allChecked=tracked.length>0&&reconcilable.length===tracked.length;
+  // A second set of totals over the checked buckets alone. The verdict is stated in
+  // these, so every term of `opening + in − out − invested = expected vs actual`
+  // covers the same funds and the sum actually holds.
+  const sum=(rs,k)=>rs.reduce((s,r)=>s+r[k],0);
+  const checked={
+    opening:sum(reconcilable,'opening'),inflow:sum(reconcilable,'inflow'),
+    outflow:sum(reconcilable,'outflow'),invested:sum(reconcilable,'invested'),
+    expected:sum(reconcilable,'expected'),actual:sum(reconcilable,'actual'),
+    diff:sum(reconcilable,'diff'),
+  };
+  totals.expected=checked.expected;
+  totals.diff=checked.diff;
+
+  // A rupee or two of rounding is not a discrepancy worth chasing.
+  const TOL=1;
+  const balanced=reconcilable.length>0&&Math.abs(totals.diff)<=TOL;
+  const fdBal=accounts.filter(a=>a.type==='fd').reduce((s,a)=>s+(a.balance||0),0);
+
+  return{rows,tracked,totals,checked,balanced,tolerance:TOL,
+    unclassified,unclassifiedIn,unclassifiedOut,
+    ccSpend,ccCount,fdBal,
+    hasOpenings:reconcilable.length>0};
+}
+const useReconciliation=(data,months)=>useMemo(()=>computeReconciliation(data,months),[data,months]);
+
+/* ══════════════════════════════════════
    ACTION ENGINE — turns state into a short to-do list
    Replaces five scattered "status" cards with one ranked list.
 ══════════════════════════════════════ */
@@ -1318,6 +1463,19 @@ function buildActions(data,fin,months){
       push(2,`${fmtINR(fin.surplus,true)} surplus is sitting idle`,
         'Nothing logged as invested this period. Money put to work moves from cash into net worth as an asset.',
         'Open Investment Tracker','invtracker');
+  }
+
+  // 6c. Reconciliation — a balance your ledger cannot explain is worth knowing about
+  const rec=computeReconciliation(data,months);
+  if(rec.hasOpenings&&!rec.balanced){
+    const off=Math.abs(rec.totals.diff);
+    push(1,`Your funds are off by ${fmtINR(off,true)}`,
+      `Recorded transactions do not explain the balance you hold. Usually a missing entry or a credit card bill payment.`,
+      'Open Reconciliation','reconcile');
+  }else if(rec.unclassified.length>0){
+    push(2,`${rec.unclassified.length} transaction${rec.unclassified.length>1?'s':''} without a payment mode`,
+      'These cannot be traced to a bank, cash or wallet balance until a mode is set.',
+      'Open Reconciliation','reconcile');
   }
 
   // 7. Recurring transactions waiting
@@ -1803,7 +1961,7 @@ function PageDashboard({data,setPage}){
 function PageFund({data,setData,toast}){
   const {accounts,budgetLimits,transactions,profile}=data;
   const [modal,setModal]=useState(null);
-  const ef={name:'',type:'bank',accNo:'XXXX-0000',balance:'',color:'#1a4a6e'};
+  const ef={name:'',type:'bank',accNo:'XXXX-0000',balance:'',opening:'',color:'#1a4a6e'};
   const [form,setForm]=useState(ef);
   const fundFileRef=useRef();
   const handleFundCSV=e=>{
@@ -1818,13 +1976,17 @@ function PageFund({data,setData,toast}){
       const getName=ca('name','accountname','bankname','account');
       const getType=ca('type','accounttype','category');
       const getAccNo=ca('accno','accountnumber','acno','number','accountno');
-      const getBal=ca('balance','amount','bal','openingbalance');
+      const getBal=ca('balance','amount','bal','closingbalance');
+      const getOpen=ca('opening','openingbalance','openbal','obal');
       const getColor=ca('color','colour');
       const accs=lines.slice(1).map(line=>{
         if(!line.trim())return null;
         const cols=parseCSVLine(line);
         const name=getName(cols);if(!name)return null;
-        return{id:uid(),name,type:getType(cols)||'bank',accNo:getAccNo(cols)||'XXXX-0000',balance:parseFloat(getBal(cols).replace(/[,\s₹$€£¥]/g,''))||0,color:getColor(cols)||'#1a4a6e'};
+        const num=v=>parseFloat(String(v).replace(/[,\s₹$€£¥]/g,''));
+        const openRaw=getOpen(cols);
+        return{id:uid(),name,type:getType(cols)||'bank',accNo:getAccNo(cols)||'XXXX-0000',
+          balance:num(getBal(cols))||0,opening:openRaw?(num(openRaw)||0):null,color:getColor(cols)||'#1a4a6e'};
       }).filter(Boolean);
       setData(d=>({...d,accounts:[...d.accounts,...accs]}));
       toast(`Imported ${accs.length} accounts`,'g');
@@ -1832,7 +1994,7 @@ function PageFund({data,setData,toast}){
     r.readAsText(f);e.target.value='';
   };
   const downloadFundTemplate=()=>{
-    const b=new Blob(['name,type,accNo,balance,color\nHDFC Bank Savings,bank,XXXX-1234,150000,#003366\nCash In Hand,cash,CASH-001,5000,#065f46\nPaytm Wallet,wallet,PAYTM-001,2500,#002970\nSBI FD,fd,FD-001,200000,#007A62\n'],{type:'text/csv'});
+    const b=new Blob(['name,type,accNo,balance,opening,color\nHDFC Bank Savings,bank,XXXX-1234,150000,120000,#003366\nCash In Hand,cash,CASH-001,5000,4000,#065f46\nPaytm Wallet,wallet,PAYTM-001,2500,1000,#002970\nSBI FD,fd,FD-001,200000,200000,#007A62\n'],{type:'text/csv'});
     const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='finmanager-accounts-template.csv';a.click();
   };
 
@@ -1855,12 +2017,14 @@ function PageFund({data,setData,toast}){
   const dLeft=dim-dom+1;
 
   const openAdd=t=>{setForm({...ef,type:t});setModal('add');};
-  const openEdit=a=>{setForm({name:a.name,type:a.type,accNo:a.accNo,balance:String(a.balance),color:a.color||'#1a4a6e'});setModal({eid:a.id});};
+  const openEdit=a=>{setForm({name:a.name,type:a.type,accNo:a.accNo,balance:String(a.balance),
+    opening:a.opening===null||a.opening===undefined?'':String(a.opening),color:a.color||'#1a4a6e'});setModal({eid:a.id});};
   const close=()=>{setModal(null);setForm(ef);};
 
   const save=()=>{
     if(!form.name)return;
-    const entry={name:form.name,type:form.type,accNo:form.accNo,balance:parseFloat(form.balance)||0,color:form.color};
+    const entry={name:form.name,type:form.type,accNo:form.accNo,balance:parseFloat(form.balance)||0,
+      opening:form.opening===''?null:parseFloat(form.opening)||0,color:form.color};
     if(modal==='add'){setData(d=>({...d,accounts:[...d.accounts,{id:uid(),...entry}]}));toast('Account added','g');}
     else{setData(d=>({...d,accounts:d.accounts.map(a=>a.id===modal.eid?{...a,...entry}:a)}));toast('Account updated','g');}
     close();
@@ -1916,6 +2080,14 @@ function PageFund({data,setData,toast}){
       <div className="f2 mb2">
         <div className="fg"><label>Account / Ref No. (Dummy)</label><input value={form.accNo} onChange={e=>setForm(f=>({...f,accNo:e.target.value}))}/></div>
         <div className="fg"><label>Balance ({CUR.sym}) – negative for OD</label><input type="number" value={form.balance} onChange={e=>setForm(f=>({...f,balance:e.target.value}))} placeholder="0"/></div>
+      </div>
+      <div className="fg mb2">
+        <label>Opening Balance ({CUR.sym}) – optional</label>
+        <input type="number" value={form.opening} onChange={e=>setForm(f=>({...f,opening:e.target.value}))} placeholder="Leave blank to infer it"/>
+        <div style={{fontSize:10.5,color:'var(--n400)',marginTop:4}}>
+          What this account held on the first day of your reporting period. Reconciliation uses it to check
+          your ledger against this balance — leave it blank and the page will work out what it must have been.
+        </div>
       </div>
       <div className="fg"><label>Brand Color (for icon)</label><input type="color" value={form.color} onChange={e=>setForm(f=>({...f,color:e.target.value}))} style={{height:36,padding:'3px 6px'}}/></div>
     </>
@@ -1975,6 +2147,304 @@ function PageFund({data,setData,toast}){
         foot={<><button className="btn btn-s btn-sm" onClick={close}>Cancel</button><button className="btn btn-p btn-sm" onClick={save}><Ic n={modal==='add'?'plus':'ok'} s={12} c="#fff"/>{modal==='add'?'Add':'Save'}</button></>}>
         {AccForm}
       </Modal>}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   RECONCILIATION
+   Book balance vs the balance you actually hold, per fund type.
+══════════════════════════════════════ */
+function PageReconcile({data,setData,toast,setPage}){
+  const {profile,accounts}=data;
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const r=useReconciliation(data,months);
+  const [showModes,setShowModes]=useState(false);
+
+  const setOpening=(id,val)=>setData(d=>({...d,
+    accounts:d.accounts.map(a=>a.id===id?{...a,opening:val===''||val===null?null:+val}:a)}));
+
+  // Adopting the implied opening makes a bucket balance by construction. It is
+  // the right move only when the ledger is complete and the balance is trusted.
+  const adoptImplied=row=>{
+    if(!row.accounts.length)return;
+    // One account: it takes the whole figure. Several: only meaningful if the
+    // rest already have openings, so the remainder lands on the odd one out.
+    const missing=row.accountsWithout;
+    if(missing.length!==1){
+      toast(missing.length===0?'Every account here already has an opening balance':'Set openings on all but one account first','r');
+      return;
+    }
+    const known=row.accounts.filter(a=>a.opening!==null&&a.opening!==undefined)
+      .reduce((s,a)=>s+(a.opening||0),0);
+    setOpening(missing[0].id,row.impliedOpening-known);
+    toast(`Opening balance set on ${missing[0].name}`,'g');
+  };
+
+  const Diff=({v})=>{
+    const ok=Math.abs(v)<=r.tolerance;
+    return<span className={`tag ${ok?'tg':'tr'}`}>{ok?'✓ Reconciled':`${v>0?'+':'−'}${fmtINR(Math.abs(v),true)}`}</span>;
+  };
+
+  const noAccounts=r.tracked.length===0;
+
+  return(
+    <div className="page">
+      <div className="ph mb3">
+        <div>
+          <div className="ptitle">Reconciliation</div>
+          <div className="psub">
+            Does what you recorded moving agree with what you say you hold? · {periodLabel(profile.periodStart,profile.periodEnd)}
+          </div>
+        </div>
+        <button className="btn btn-s btn-sm" onClick={()=>setPage('fund')}><Ic n="bank" s={12}/>Edit accounts</button>
+      </div>
+
+      {noAccounts?(
+        <div className="card" style={{textAlign:'center',padding:'40px 20px'}}>
+          <div style={{fontSize:36,marginBottom:10}}>🏦</div>
+          <div style={{fontSize:14,fontWeight:700,color:'var(--n600)',marginBottom:6}}>No bank, cash or wallet accounts yet</div>
+          <div style={{fontSize:12,color:'var(--n400)',marginBottom:16}}>
+            Add the accounts you actually hold and their balances, then come back here to check them
+            against your recorded transactions.
+          </div>
+          <button className="btn btn-p" style={{margin:'0 auto'}} onClick={()=>setPage('fund')}>→ Go to Bank Balance</button>
+        </div>
+      ):(
+      <>
+      {/* ── Verdict ── */}
+      <div className="card mb3 stl-card">
+        <div className="sh mb2">
+          <div className="sh-t">
+            <Ic n="shield" s={14} c={!r.hasOpenings?'var(--o)':r.balanced?'var(--g)':'var(--r)'}/>
+            {!r.hasOpenings?'Not yet reconcilable'
+              :r.balanced?(r.totals.allChecked?'Your books agree':'The funds you have checked agree')
+              :'Your books do not agree'}
+          </div>
+          <span className="tag tx" style={{fontSize:10}}>{r.totals.reconcilable} of {r.totals.tracked} fund types checked</span>
+        </div>
+        <div className="stl-row">
+          <div className="stl-main">
+            <div className="stl-val" style={{color:!r.hasOpenings?'var(--warn)':r.balanced?'var(--pos)':'var(--neg)'}}>
+              {!r.hasOpenings?'—':r.balanced?fmtINR(0):fmtINR(Math.abs(r.totals.diff))}
+            </div>
+            <div className="stl-sub">
+              {!r.hasOpenings
+                ? <>Set an <strong>opening balance</strong> on your accounts below and this becomes a real check.
+                    Until then the table shows what your opening balance <em>must have been</em> for the ledger
+                    to land on today's figure.</>
+                : r.balanced
+                ? (r.totals.allChecked
+                    ? <>Every recorded movement accounts for the balance you hold. Nothing is missing from your ledger.</>
+                    : <>The {r.totals.reconcilable} fund type{r.totals.reconcilable===1?'':'s'} you have given an opening
+                        balance reconcile exactly. Set openings on the remaining
+                        {' '}{r.tracked.filter(x=>!x.openingSet).map(x=>x.label).join(' and ')} to check
+                        {' '}{fmtINR(r.totals.actual-r.checked.actual,true)} more.</>)
+                : <>{r.totals.diff>0
+                    ? <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} more</strong> than your recorded transactions explain — money came in that you have not logged.</>
+                    : <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} less</strong> than your recorded transactions explain — money went out that you have not logged.</>}
+                  </>}
+            </div>
+          </div>
+          <div className="stl-calc">
+            {(()=>{
+              // Every term below covers the same funds, so the arithmetic on screen holds.
+              const v=r.hasOpenings?r.checked:r.totals;
+              const partial=r.hasOpenings&&!r.totals.allChecked;
+              return[
+              {l:'Opening',v:v.opening,op:null,c:'var(--n800)',note:r.hasOpenings?'as entered':'not set'},
+              {l:'Money In',v:v.inflow,op:'+',c:'var(--pos)'},
+              {l:'Money Out',v:v.outflow,op:'−',c:'var(--neg)'},
+              {l:'Invested',v:v.invested,op:'−',c:'var(--p)'},
+              {l:'Expected',v:v.expected,op:'=',c:'var(--n800)',bold:true,dash:!r.hasOpenings},
+              {l:'Actual Held',v:v.actual,op:'vs',c:'var(--b)',bold:true,note:partial?'checked funds only':''},
+            ];})().map(x=>(
+              <React.Fragment key={x.l}>
+                {x.op&&<span className="stl-op" aria-hidden="true">{x.op}</span>}
+                <div className="stl-term">
+                  <div className="stl-term-l">{x.l}</div>
+                  <div className="stl-term-v" style={{color:x.c,fontWeight:x.bold?800:700}}>{x.dash?'—':fmtINR(x.v,true)}</div>
+                  {x.note&&<div className="stl-term-n">{x.note}</div>}
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+        <div className="stl-foot">
+          <span>Fixed deposits ({fmtINR(r.fdBal,true)}) are excluded — they move by maturity, not by daily spending.</span>
+          <span>Differences under {fmtINR(r.tolerance)} are treated as rounding.</span>
+        </div>
+      </div>
+
+      {/* ── Per fund type ── */}
+      <div className="card mb3">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="fund" s={14} c="var(--b)"/>By fund type</div>
+          <button className="btn btn-s btn-sm" style={{fontSize:11}} onClick={()=>setShowModes(v=>!v)}>
+            {showModes?'Hide':'Show'} payment modes
+          </button>
+        </div>
+        <div className="tw">
+          <table>
+            <thead><tr>
+              <th>Fund</th><th className="num">Opening</th><th className="num">In</th><th className="num">Out</th>
+              <th className="num">Invested</th><th className="num">Expected</th><th className="num">Actual</th><th>Status</th>
+            </tr></thead>
+            <tbody>
+              {r.tracked.map(row=>(
+                <React.Fragment key={row.key}>
+                  <tr>
+                    <td style={{fontWeight:700}}>{row.label}
+                      <div style={{fontSize:10,color:'var(--n400)',fontWeight:400}}>
+                        {row.accounts.length} account{row.accounts.length===1?'':'s'} · {row.inCount+row.outCount+row.invCount} entr{(row.inCount+row.outCount+row.invCount)===1?'y':'ies'}
+                      </div>
+                    </td>
+                    <td className="num">
+                      {row.openingSet?fmtINR(row.opening,true)
+                        :<span style={{color:'var(--warn)',fontStyle:'italic'}}>{fmtINR(row.impliedOpening,true)} implied</span>}
+                    </td>
+                    <td className="num pos">{row.inflow?fmtINR(row.inflow,true):'–'}</td>
+                    <td className="num neg">{row.outflow?fmtINR(row.outflow,true):'–'}</td>
+                    <td className="num" style={{color:'var(--p)'}}>{row.invested?fmtINR(row.invested,true):'–'}</td>
+                    <td className="num bold">{row.openingSet?fmtINR(row.expected,true):'–'}</td>
+                    <td className="num bold" style={{color:'var(--b)'}}>{fmtINR(row.actual,true)}</td>
+                    <td>{row.openingSet
+                      ?<Diff v={row.diff}/>
+                      :<button className="btn btn-s btn-sm" style={{fontSize:10.5}} onClick={()=>adoptImplied(row)}>Use implied</button>}</td>
+                  </tr>
+                  {showModes&&Object.entries(row.byMode).map(([mode,v])=>(
+                    <tr key={row.key+mode} style={{background:'var(--n50)'}}>
+                      <td style={{paddingLeft:24,fontSize:11.5,color:'var(--n500)'}}>↳ {mode}</td>
+                      <td/>
+                      <td className="num" style={{fontSize:11.5}}>{v.in?fmtINR(v.in,true):'–'}</td>
+                      <td className="num" style={{fontSize:11.5}}>{v.out?fmtINR(v.out,true):'–'}</td>
+                      <td className="num" style={{fontSize:11.5}}>{v.inv?fmtINR(v.inv,true):'–'}</td>
+                      <td/><td/><td/>
+                    </tr>
+                  ))}
+                </React.Fragment>
+              ))}
+            </tbody>
+            <tfoot><tr className="tft">
+              <td style={{fontWeight:700}}>Total</td>
+              <td className="num bold">{r.hasOpenings?fmtINR(r.totals.opening,true):'–'}</td>
+              <td className="num bold pos">{fmtINR(r.totals.inflow,true)}</td>
+              <td className="num bold neg">{fmtINR(r.totals.outflow,true)}</td>
+              <td className="num bold" style={{color:'var(--p)'}}>{fmtINR(r.totals.invested,true)}</td>
+              <td className="num bold">{r.hasOpenings?fmtINR(r.totals.expected,true):'–'}</td>
+              <td className="num bold" style={{color:'var(--b)'}}>{fmtINR(r.totals.actual,true)}</td>
+              <td>{!r.hasOpenings?null
+                :r.totals.allChecked?<Diff v={r.totals.diff}/>
+                :<span className="tag tx">{r.totals.reconcilable} of {r.totals.tracked} checked</span>}</td>
+            </tr></tfoot>
+          </table>
+        </div>
+      </div>
+
+      {/* ── Opening balances ── */}
+      <div className="card mb3">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="edit" s={14} c="var(--g)"/>Opening balances</div>
+          <span className="tag tx" style={{fontSize:10}}>As at {months.length?months[0].label:'period start'}</span>
+        </div>
+        <div className="alert ai mb2"><Ic n="prov" s={13}/>
+          <span>What each account held on the first day of the period. Take it from your statement — this is
+          the anchor the whole check hangs on. Leave one blank and the table shows the figure it would need
+          to be for your ledger to balance.</span>
+        </div>
+        {r.tracked.map(row=>(
+          <div key={row.key} style={{marginBottom:14}}>
+            <div style={{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:.5,color:'var(--n500)',marginBottom:6}}>{row.label}</div>
+            {row.accounts.map(a=>(
+              <div key={a.id} className="sr">
+                <span className="sr-l">
+                  {a.name} <span style={{color:'var(--n400)',fontSize:11}}>· {a.accNo}</span>
+                  <div style={{fontSize:10.5,color:'var(--n400)'}}>Holds {fmtINR(a.balance,true)} today</div>
+                </span>
+                <span style={{display:'flex',alignItems:'center',gap:8}}>
+                  <input type="number" value={a.opening===null||a.opening===undefined?'':a.opening}
+                    onChange={e=>setOpening(a.id,e.target.value)}
+                    placeholder="not set"
+                    aria-label={`Opening balance for ${a.name}`}
+                    style={{width:130,textAlign:'right',fontFamily:'var(--m)',fontSize:12.5,padding:'6px 9px'}}/>
+                  {(a.opening!==null&&a.opening!==undefined)&&
+                    <button className="bic" title="Clear opening balance" aria-label={`Clear opening balance for ${a.name}`}
+                      onClick={()=>setOpening(a.id,'')}><Ic n="x" s={11}/></button>}
+                </span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      {/* ── What is not being checked ── */}
+      <div className="g2 mb3">
+        <div className="card">
+          <div className="sh mb2">
+            <div className="sh-t"><Ic n="bell" s={14} c={r.unclassified.length?'var(--o)':'var(--g)'}/>Entries that cannot be placed</div>
+            {r.unclassified.length>0&&<span className="tag tr">{r.unclassified.length}</span>}
+          </div>
+          {r.unclassified.length===0?(
+            <div style={{fontSize:12,color:'var(--n400)',padding:'10px 0'}}>
+              Every transaction in the period names a payment mode this page understands. Nothing is falling
+              through the cracks.
+            </div>
+          ):(
+            <>
+              <div style={{fontSize:11.5,color:'var(--n500)',marginBottom:8}}>
+                These carry no usable payment mode, so they cannot be assigned to a fund — the single most
+                common reason a reconciliation fails. Worth {fmtINR(r.unclassifiedIn+r.unclassifiedOut,true)} in total.
+              </div>
+              <div className="tw" style={{maxHeight:230,overflowY:'auto'}}>
+                <table>
+                  <thead><tr><th>Date</th><th>Description</th><th className="num">Amount</th><th>Why</th></tr></thead>
+                  <tbody>
+                    {r.unclassified.slice(0,25).map((t,i)=>(
+                      <tr key={t.id||i}>
+                        <td style={{whiteSpace:'nowrap'}}>{fmtDate(t.date)}</td>
+                        <td style={{fontSize:11.5}}>{t.desc||t.category||'—'}</td>
+                        <td className={`num ${t.type==='income'?'pos':'neg'}`}>{fmtINR(t.amount,true)}</td>
+                        <td style={{fontSize:11,color:'var(--n500)'}}>{t.why}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {r.unclassified.length>25&&<div style={{fontSize:11,color:'var(--n400)',marginTop:6}}>+{r.unclassified.length-25} more</div>}
+              <button className="btn btn-s btn-sm" style={{marginTop:10}} onClick={()=>setPage('expense')}>
+                <Ic n="edit" s={11}/>Fix in Transactions
+              </button>
+            </>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="sh mb2"><div className="sh-t"><Ic n="prov" s={14} c="var(--n500)"/>Deliberately not counted</div></div>
+          <div className="sr">
+            <span className="sr-l">Spending on credit cards
+              <div style={{fontSize:10.5,color:'var(--n400)'}}>{r.ccCount} entr{r.ccCount===1?'y':'ies'} — a card spend creates a liability, it does not move your cash</div>
+            </span>
+            <span className="sr-v">{fmtINR(r.ccSpend,true)}</span>
+          </div>
+          <div className="sr">
+            <span className="sr-l">Fixed deposits
+              <div style={{fontSize:10.5,color:'var(--n400)'}}>Move by maturity and transfer, not by daily spending</div>
+            </span>
+            <span className="sr-v">{fmtINR(r.fdBal,true)}</span>
+          </div>
+          <div style={{marginTop:12,padding:'10px 12px',background:'var(--ol)',borderRadius:8,border:'1px solid rgba(217,119,6,.2)'}}>
+            <div style={{fontSize:11.5,fontWeight:700,color:'var(--o)',marginBottom:5}}>Known gaps</div>
+            <div style={{fontSize:11,color:'var(--n600)',lineHeight:1.55}}>
+              Two things genuinely move your cash but are not recorded as transactions, so they will show up
+              as a difference: <strong>credit card bill payments</strong> and <strong>transfers between your own
+              accounts</strong>. If your bank bucket is short by roughly what you paid off your cards this
+              period, that is almost certainly the reason.
+            </div>
+          </div>
+        </div>
+      </div>
+      </>
+      )}
     </div>
   );
 }
@@ -3681,6 +4151,9 @@ function PageData({data,setData,toast}){
     if(!d.goals)d.goals=[];
     if(!d.recurring)d.recurring=[];
     if(!d.investmentTxs)d.investmentTxs=[];
+    // Reconciliation: `opening` is the balance at the start of the reporting period.
+    // Left null for existing data — the Reconciliation page infers it and offers to adopt it.
+    d.accounts=d.accounts.map(a=>({...a,opening:a.opening===undefined?null:a.opening}));
     // Ensure profile.features exists
     if(!d.profile.features)d.profile.features={investmentTracker:true};
     // Ensure all goals have instruments array
@@ -3702,6 +4175,9 @@ function PageData({data,setData,toast}){
       });
       delete d.investments;
     } else { delete d.investments; }
+    // Reconciliation needs to know which fund an investment was paid from.
+    // Pre-existing entries predate the field; a bank transfer is the safe default.
+    d.investmentTxs=d.investmentTxs.map(t=>({...t,paymentMode:t.paymentMode||'NEFT/Bank Transfer'}));
     // Migrate investmentTxs: ensure goalId field exists
     d.investmentTxs=d.investmentTxs.map(tx=>{
       if(tx.goalId)return tx;
@@ -5360,7 +5836,8 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
   const thisMonthTotal=instrStats.reduce((s,p)=>{const tm=new Date().toISOString().slice(0,7);return s+p.txs.filter(t=>t.date.slice(0,7)===tm).reduce((a,t)=>a+t.amount,0);},0);
 
   // ── Log Contribution Modal ──
-  const EF={goalId:goals[0]?.id||'',instrumentId:'',amount:'',date:new Date().toISOString().slice(0,10),units:'',nav:'',notes:''};
+  const EF={goalId:goals[0]?.id||'',instrumentId:'',amount:'',date:new Date().toISOString().slice(0,10),
+    paymentMode:'NEFT/Bank Transfer',units:'',nav:'',notes:''};
   const [form,setForm]=useState(EF);
   const [modal,setModal]=useState(false);
   const [selGoalFilter,setSelGoalFilter]=useState('all');
@@ -5379,6 +5856,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
     if(!form.goalId||!form.instrumentId||!form.amount){toast('Select goal, instrument & amount','r');return;}
     const tx={id:uid(),goalId:form.goalId,instrumentId:form.instrumentId,amount:+form.amount,
       date:form.date,month:form.date.slice(0,7),notes:form.notes||'',
+      paymentMode:form.paymentMode||'NEFT/Bank Transfer',
       units:isNAV&&form.units?+form.units:0,nav:isNAV&&form.nav?+form.nav:null};
     // Auto-update goal.currentAmount
     setData(d=>({...d,
@@ -5643,6 +6121,11 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                 </div>
                 <div className="fg"><label>Amount ({CUR.sym}) *</label><input type="number" placeholder="0" value={form.amount} onChange={e=>ff({amount:e.target.value})}/></div>
                 <div className="fg"><label>Date</label><input type="date" value={form.date} onChange={e=>ff({date:e.target.value})}/></div>
+                <div className="fg"><label>Paid From</label>
+                  <select value={form.paymentMode} onChange={e=>ff({paymentMode:e.target.value})}>
+                    {PAYMENT_MODES.filter(m=>m!=='Credit Card').map(m=><option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
                 {isNAV&&<>
                   <div className="fg"><label>Units Purchased</label><input type="number" placeholder="e.g. 12.345" value={form.units} onChange={e=>ff({units:e.target.value})}/></div>
                   <div className="fg"><label>NAV at Purchase ({CUR.sym})</label><input type="number" placeholder="e.g. 48.50" value={form.nav} onChange={e=>ff({nav:e.target.value})}/></div>
@@ -6508,7 +6991,7 @@ const NAV=[
 
 // Leaf page id → the tabs it sits alongside. Order defines the tab strip.
 const TABS={
-  fund:      [{id:'fund',l:'Bank Balance'}],
+  fund:      [{id:'fund',l:'Bank Balance'},{id:'reconcile',l:'Reconciliation'}],
   expense:   [{id:'expense',l:'Expenses'},{id:'income',l:'Income'},{id:'invtracker',l:'Investments'}],
   budget:    [{id:'budget',l:'Budget vs Actual'},{id:'provision',l:'Future Outflows'}],
   cc:        [{id:'cc',l:'Credit Cards'},{id:'loan',l:'Loans'},{id:'debt',l:'Debt Optimizer'}],
@@ -6520,7 +7003,7 @@ const TABS={
 const OWNER={};
 Object.entries(TABS).forEach(([root,tabs])=>tabs.forEach(t=>{OWNER[t.id]=root;}));
 
-const PT={dashboard:'Dashboard',fund:'Bank Balance Sheet',pnl:'P & L Statement',expense:'Expense Tracker',invtracker:'Investment Tracker',income:'Income Tracker',budget:'Budget vs Actual',provision:'Expected Future Outflows',cc:'Credit Cards',loan:'Loan Tracker',cfo:'CFO Dashboard',forecast:'Financial Forecast',debt:'Debt Optimizer',ai:'AI Insights',master:'Master Settings',data:'Data Management',drive:'Google Drive Sync',profile:'Profile & Period',goals:'Savings Goals',recurring:'Recurring Transactions'};
+const PT={dashboard:'Dashboard',fund:'Bank Balance Sheet',reconcile:'Reconciliation',pnl:'P & L Statement',expense:'Expense Tracker',invtracker:'Investment Tracker',income:'Income Tracker',budget:'Budget vs Actual',provision:'Expected Future Outflows',cc:'Credit Cards',loan:'Loan Tracker',cfo:'CFO Dashboard',forecast:'Financial Forecast',debt:'Debt Optimizer',ai:'AI Insights',master:'Master Settings',data:'Data Management',drive:'Google Drive Sync',profile:'Profile & Period',goals:'Savings Goals',recurring:'Recurring Transactions'};
 // Heading shown in the topbar for the whole destination (tabs name the leaf).
 const GROUP_TITLE={fund:'Bank Balance Sheet',expense:'Transactions',budget:'Budget',cc:'Liabilities',goals:'Plan',pnl:'Reports',master:'Settings'};
 
@@ -6753,6 +7236,7 @@ function App(){
     const p={data,setData,toast:showToast,setPage:setPg};
     switch(pg){
       case 'dashboard': return <PageDashboard {...p}/>;
+      case 'reconcile': return <PageReconcile {...p}/>;
       case 'fund': return <PageFund {...p}/>;
       case 'pnl': return <PagePnL {...p}/>;
       case 'expense': return <PageTx {...p} type="expense"/>;
