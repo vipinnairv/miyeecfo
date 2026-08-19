@@ -1101,7 +1101,7 @@ const pmClass=m=>{if(!m)return'tx';const l=m.toLowerCase();if(l.includes('credit
 const monthKey=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 
 function computeFin(data,months){
-  const {transactions=[],accounts=[],creditCards=[],loans=[],budgetLimits={},expenseCategories=[]}=data;
+  const {transactions=[],accounts=[],creditCards=[],loans=[],budgetLimits={},expenseCategories=[],investmentTxs=[],goals=[]}=data;
 
   // ── Balance sheet ──
   const bankBal=accounts.filter(a=>a.type==='bank').reduce((s,a)=>s+a.balance,0);
@@ -1117,8 +1117,9 @@ function computeFin(data,months){
   const loanOS=loans.reduce((s,l)=>s+l.outstanding,0);
   const provTotal=(data.provisions||[]).filter(p=>!p.paid).reduce((s,p)=>s+p.amount,0);
   const liabilities=ccLiab+loanOS+provTotal;
-  // THE canonical figure. Assets − all liabilities. Used everywhere.
-  const netWorth=assets-liabilities;
+  // Liquid assets only, net of every liability. Investments are deliberately absent —
+  // this is the figure the runway and fund-balance cards are built on.
+  const liquidNetWorth=assets-liabilities;
 
   // ── Period flows (single pass; months lookup is a Set) ──
   const mSet=new Set(months.map(m=>m.key));
@@ -1138,6 +1139,37 @@ function computeFin(data,months){
   const savingsRate=totalInc>0?surplus/totalInc*100:0;
   const mInc=months.map(m=>incByMonth[m.key]||0);
   const mExp=months.map(m=>expByMonth[m.key]||0);
+
+  // ── Investments ──────────────────────────────────────────────
+  // Money you put into an instrument is not spending, so it never touches `totalExp`.
+  // It leaves your cash though, which is why the P&L waterfall carries on past the
+  // surplus:  Income − Expense = Surplus − Investments = Balance Cash.
+  // The same money does not vanish — it reappears on the balance sheet as `invCorpus`,
+  // grown from each contribution's own date at its instrument's rate, and lands in
+  // net worth as an asset.
+  const instrById={};
+  for(const g of goals)for(const i of (g.instruments||[]))instrById[i.id]=i;
+  const invMonthOf=t=>t.month||(t.date||'').slice(0,7);
+  const invByMonth={};
+  let invTotal=0,invPeriod=0,invCorpus=0;
+  const nowMs=Date.now();
+  for(const t of investmentTxs){
+    const amt=t.amount||0;
+    invTotal+=amt;
+    const k=invMonthOf(t);
+    if(mSet.has(k)){invPeriod+=amt;invByMonth[k]=(invByMonth[k]||0)+amt;}
+    // Each contribution compounds independently from the day it was made.
+    const r=(instrById[t.instrumentId]?.returnRate||0)/100/12;
+    const mo=Math.max(0,(nowMs-new Date(t.date).getTime())/(86400000*30.44));
+    invCorpus+=amt*(r>0?Math.pow(1+r,mo):1);
+  }
+  const invGain=invCorpus-invTotal;
+  const mInv=months.map(m=>invByMonth[m.key]||0);
+  // What is genuinely left over once the money you committed to investing is set aside.
+  const cashBalance=surplus-invPeriod;
+  const investRate=totalInc>0?invPeriod/totalInc*100:0;
+  // THE canonical figure. Liquid net worth plus what your investments are worth today.
+  const netWorth=liquidNetWorth+invCorpus;
 
   // ── Elapsed basis ── how much of the period has actually happened.
   // Everything time-normalised (budgets, averages) MUST use this, never months.length,
@@ -1213,7 +1245,8 @@ function computeFin(data,months){
 
   return{
     bankBal,cashBal,fdBal,liquid,assets,ccPay,ccProv,ccLiab,totalLimit,ccUtil,
-    loanOS,provTotal,liabilities,netWorth,
+    loanOS,provTotal,liabilities,netWorth,liquidNetWorth,
+    invTotal,invPeriod,invCorpus,invGain,mInv,cashBalance,investRate,
     shortTermLoans,longTermLoans,shortTermLoanOS,longTermLoanOS,odBal,
     provShortTerm,shortTermLiab,fundBalExclLTL,ltCurrentPortion,
     periodTxs,totalInc,totalExp,surplus,savingsRate,mInc,mExp,
@@ -1274,6 +1307,19 @@ function buildActions(data,fin,months){
   // 6. High credit utilisation
   if(fin.ccUtil>30)push(1,`Credit utilisation is ${fin.ccUtil.toFixed(0)}%`,'Keeping this under 30% protects your credit score.','Open Credit Cards','cc');
 
+  // 6b. Investments — the surplus is only real savings once it is put somewhere
+  const invOn=data.profile?.features?.investmentTracker!==false;
+  if(invOn){
+    if(fin.invPeriod>fin.surplus&&fin.surplus>=0&&fin.invPeriod>0)
+      push(1,'You are investing more than you earned this period',
+        `${fmtINR(fin.invPeriod,true)} invested against a ${fmtINR(fin.surplus,true)} surplus — the difference is coming out of reserves.`,
+        'Review contributions','invtracker');
+    else if(fin.surplus>0&&fin.invPeriod===0&&fin.savingsRate>=15)
+      push(2,`${fmtINR(fin.surplus,true)} surplus is sitting idle`,
+        'Nothing logged as invested this period. Money put to work moves from cash into net worth as an asset.',
+        'Open Investment Tracker','invtracker');
+  }
+
   // 7. Recurring transactions waiting
   const dueRec=(data.recurring||[]).filter(r=>r.active&&r.nextDate&&r.nextDate<=new Date().toISOString().slice(0,10)).length;
   if(dueRec>0)push(2,`${dueRec} recurring transaction${dueRec>1?'s':''} due`,'These post automatically — review them if anything looks off.','Open Recurring','recurring');
@@ -1326,9 +1372,12 @@ function PageDashboard({data,setPage}){
       {/* ══ TIER 1 · HERO — headline first, then the arithmetic that produced it ══ */}
       <div className="hero mb3">
         <div style={{position:'relative',zIndex:1}}>
-          <div className="hero-label">Liquid Net Worth</div>
+          <div className="hero-label">Net Worth</div>
           <div className="hero-amount" style={{color:f.netWorth>=0?'#6ee7b7':'#fca5a5'}}>{fmtINR(f.netWorth)}</div>
-          <div style={{fontSize:11,opacity:.55,marginTop:4,fontFamily:'var(--m)'}}>{fmtINR(f.netWorth,true)} · {periodLabel(profile.periodStart,profile.periodEnd)}</div>
+          <div style={{fontSize:11,opacity:.55,marginTop:4,fontFamily:'var(--m)'}}>
+            {fmtINR(f.netWorth,true)} · {periodLabel(profile.periodStart,profile.periodEnd)}
+            {f.invCorpus>0&&<> · incl. {fmtINR(f.invCorpus,true)} investments</>}
+          </div>
         </div>
         {/* Breakup reads left-to-right as a sum, so the headline is self-explaining */}
         <div className="hero-calc">
@@ -1336,6 +1385,7 @@ function PageDashboard({data,setPage}){
             {l:'Bank',v:f.bankBal,c:'#93c5fd',op:null},
             {l:'Cash & Wallet',v:f.cashBal,c:'#86efac',op:'+'},
             {l:'Fixed Deposit',v:f.fdBal,c:'#fcd34d',op:'+'},
+            {l:'Investments',v:f.invCorpus,c:'#c4b5fd',op:'+'},
             {l:'Credit Cards',v:f.ccLiab,c:f.ccLiab>0?'#fca5a5':'#6ee7b7',op:'−'},
             {l:'Loans',v:f.loanOS,c:f.loanOS>0?'#fca5a5':'#6ee7b7',op:'−'},
             {l:'Future Outflows',v:f.provTotal,c:f.provTotal>0?'#fdba74':'#6ee7b7',op:'−'},
@@ -1350,7 +1400,7 @@ function PageDashboard({data,setPage}){
           ))}
           <span className="hero-op" aria-hidden="true">=</span>
           <div className="hero-term">
-            <div className="hero-term-l">Liquid Net Worth</div>
+            <div className="hero-term-l">Net Worth</div>
             <div className="hero-term-v" style={{color:f.netWorth>=0?'#6ee7b7':'#fca5a5',fontWeight:800}}>{fmtINR(f.netWorth,true)}</div>
           </div>
         </div>
@@ -1368,6 +1418,7 @@ function PageDashboard({data,setPage}){
             <div className="stl-sub">
               What your funds cover once only near-term obligations are settled.
               {f.longTermLoanOS>0&&<> Long-term loan principal of <strong>{fmtINR(f.longTermLoanOS,true)}</strong> is excluded — it is not due yet.</>}
+              {f.invCorpus>0&&<> Investments of <strong>{fmtINR(f.invCorpus,true)}</strong> are excluded too — they count towards net worth, not towards spendable funds.</>}
             </div>
           </div>
           <div className="stl-calc">
@@ -1431,6 +1482,57 @@ function PageDashboard({data,setPage}){
           ({fmtINR(f.budgetMonthly,true)}/mo × {f.elapsedMonths}), so spend is compared like-for-like.
         </div>
       )}
+
+      {/* ══ TIER 1 · Cash waterfall — where the period's money actually went ══ */}
+      <div className="card mb3 stl-card">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Income to Balance Cash</div>
+          <span className="tag tx" style={{fontSize:10}}>{periodLabel(profile.periodStart,profile.periodEnd)}</span>
+        </div>
+        <div className="stl-row">
+          <div className="stl-main">
+            <div className="stl-val" style={{color:f.cashBalance>=0?'var(--pos)':'var(--neg)'}}>{fmtINR(f.cashBalance)}</div>
+            <div className="stl-sub">
+              <strong>Balance Cash</strong> — what the period left you after living costs and after the money you
+              committed to investments.
+              {f.invPeriod>0
+                ? <> The {fmtINR(f.invPeriod,true)} you invested is not gone: it sits in <strong>Net Worth</strong> as an
+                    asset worth {fmtINR(f.invCorpus,true)} today.</>
+                : <> Log contributions in the Investment Tracker and they will step in here automatically.</>}
+            </div>
+            {profile.features?.investmentTracker!==false&&(
+              <button className="btn btn-s btn-sm" style={{marginTop:10}} onClick={()=>setPage('invtracker')}>
+                <Ic n="plus" s={11}/>Investment Tracker
+              </button>
+            )}
+          </div>
+          <div className="stl-calc">
+            {[
+              {l:'Income',v:f.totalInc,op:null,c:'var(--gd)'},
+              {l:'Expense',v:f.totalExp,op:'−',c:'var(--neg)'},
+              {l:'Surplus',v:f.surplus,op:'=',c:f.surplus>=0?'var(--pos)':'var(--neg)',
+                note:`${f.savingsRate.toFixed(1)}% of income`},
+              {l:'Investments',v:f.invPeriod,op:'−',c:'var(--p)',
+                note:f.invPeriod>0?`${f.investRate.toFixed(1)}% of income`:'none logged'},
+              {l:'Balance Cash',v:f.cashBalance,op:'=',c:f.cashBalance>=0?'var(--pos)':'var(--neg)',bold:true},
+            ].map(x=>(
+              <React.Fragment key={x.l}>
+                {x.op&&<span className="stl-op" aria-hidden="true">{x.op}</span>}
+                <div className="stl-term">
+                  <div className="stl-term-l">{x.l}</div>
+                  <div className="stl-term-v" style={{color:x.c,fontWeight:x.bold?800:700}}>{fmtINR(x.v,true)}</div>
+                  {x.note&&<div className="stl-term-n">{x.note}</div>}
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+        <div className="stl-foot">
+          <span>Investments are a transfer, not a cost — they never appear in <strong>Period Expense</strong>.</span>
+          <span>Lifetime invested <strong>{fmtINR(f.invTotal,true)}</strong> · worth <strong>{fmtINR(f.invCorpus,true)}</strong> today
+            {f.invTotal>0&&<> · {f.invGain>=0?'gain':'loss'} {fmtINR(Math.abs(f.invGain),true)}</>}</span>
+        </div>
+      </div>
 
       {/* ══ TIER 1 · WHAT NEEDS YOUR ATTENTION ══ */}
       <div className="card mb3">
@@ -2260,7 +2362,18 @@ function PagePnL({data}){
   const {transactions,profile}=data;
   const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
   const [selM,setSelM]=useState('all');
-  const getD=key=>{const txs=transactions.filter(t=>key==='all'?months.some(m=>m.key===t.month):t.month===key);const income=txs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);const expense=txs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);return{income,expense,surplus:income-expense};};
+  // Investments sit below the surplus line: a transfer out of cash, not a cost.
+  const itxs=data.investmentTxs||[];
+  const imonth=t=>t.month||(t.date||'').slice(0,7);
+  const getD=key=>{
+    const txs=transactions.filter(t=>key==='all'?months.some(m=>m.key===t.month):t.month===key);
+    const income=txs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
+    const expense=txs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
+    const invested=itxs.filter(t=>key==='all'?months.some(m=>m.key===imonth(t)):imonth(t)===key)
+      .reduce((s,t)=>s+(t.amount||0),0);
+    const surplus=income-expense;
+    return{income,expense,surplus,invested,cash:surplus-invested};
+  };
   const summary=months.map(m=>({...m,...getD(m.key)}));
   const totals=getD('all');const cur=selM==='all'?totals:getD(selM);
   const incCats={};transactions.filter(t=>t.type==='income'&&(selM==='all'?months.some(m=>m.key===t.month):t.month===selM)).forEach(t=>{incCats[t.category]=(incCats[t.category]||0)+t.amount;});
@@ -2269,15 +2382,27 @@ function PagePnL({data}){
     <div className="page">
       <div className="ph"><div><div className="ptitle">P &amp; L Statement</div><div className="psub">Period: {periodLabel(profile.periodStart,profile.periodEnd)}</div></div></div>
       <div className="mbar"><button type="button" className={`mchip ${selM==='all'?'on':''}`} onClick={()=>setSelM('all')}>Full Period</button>{months.map(m=><button type="button" key={m.key} className={`mchip ${selM===m.key?'on':''}`} onClick={()=>setSelM(m.key)}>{m.label}</button>)}</div>
-      <div className="g4 mb3">
-        {[{l:'Total Income',v:cur.income,col:'g',icon:'inc'},{l:'Total Expense',v:cur.expense,col:'r',icon:'exp'},{l:'Net Surplus/Deficit',v:cur.surplus,col:cur.surplus>=0?'g':'r',icon:'pnl',sub:`${cur.income>0?(cur.surplus/cur.income*100).toFixed(2):0}% of income`},{l:'Savings Rate',v:null,col:cur.surplus>=0?'g':'r',icon:'budget',pct:cur.income>0?(cur.surplus/cur.income*100).toFixed(1):0}].map(k=>(
+      <div className="g3 mb3">
+        {[
+          {l:'Total Income',v:cur.income,col:'g',icon:'inc'},
+          {l:'Less · Total Expense',v:cur.expense,col:'r',icon:'exp'},
+          {l:'Balance · Surplus',v:cur.surplus,col:cur.surplus>=0?'g':'r',icon:'pnl',sub:`${cur.income>0?(cur.surplus/cur.income*100).toFixed(2):0}% of income`},
+          {l:'Less · Investments',v:cur.invested,col:'b',icon:'up',sub:cur.invested>0?`${cur.income>0?(cur.invested/cur.income*100).toFixed(2):0}% of income · added to net worth`:'Nothing logged this period'},
+          {l:'Balance Cash',v:cur.cash,col:cur.cash>=0?'g':'r',icon:'bank',sub:'Left over after living costs and investing'},
+          {l:'Savings Rate',v:null,col:cur.surplus>=0?'g':'r',icon:'budget',pct:cur.income>0?(cur.surplus/cur.income*100).toFixed(1):0},
+        ].map(k=>(
           <div className={`kpi-card ${k.col}`} key={k.l}>
-            <div className="kpi-ic-wrap"><div className="kpi-ic" style={{background:k.col==='g'?'var(--gl)':'var(--rl)'}}><Ic n={k.icon} c={k.col==='g'?'var(--g)':'var(--r)'}/></div></div>
+            <div className="kpi-ic-wrap"><div className="kpi-ic" style={{background:k.col==='g'?'var(--gl)':k.col==='b'?'var(--bl)':'var(--rl)'}}><Ic n={k.icon} c={k.col==='g'?'var(--g)':k.col==='b'?'var(--b)':'var(--r)'}/></div></div>
             <div className="cl">{k.l}</div>
             {k.pct!==undefined?<div className={`cv ${k.col}`} style={{fontSize:20}}>{k.pct}%</div>:<div className={`cv ${k.col}`} style={{fontSize:17}}>{fmtINR(k.v)}</div>}
             {k.sub&&<div className="cm">{k.sub}</div>}
           </div>
         ))}
+      </div>
+      <div className="alert ai mb3"><Ic n="pnl" s={13}/>
+        <span>Investments are money moved, not money spent — they never appear in <strong>Total Expense</strong>.
+        They come off the surplus to give you <strong>Balance Cash</strong>, and the same amount lands on the
+        balance sheet as an asset inside <strong>Net Worth</strong>.</span>
       </div>
       <div className="g2 mb3">
         <div className="card">
@@ -2295,11 +2420,11 @@ function PagePnL({data}){
         <div className="sh mb2"><div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Monthly P&amp;L Breakdown</div></div>
         <div className="tw">
           <table>
-            <thead><tr><th>Month</th><th className="num">Income ({CUR.sym})</th><th className="num">Expense ({CUR.sym})</th><th className="num">Surplus / Deficit ({CUR.sym})</th><th className="num">Savings %</th><th>Status</th></tr></thead>
+            <thead><tr><th>Month</th><th className="num">Income ({CUR.sym})</th><th className="num">Expense ({CUR.sym})</th><th className="num">Surplus / Deficit ({CUR.sym})</th><th className="num">Investments ({CUR.sym})</th><th className="num">Balance Cash ({CUR.sym})</th><th className="num">Savings %</th><th>Status</th></tr></thead>
             <tbody>
-              {summary.map(m=>(<tr key={m.key} style={{cursor:'pointer',background:selM===m.key?'var(--gl)':''}} onClick={()=>setSelM(m.key)}><td style={{fontWeight:700}}>{m.label}</td><td className="num pos">{m.income.toLocaleString(CUR.locale)}</td><td className="num neg">{m.expense.toLocaleString(CUR.locale)}</td><td className={`num ${m.surplus>=0?'pos':'neg'}`}>{m.surplus.toLocaleString(CUR.locale)}</td><td className="num" style={{fontSize:11.5}}>{m.income>0?(m.surplus/m.income*100).toFixed(2):'–'}%</td><td>{m.income===0&&m.expense===0?<span className="tag tx">No Data</span>:m.surplus>=0?<span className="tag tg">Surplus</span>:<span className="tag tr">Deficit</span>}</td></tr>))}
+              {summary.map(m=>(<tr key={m.key} style={{cursor:'pointer',background:selM===m.key?'var(--gl)':''}} onClick={()=>setSelM(m.key)}><td style={{fontWeight:700}}>{m.label}</td><td className="num pos">{m.income.toLocaleString(CUR.locale)}</td><td className="num neg">{m.expense.toLocaleString(CUR.locale)}</td><td className={`num ${m.surplus>=0?'pos':'neg'}`}>{m.surplus.toLocaleString(CUR.locale)}</td><td className="num" style={{color:'var(--b)'}}>{m.invested?m.invested.toLocaleString(CUR.locale):'–'}</td><td className={`num bold ${m.cash>=0?'pos':'neg'}`}>{m.cash.toLocaleString(CUR.locale)}</td><td className="num" style={{fontSize:11.5}}>{m.income>0?(m.surplus/m.income*100).toFixed(2):'–'}%</td><td>{m.income===0&&m.expense===0?<span className="tag tx">No Data</span>:m.surplus>=0?<span className="tag tg">Surplus</span>:<span className="tag tr">Deficit</span>}</td></tr>))}
             </tbody>
-            <tfoot><tr className="tft"><td style={{fontWeight:700}}>Period Total</td><td className="num pos bold">{totals.income.toLocaleString(CUR.locale)}</td><td className="num neg bold">{totals.expense.toLocaleString(CUR.locale)}</td><td className={`num bold ${totals.surplus>=0?'pos':'neg'}`}>{totals.surplus.toLocaleString(CUR.locale)}</td><td className="num bold">{totals.income>0?(totals.surplus/totals.income*100).toFixed(2):0}%</td><td/></tr></tfoot>
+            <tfoot><tr className="tft"><td style={{fontWeight:700}}>Period Total</td><td className="num pos bold">{totals.income.toLocaleString(CUR.locale)}</td><td className="num neg bold">{totals.expense.toLocaleString(CUR.locale)}</td><td className={`num bold ${totals.surplus>=0?'pos':'neg'}`}>{totals.surplus.toLocaleString(CUR.locale)}</td><td className="num bold" style={{color:'var(--b)'}}>{totals.invested.toLocaleString(CUR.locale)}</td><td className={`num bold ${totals.cash>=0?'pos':'neg'}`}>{totals.cash.toLocaleString(CUR.locale)}</td><td className="num bold">{totals.income>0?(totals.surplus/totals.income*100).toFixed(2):0}%</td><td/></tr></tfoot>
           </table>
         </div>
       </div>
@@ -3470,29 +3595,33 @@ function PageData({data,setData,toast}){
       if(typeof XLSX==='undefined'){toast('SheetJS not loaded — check internet connection','r');return;}
       const wb=XLSX.utils.book_new();
       const months=getPeriodMonths(data.profile.periodStart,data.profile.periodEnd);
-      const periodTxs=data.transactions.filter(t=>months.some(m=>m.key===t.month));
-      const totalInc=periodTxs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
-      const totalExp=periodTxs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
-      const bankBal=data.accounts.filter(a=>a.type==='bank').reduce((s,a)=>s+a.balance,0);
-      const fdBal=data.accounts.filter(a=>a.type==='fd').reduce((s,a)=>s+a.balance,0);
-      const cashBal=data.accounts.filter(a=>a.type==='cash'||a.type==='wallet').reduce((s,a)=>s+a.balance,0);
-      const ccLiab=data.creditCards.reduce((s,c)=>s+c.payable+c.provision,0);
-      const loanOS=data.loans.reduce((s,l)=>s+l.outstanding,0);
-      const provTotal=(data.provisions||[]).filter(p=>!p.paid).reduce((s,p)=>s+p.amount,0);
-      const netWorth=bankBal+cashBal+fdBal-ccLiab-loanOS-provTotal;
+      // Same engine as every screen, so the workbook can never drift from the app.
+      const fin=computeFin(data,months);
+      const {totalInc,totalExp,bankBal,fdBal,cashBal,ccLiab,loanOS,provTotal,netWorth}=fin;
+      const itxs=data.investmentTxs||[];
+      const imonth=t=>t.month||(t.date||'').slice(0,7);
       // Sheet 1: Summary
       const sumRows=[
         ['MiyeeCFO — Export',data.profile.name,new Date().toLocaleDateString('en-IN')],
         [],
         ['Period',`${data.profile.periodStart} to ${data.profile.periodEnd}`],
         ['Total Income (Period)',totalInc],
-        ['Total Expenses (Period)',totalExp],
-        ['Net Surplus',totalInc-totalExp],
-        ['Savings Rate %',totalInc>0?+((totalInc-totalExp)/totalInc*100).toFixed(2):0],
+        ['Less: Total Expenses (Period)',totalExp],
+        ['Balance: Net Surplus',fin.surplus],
+        ['Less: Investments (Period)',fin.invPeriod],
+        ['Balance Cash',fin.cashBalance],
+        ['Savings Rate %',totalInc>0?+(fin.savingsRate).toFixed(2):0],
+        ['Investment Rate %',totalInc>0?+(fin.investRate).toFixed(2):0],
         [],
         ['Bank Balance',bankBal],['Cash & Wallet',cashBal],['Fixed Deposits',fdBal],
+        ['Investments (value today)',fin.invCorpus],
         ['CC Liability',-ccLiab],['Loan Outstanding',-loanOS],['Expected Future Outflows',-provTotal],
         ['Net Worth',netWorth],
+        ['  of which liquid',fin.liquidNetWorth],
+        ['  of which investments',fin.invCorpus],
+        [],
+        ['Lifetime Invested',fin.invTotal],
+        ['Investment Gain / Loss',fin.invGain],
       ];
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(sumRows),'Summary');
       // Sheet 2: Transactions
@@ -3500,11 +3629,10 @@ function PageData({data,setData,toast}){
       const txRows=data.transactions.map(t=>[t.date,t.month,t.type,t.category,t.desc||'',t.merchant||'',t.paymentMode||'',t.amount]);
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([txHdr,...txRows]),'Transactions');
       // Sheet 3: Month-wise P&L
-      const pnlHdr=['Month','Income','Expense','Surplus','Savings %'];
-      const pnlRows=months.map(m=>{
-        const inc=periodTxs.filter(t=>t.month===m.key&&t.type==='income').reduce((s,t)=>s+t.amount,0);
-        const exp=periodTxs.filter(t=>t.month===m.key&&t.type==='expense').reduce((s,t)=>s+t.amount,0);
-        return[m.label,inc,exp,inc-exp,inc>0?+((inc-exp)/inc*100).toFixed(2):0];
+      const pnlHdr=['Month','Income','Expense','Surplus','Investments','Balance Cash','Savings %'];
+      const pnlRows=months.map((m,i)=>{
+        const inc=fin.mInc[i]||0,exp=fin.mExp[i]||0,inv=fin.mInv[i]||0;
+        return[m.label,inc,exp,inc-exp,inv,inc-exp-inv,inc>0?+((inc-exp)/inc*100).toFixed(2):0];
       });
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([pnlHdr,...pnlRows]),'P&L by Month');
       // Sheet 4: Loans
@@ -3517,8 +3645,19 @@ function PageData({data,setData,toast}){
         const goalRows=(data.goals||[]).map(g=>[g.name,g.targetAmount,g.currentAmount,g.targetAmount>0?+((g.currentAmount/g.targetAmount)*100).toFixed(1):0,g.targetDate||'',g.notes||'']);
         XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([goalHdr,...goalRows]),'Goals');
       }
+      // Sheet 6: Investment contributions
+      if(itxs.length){
+        const instrById={};(data.goals||[]).forEach(g=>(g.instruments||[]).forEach(i=>{instrById[i.id]={...i,goalName:g.name};}));
+        const invHdr=['Date','Month','Goal','Instrument','Type','Amount','Units','NAV','In Period','Notes'];
+        const invRows=[...itxs].sort((a,b)=>(a.date||'').localeCompare(b.date||'')).map(t=>{
+          const i=instrById[t.instrumentId]||{};
+          return[t.date,imonth(t),i.goalName||'',i.name||'',i.type||'',t.amount||0,t.units||'',t.nav||'',
+            months.some(m=>m.key===imonth(t))?'Yes':'No',t.notes||''];
+        });
+        XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([invHdr,...invRows]),'Investments');
+      }
       XLSX.writeFile(wb,`finmanager-${new Date().toISOString().slice(0,10)}.xlsx`);
-      toast('Excel exported (5 sheets)','g');
+      toast(`Excel exported (${wb.SheetNames.length} sheets)`,'g');
     }catch(e){toast('Excel export failed: '+e.message,'r');}
   };
   /* ── Migration: normalise any old JSON export to current schema ── */
@@ -4263,7 +4402,7 @@ function PageCFO({data}){
   const {bankBal,fdBal,cashBal,liquid,ccLiab,loanOS,provTotal,netWorth,
     periodTxs,totalInc,totalExp,surplus,savingsRate,
     daysElapsed,avgDailyBurn:avgDailyBurnRate,burnRate,avgMonthlyInc,avgMonthlyExp,
-    liquidRunway,fundRunway}=f;
+    liquidRunway,fundRunway,invPeriod,invCorpus,invGain,invTotal,cashBalance,investRate,liquidNetWorth}=f;
   const runway=fundRunway;                                       // used for health score & KPI
   const activeBudget=f.budgetMonthly;
 
@@ -4283,7 +4422,10 @@ function PageCFO({data}){
   const healthLabel=healthScore>=80?'Excellent':healthScore>=65?'Good':healthScore>=50?'Fair':'Needs Attention';
   const healthColor=healthScore>=80?'var(--g)':healthScore>=65?'var(--b)':healthScore>=50?'var(--o)':'var(--r)';
 
-  const monthlyTotals=useMemo(()=>months.map((m,i)=>({...m,inc:f.mInc[i]||0,exp:f.mExp[i]||0,surplus:(f.mInc[i]||0)-(f.mExp[i]||0)})),[months,f.mInc,f.mExp]);
+  const monthlyTotals=useMemo(()=>months.map((m,i)=>{
+    const inc=f.mInc[i]||0,exp=f.mExp[i]||0,inv=f.mInv[i]||0;
+    return{...m,inc,exp,inv,surplus:inc-exp,cash:inc-exp-inv};
+  }),[months,f.mInc,f.mExp,f.mInv]);
 
   // ScoreBar defined at module level below
 
@@ -4369,7 +4511,10 @@ function PageCFO({data}){
             {l:'Gross Income (Period)',v:fmtINR(totalInc),c:'pos'},
             {l:'Total Expenses (Period)',v:fmtINR(totalExp),c:'neg'},
             {l:'Net Surplus',v:fmtINR(surplus),c:surplus>=0?'pos':'neg'},
+            {l:'Less: Invested (Period)',v:fmtINR(invPeriod),c:invPeriod>0?'pos':''},
+            {l:'Balance Cash',v:fmtINR(cashBalance),c:cashBalance>=0?'pos':'neg'},
             {l:'Savings Rate',v:`${savingsRate.toFixed(2)}%`,c:savingsRate>=20?'pos':'neg'},
+            {l:'Investment Rate',v:`${investRate.toFixed(2)}%`,c:investRate>=10?'pos':''},
             {l:'Avg Monthly Income',v:fmtINR(avgMonthlyInc,true),c:''},
             {l:'Avg Daily Burn Rate',v:`${fmtINR(avgDailyBurnRate,true)} (${daysElapsed}d)`,c:'neg'},
             {l:'Avg Monthly Burn',v:fmtINR(burnRate,true),c:'neg'},
@@ -4377,7 +4522,10 @@ function PageCFO({data}){
             {l:'CC Liability / Net Worth',v:`${netWorth>0?(ccLiab/netWorth*100).toFixed(1):0}%`,c:''},
             {l:'Fund Runway (Liquid + FD)',v:`${runway>=99?'∞':runway.toFixed(1)} months`,c:runway>=6?'pos':runway>=3?'':'neg'},
             {l:'↳ Liquid-only Runway',v:`${liquidRunway>=99?'∞':liquidRunway.toFixed(1)} months`,c:''},
+            {l:'Investments at Value',v:fmtINR(invCorpus),c:invCorpus>0?'pos':''},
+            {l:'↳ Invested vs Value',v:`${fmtINR(invTotal,true)} → ${fmtINR(invCorpus,true)} (${invGain>=0?'+':'−'}${fmtINR(Math.abs(invGain),true)})`,c:invGain>=0?'pos':'neg'},
             {l:'Net Worth',v:fmtINR(netWorth),c:netWorth>=0?'pos':'neg'},
+            {l:'↳ Liquid Net Worth',v:fmtINR(liquidNetWorth),c:liquidNetWorth>=0?'pos':'neg'},
           ].map(r=>(
             <div key={r.l} className="sr">
               <span className="sr-l">{r.l}</span>
@@ -4450,7 +4598,7 @@ function PageCFO({data}){
         <div className="sh mb2"><div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Monthly Cash Flow</div></div>
         <div className="tw">
           <table>
-            <thead><tr><th>Month</th><th className="num">Income</th><th className="num">Expense</th><th className="num">Surplus/Deficit</th><th className="num">Savings %</th><th>Cash Flow</th></tr></thead>
+            <thead><tr><th>Month</th><th className="num">Income</th><th className="num">Expense</th><th className="num">Surplus/Deficit</th><th className="num">Investments</th><th className="num">Balance Cash</th><th className="num">Savings %</th><th>Cash Flow</th></tr></thead>
             <tbody>
               {monthlyTotals.map(m=>(
                 <tr key={m.key}>
@@ -4458,6 +4606,8 @@ function PageCFO({data}){
                   <td className="num pos">{fmtINR(m.inc,true)}</td>
                   <td className="num neg">{fmtINR(m.exp,true)}</td>
                   <td className={`num ${m.surplus>=0?'pos':'neg'}`}>{fmtINR(m.surplus,true)}</td>
+                  <td className="num" style={{color:'var(--b)'}}>{m.inv?fmtINR(m.inv,true):'–'}</td>
+                  <td className={`num bold ${m.cash>=0?'pos':'neg'}`}>{fmtINR(m.cash,true)}</td>
                   <td className="num" style={{fontSize:11}}>{m.inc>0?(m.surplus/m.inc*100).toFixed(1):0}%</td>
                   <td>{m.inc===0&&m.exp===0?<span className="tag tx">No Data</span>:m.surplus>=0?<span className="tag tg">+ve</span>:<span className="tag tr">-ve</span>}</td>
                 </tr>
@@ -4469,6 +4619,8 @@ function PageCFO({data}){
                 <td className="num pos bold">{fmtINR(totalInc,true)}</td>
                 <td className="num neg bold">{fmtINR(totalExp,true)}</td>
                 <td className={`num bold ${surplus>=0?'pos':'neg'}`}>{fmtINR(surplus,true)}</td>
+                <td className="num bold" style={{color:'var(--b)'}}>{fmtINR(invPeriod,true)}</td>
+                <td className={`num bold ${cashBalance>=0?'pos':'neg'}`}>{fmtINR(cashBalance,true)}</td>
                 <td className="num bold">{savingsRate.toFixed(1)}%</td>
                 <td/>
               </tr>
@@ -4659,6 +4811,8 @@ function PageAI({data,toast}){
     const totalEMI=loans.reduce((s,l)=>s+l.emi,0);
     const totalLimit=creditCards.reduce((s,c)=>s+c.limit,0);
     const f=n=>Math.round(n);// compact numbers
+    // Canonical engine figures — investments, balance cash and the true net worth.
+    const fin=computeFin(data,months);
 
     // Top 6 expense cats only
     const catMap={};periodTxs.filter(t=>t.type==='expense').forEach(t=>{catMap[t.category]=(catMap[t.category]||0)+t.amount;});
@@ -4682,8 +4836,9 @@ function PageAI({data,toast}){
     const ccStr=creditCards.map(c=>`${c.bank}:Lmt${f(c.limit)},Billed${f(c.payable)},Unbilled${f(c.provision)}${c.dueDate?',Due'+c.dueDate:''}`).join(';');
 
     return `User:${profile.name}|Period:${months.length}mo(${profile.periodStart} to ${profile.periodEnd})|INR
-BALANCE:Bank${f(bankBal)},Cash${f(cashBal)},FD${f(fdBal)},CCDue${f(ccLiab)}(${totalLimit>0?(ccLiab/totalLimit*100).toFixed(0):0}%of${f(totalLimit)}),Loans${f(loanOS)},Prov${f(provTotal)},NW${f(bankBal+cashBal+fdBal-ccLiab-loanOS-provTotal)}
-P&L:Inc${f(totalInc)},Exp${f(totalExp)},Surplus${f(totalInc-totalExp)},SaveRate${totalInc>0?((totalInc-totalExp)/totalInc*100).toFixed(1):0}%,AvgMoInc${f(months.length>0?totalInc/months.length:0)},AvgMoExp${f(months.length>0?totalExp/months.length:0)},EMI/mo${f(totalEMI)}
+BALANCE:Bank${f(bankBal)},Cash${f(cashBal)},FD${f(fdBal)},InvestmentsAtValue${f(fin.invCorpus)},CCDue${f(ccLiab)}(${totalLimit>0?(ccLiab/totalLimit*100).toFixed(0):0}%of${f(totalLimit)}),Loans${f(loanOS)},Prov${f(provTotal)},NW${f(fin.netWorth)}(liquid${f(fin.liquidNetWorth)}+investments${f(fin.invCorpus)})
+P&L:Inc${f(totalInc)},Exp${f(totalExp)},Surplus${f(fin.surplus)},LessInvestedThisPeriod${f(fin.invPeriod)},BalanceCash${f(fin.cashBalance)},SaveRate${fin.savingsRate.toFixed(1)}%,InvestRate${fin.investRate.toFixed(1)}%,AvgMoInc${f(months.length>0?totalInc/months.length:0)},AvgMoExp${f(months.length>0?totalExp/months.length:0)},EMI/mo${f(totalEMI)}
+NOTE:Investments are a transfer, never an expense. They reduce Balance Cash and increase Net Worth as an asset.
 MONTHS:${mBreak||'none'}
 EXP_CATS:${topCats||'none'}
 INC_SRC:${incCats||'none'}
@@ -4704,9 +4859,10 @@ INVEST_TXS:${(()=>{
   const itxs=data.investmentTxs||[];
   if(!itxs.length)return 'none';
   const totalInvested=itxs.reduce((s,t)=>s+t.amount,0);
+  const growth=`ValueToday:${f(fin.invCorpus)},Gain:${f(fin.invGain)},ThisPeriod:${f(fin.invPeriod)},`;
   const byInstr={};itxs.forEach(t=>{const k=t.instrumentId||t.investmentId||'?';byInstr[k]=(byInstr[k]||0)+t.amount;});
   const allInstrs=(data.goals||[]).flatMap(g=>(g.instruments||[]));
-  return `TotalLogged:${f(totalInvested)},${Object.entries(byInstr).map(([id,v])=>{const i=allInstrs.find(x=>x.id===id);return `${i?i.name:id}:${f(v)}`;}).join(',')}`;
+  return `TotalLogged:${f(totalInvested)},${growth}${Object.entries(byInstr).map(([id,v])=>{const i=allInstrs.find(x=>x.id===id);return `${i?i.name:id}:${f(v)}`;}).join(',')}`;
 })()}
 GOALS:${(()=>{
   const gs=data.goals||[];
@@ -5165,6 +5321,9 @@ GOALS:${(()=>{
 ══════════════════════════════════════ */
 function PageInvestmentTracker({data,setData,toast,setPage}){
   const itxs=data.investmentTxs||[];
+  // Same engine the Dashboard and P&L use, so the numbers on this page are the numbers there.
+  const finMonths=useMemo(()=>getPeriodMonths(data.profile.periodStart,data.profile.periodEnd),[data.profile.periodStart,data.profile.periodEnd]);
+  const fin=useFin(data,finMonths);
   const goals=(data.goals||[]).filter(g=>(g.instruments||[]).length>0);
   const allGoals=data.goals||[];
 
@@ -5238,7 +5397,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
       })
     }));
     setModal(false);
-    toast('Contribution logged · Goal updated ✓','g');
+    toast(`Logged ${fmtINR(+form.amount,true)} · off your surplus, onto your net worth ✓`,'g');
   };
   const undoDel=makeUndoDelete(data,setData,toast);
   const delTx=id=>undoDel('Entry deleted · goal amount not reversed',d=>({...d,investmentTxs:d.investmentTxs.filter(t=>t.id!==id)}));
@@ -5259,6 +5418,49 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
           <div className="psub">Log contributions · Auto-updates goal progress · Date-accurate compound corpus</div>
         </div>
         {goals.length>0&&<button className="btn btn-p" onClick={()=>openAdd()}><Ic n="plus" s={13} c="#fff"/>Log Contribution</button>}
+      </div>
+
+      {/* ── How a contribution moves through the books ── */}
+      <div className="card mb3 stl-card">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>What logging a contribution does</div>
+          <span className="tag tx" style={{fontSize:10}}>{periodLabel(data.profile.periodStart,data.profile.periodEnd)}</span>
+        </div>
+        <div className="stl-row">
+          <div className="stl-main">
+            <div className="stl-val" style={{color:fin.cashBalance>=0?'var(--pos)':'var(--neg)'}}>{fmtINR(fin.cashBalance)}</div>
+            <div className="stl-sub">
+              <strong>Balance Cash</strong> after the {fmtINR(fin.invPeriod,true)} you have invested this period.
+              Every entry below comes off your surplus and is added straight back to <strong>Net Worth</strong> as an
+              asset — nothing is treated as an expense, so your expense ratios stay honest.
+            </div>
+            <button className="btn btn-s btn-sm" style={{marginTop:10}} onClick={()=>setPage('dashboard')}>
+              <Ic n="home" s={11}/>See it on the Dashboard
+            </button>
+          </div>
+          <div className="stl-calc">
+            {[
+              {l:'Income',v:fin.totalInc,op:null,c:'var(--gd)'},
+              {l:'Expense',v:fin.totalExp,op:'−',c:'var(--neg)'},
+              {l:'Surplus',v:fin.surplus,op:'=',c:fin.surplus>=0?'var(--pos)':'var(--neg)'},
+              {l:'Investments',v:fin.invPeriod,op:'−',c:'var(--p)',note:'this period'},
+              {l:'Balance Cash',v:fin.cashBalance,op:'=',c:fin.cashBalance>=0?'var(--pos)':'var(--neg)',bold:true},
+            ].map(x=>(
+              <React.Fragment key={x.l}>
+                {x.op&&<span className="stl-op" aria-hidden="true">{x.op}</span>}
+                <div className="stl-term">
+                  <div className="stl-term-l">{x.l}</div>
+                  <div className="stl-term-v" style={{color:x.c,fontWeight:x.bold?800:700}}>{fmtINR(x.v,true)}</div>
+                  {x.note&&<div className="stl-term-n">{x.note}</div>}
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+        <div className="stl-foot">
+          <span>Net Worth <strong>{fmtINR(fin.netWorth,true)}</strong> = liquid {fmtINR(fin.liquidNetWorth,true)} + investments {fmtINR(fin.invCorpus,true)}</span>
+          <span>Do not also record these as expenses — that would count the same money twice.</span>
+        </div>
       </div>
 
       {/* Gate: no goals with instruments */}
