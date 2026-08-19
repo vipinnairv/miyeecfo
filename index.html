@@ -22,7 +22,7 @@
    first paint (no flash of the wrong font). Privacy-first: Verdana and
    Calibri are already on the device and load nothing; Poppins and Google
    Sans fetch a web font ONLY when the user actually selects them. Stored
-   in localStorage only — it is a per-device preference, never part of the
+   in localStorage only. It is a per-device preference, never part of the
    financial data export. */
 (function(){
   var F={
@@ -68,7 +68,7 @@
   --lg:0 10px 15px -3px rgba(0,0,0,.08),0 4px 6px -4px rgba(0,0,0,.04);
   --xl:0 20px 25px -5px rgba(0,0,0,.08),0 8px 10px -6px rgba(0,0,0,.04);
   --r4:4px;--r6:6px;--r8:8px;--r12:12px;--r16:16px;--r20:20px;
-  /* Verdana is a system font — no webfont request, renders identically offline.
+  /* Verdana is a system font: no webfont request, renders identically offline.
      Figures keep a monospace face so columns of numbers stay aligned. */
   --f:Verdana,Geneva,'DejaVu Sans',sans-serif;--m:'JetBrains Mono',Consolas,monospace;
   --sb:220px;
@@ -307,7 +307,7 @@ tbody tr:hover td{background:#fafbfc}
 .mt1{margin-top:4px}.mt2{margin-top:8px}.mt3{margin-top:13px}
 @keyframes fadein{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
 .page>*{animation:fadein .2s ease both}
-/* ── MOBILE BOTTOM NAV (base — hidden by default, shown via media query below) ── */
+/* ── MOBILE BOTTOM NAV (base: hidden by default, shown via media query below) ── */
 .mob-nav{display:none;position:fixed;bottom:0;left:0;right:0;height:58px;
   background:var(--W);border-top:1.5px solid var(--n200);z-index:300;
   align-items:stretch;box-shadow:0 -2px 10px rgba(0,0,0,.07)}
@@ -335,7 +335,7 @@ tbody tr:hover td{background:#fafbfc}
 .mob-drawer-item.on{color:var(--g);background:var(--gl);font-weight:700}
 .mob-drawer-item .di{font-size:16px;width:22px;text-align:center}
 /* ── RESPONSIVE BREAKPOINTS ────────── */
-/* 1366px laptops: main area ≈ 1146px → g4 stays 4-col (286px each) — OK */
+/* 1366px laptops: main area ≈ 1146px → g4 stays 4-col (286px each), OK */
 @media(max-width:1280px){
   .g4{grid-template-columns:repeat(2,1fr)}
   .page{padding:14px 16px 36px}
@@ -717,12 +717,12 @@ const fmtINR=(n,short=false)=>{
       else if(abs>=1e3)s=`${S}${(abs/1e3).toFixed(1)}K`;
       else s=`${S}${Math.round(abs).toLocaleString(CUR.locale)}`;
     }
-  // Round sub-thousand values — computed averages such as a daily burn rate
+  // Round sub-thousand values. A computed average such as a daily burn rate is
   // otherwise rendered as "₹53.571" straight out of toLocaleString.
   }else s=`${S}${Math.round(abs).toLocaleString(CUR.locale)}`;
   return n<0?`-${s}`:s;
 };
-// Plain grouped number, no symbol — for table cells that carry the symbol in the header.
+// Plain grouped number, no symbol. For table cells that carry the symbol in the header.
 const fmtNum=n=>(!isFinite(n)?'–':Math.round(n).toLocaleString(CUR.locale));
 
 // Tells the AI which currency and number scale to speak in, so switching to USD
@@ -798,7 +798,7 @@ const Ic=({n,s=15,c='currentColor'})=>{
    TOAST
 ══════════════════════════════════════ */
 function Toast({msg,type,action,onAction,onClose}){
-  // Undoable toasts linger longer — 3s is not enough to read a message and decide.
+  // Undoable toasts linger longer. 3s is not enough to read a message and decide.
   useEffect(()=>{const t=setTimeout(onClose,action?6000:3000);return()=>clearTimeout(t);},[action]);
   return(
     <div className={`toast ${type||'x'}`} role="status">
@@ -812,7 +812,7 @@ function Toast({msg,type,action,onAction,onClose}){
 
 /* ══════════════════════════════════════
    CATEGORY INFERENCE
-   Learns purely from the user's own history — "DMart" has been filed under
+   Learns purely from the user's own history. "DMart" has been filed under
    "Groceries & Food" nine times, so offer that. No hardcoded merchant list.
 ══════════════════════════════════════ */
 const inferCategory=(transactions,merchant,type)=>{
@@ -830,7 +830,7 @@ const inferCategory=(transactions,merchant,type)=>{
   for(const k in counts)if(counts[k]>n){n=counts[k];best=k;}
   return best;
 };
-// Same idea for payment mode — most people pay a given merchant the same way.
+// Same idea for payment mode. Most people pay a given merchant the same way.
 const inferPaymentMode=(transactions,merchant,type)=>{
   const m=(merchant||'').trim().toLowerCase();
   if(m.length<2)return'';
@@ -1009,7 +1009,7 @@ function EfCard({data,accounts,avgMonthlyExp:fallbackExp,setPage}){
   const progressColor=efPct>=100?'#6ee7b7':efPct>=50?'#fcd34d':'#fca5a5';
   const statusBg=efPct>=100?'rgba(0,179,134,.3)':efPct>=50?'rgba(217,119,6,.3)':'rgba(220,38,38,.3)';
 
-  // Never call an unconfigured fund "Underfunded" — that reads as a failing grade
+  // Never call an unconfigured fund "Underfunded". That reads as a failing grade
   // for something the user has not set up yet. Show a neutral setup prompt instead.
   const notSetUp=efAccs.length===0;
   if(notSetUp)return(
@@ -1094,7 +1094,7 @@ const PAYMENT_MODES=['Credit Card','UPI','NEFT/Bank Transfer','Cash','Debit Card
 const pmClass=m=>{if(!m)return'tx';const l=m.toLowerCase();if(l.includes('credit'))return'pm-cc';if(l.includes('upi'))return'pm-upi';if(l.includes('neft')||l.includes('bank'))return'pm-neft';if(l.includes('cash'))return'pm-cash';if(l.includes('debit'))return'pm-dc';if(l.includes('wallet'))return'pm-wallet';return'tx';};
 
 /* ══════════════════════════════════════
-   FINANCIAL ENGINE — single source of truth
+   FINANCIAL ENGINE: single source of truth
    Every page derives its numbers from here so that
    "Net Worth" means exactly one thing app-wide.
 ══════════════════════════════════════ */
@@ -1117,7 +1117,7 @@ function computeFin(data,months){
   const loanOS=loans.reduce((s,l)=>s+l.outstanding,0);
   const provTotal=(data.provisions||[]).filter(p=>!p.paid).reduce((s,p)=>s+p.amount,0);
   const liabilities=ccLiab+loanOS+provTotal;
-  // Liquid assets only, net of every liability. Investments are deliberately absent —
+  // Liquid assets only, net of every liability. Investments are deliberately absent:
   // this is the figure the runway and fund-balance cards are built on.
   const liquidNetWorth=assets-liabilities;
 
@@ -1144,7 +1144,7 @@ function computeFin(data,months){
   // Money you put into an instrument is not spending, so it never touches `totalExp`.
   // It leaves your cash though, which is why the P&L waterfall carries on past the
   // surplus:  Income − Expense = Surplus − Investments = Balance Cash.
-  // The same money does not vanish — it reappears on the balance sheet as `invCorpus`,
+  // The same money does not vanish. It reappears on the balance sheet as `invCorpus`,
   // grown from each contribution's own date at its instrument's rate, and lands in
   // net worth as an asset.
   const instrById={};
@@ -1194,10 +1194,10 @@ function computeFin(data,months){
 
   // ── Liability tenure classification (the 12-month rule) ──
   // A liability is SHORT TERM if it falls due within the next 12 months.
-  //  · Credit cards  — always short term by nature
-  //  · Overdraft     — a bank account with a negative balance; already inside `liquid`
-  //  · Loans         — short term only when they finish inside the window
-  //  · Expected future outflows — short term when their expected month is inside it
+  //  · Credit cards  are always short term by nature
+  //  · Overdraft     is a bank account with a negative balance; already inside `liquid`
+  //  · Loans         are short term only when they finish inside the window
+  //  · Expected future outflows are short term when their expected month is inside it
   const horizon=new Date();horizon.setMonth(horizon.getMonth()+12);
   const horizonKey=`${horizon.getFullYear()}-${String(horizon.getMonth()+1).padStart(2,'0')}`;
   const isShortTermLoan=l=>{
@@ -1209,13 +1209,13 @@ function computeFin(data,months){
   const longTermLoans=loans.filter(l=>!isShortTermLoan(l));
   const shortTermLoanOS=shortTermLoans.reduce((s,l)=>s+(l.outstanding||0),0);
   const longTermLoanOS=longTermLoans.reduce((s,l)=>s+(l.outstanding||0),0);
-  // Overdrafts, broken out for display only — they already reduce `bankBal`.
+  // Overdrafts, broken out for display only. They already reduce `bankBal`.
   const odBal=Math.abs(accounts.filter(a=>a.type==='bank'&&a.balance<0).reduce((s,a)=>s+a.balance,0));
   // Expected future outflows landing inside the window
   const provShortTerm=(data.provisions||[]).filter(p=>!p.paid&&(p.month||'')<=horizonKey).reduce((s,p)=>s+p.amount,0);
   const shortTermLiab=ccLiab+shortTermLoanOS+provShortTerm;
   // THE figure: what your funds cover once only near-term obligations are netted off.
-  // Long-term loan principal is deliberately excluded — it is not due yet.
+  // Long-term loan principal is deliberately excluded. It is not due yet.
   const fundBalExclLTL=assets-shortTermLiab;
   // For context: the slice of long-term debt that *is* payable in the next 12 months.
   const ltCurrentPortion=longTermLoans.reduce((s,l)=>s+Math.min((l.emi||0)*12,l.outstanding||0),0);
@@ -1270,7 +1270,7 @@ const useFin=(data,months)=>useMemo(()=>computeFin(data,months),[data,months]);
 
    Transactions carry a payment mode, not an account id, so the check runs
    per FUND TYPE (bank / cash / wallet) rather than per account. Fixed
-   deposits are excluded — they move by maturity and transfer, not by
+   deposits are excluded. They move by maturity and transfer, not by
    day-to-day spending, so folding them in would only add noise.
 ══════════════════════════════════════ */
 
@@ -1406,18 +1406,18 @@ function computeReconciliation(data,months){
 const useReconciliation=(data,months)=>useMemo(()=>computeReconciliation(data,months),[data,months]);
 
 /* ══════════════════════════════════════
-   ACTION ENGINE — turns state into a short to-do list
+   ACTION ENGINE: turns state into a short to-do list
    Replaces five scattered "status" cards with one ranked list.
 ══════════════════════════════════════ */
 function buildActions(data,fin,months){
   const out=[];
   const push=(sev,title,detail,cta,page)=>out.push({sev,title,detail,cta,page});
 
-  // 1. Credit card dues — soonest first, only what's actually actionable
+  // 1. Credit card dues, soonest first, only what's actually actionable
   (data.creditCards||[]).filter(c=>c.dueDate&&c.payable>0).forEach(c=>{
     const d=daysDiff(c.dueDate);
     if(d===null||d>14)return;
-    if(d<0)push(0,`${c.bank} card is ${Math.abs(d)} days overdue`,`${fmtINR(c.payable)} outstanding — pay now to stop interest accruing.`,'Open Credit Cards','cc');
+    if(d<0)push(0,`${c.bank} card is ${Math.abs(d)} days overdue`,`${fmtINR(c.payable)} outstanding. Pay now to stop interest accruing.`,'Open Credit Cards','cc');
     else push(d<=3?0:1,`${c.bank} card due ${d===0?'today':`in ${d} day${d===1?'s':''}`}`,`${fmtINR(c.payable)} due on ${fmtDate(c.dueDate)}.`,'Open Credit Cards','cc');
   });
 
@@ -1431,7 +1431,7 @@ function buildActions(data,fin,months){
     else if(pct>=85)push(2,`${cat} is at ${pct.toFixed(0)}% of budget`,`${fmtINR(allowed-spent,true)} left for this period.`,'Review Budget','budget');
   });
 
-  // 3. Emergency fund — distinguish "not set up" from "underfunded"
+  // 3. Emergency fund: distinguish "not set up" from "underfunded"
   const ef=data.emergencyFund||{accountIds:[],targetMonths:6};
   if(!ef.accountIds||ef.accountIds.length===0){
     push(2,'Emergency fund not set up','Link the accounts that hold your emergency savings so cover can be tracked.','Set it up','master');
@@ -1444,7 +1444,7 @@ function buildActions(data,fin,months){
 
   // 4. Spending outpacing income
   if(fin.surplus<0)push(0,'You are spending more than you earn',`${fmtINR(Math.abs(fin.surplus),true)} deficit this period.`,'See breakdown','reports');
-  else if(fin.savingsRate<10&&fin.totalInc>0)push(2,`Savings rate is ${fin.savingsRate.toFixed(0)}%`,'Below the 20% guideline — see which categories to trim.','See breakdown','reports');
+  else if(fin.savingsRate<10&&fin.totalInc>0)push(2,`Savings rate is ${fin.savingsRate.toFixed(0)}%`,'Below the 20% guideline. See which categories to trim.','See breakdown','reports');
 
   // 5. Debt burden
   if(fin.emiRatio>35)push(1,`EMIs are ${fin.emiRatio.toFixed(0)}% of income`,'Above the 35% comfort threshold. Consider prepaying the costliest loan.','Open Debt Optimizer','debt');
@@ -1452,12 +1452,12 @@ function buildActions(data,fin,months){
   // 6. High credit utilisation
   if(fin.ccUtil>30)push(1,`Credit utilisation is ${fin.ccUtil.toFixed(0)}%`,'Keeping this under 30% protects your credit score.','Open Credit Cards','cc');
 
-  // 6b. Investments — the surplus is only real savings once it is put somewhere
+  // 6b. Investments: the surplus is only real savings once it is put somewhere
   const invOn=data.profile?.features?.investmentTracker!==false;
   if(invOn){
     if(fin.invPeriod>fin.surplus&&fin.surplus>=0&&fin.invPeriod>0)
       push(1,'You are investing more than you earned this period',
-        `${fmtINR(fin.invPeriod,true)} invested against a ${fmtINR(fin.surplus,true)} surplus — the difference is coming out of reserves.`,
+        `${fmtINR(fin.invPeriod,true)} invested against a ${fmtINR(fin.surplus,true)} surplus. The difference is coming out of reserves.`,
         'Review contributions','invtracker');
     else if(fin.surplus>0&&fin.invPeriod===0&&fin.savingsRate>=15)
       push(2,`${fmtINR(fin.surplus,true)} surplus is sitting idle`,
@@ -1465,7 +1465,7 @@ function buildActions(data,fin,months){
         'Open Investment Tracker','invtracker');
   }
 
-  // 6c. Reconciliation — a balance your ledger cannot explain is worth knowing about
+  // 6c. Reconciliation: a balance your ledger cannot explain is worth knowing about
   const rec=computeReconciliation(data,months);
   if(rec.hasOpenings&&!rec.balanced){
     const off=Math.abs(rec.totals.diff);
@@ -1480,9 +1480,9 @@ function buildActions(data,fin,months){
 
   // 7. Recurring transactions waiting
   const dueRec=(data.recurring||[]).filter(r=>r.active&&r.nextDate&&r.nextDate<=new Date().toISOString().slice(0,10)).length;
-  if(dueRec>0)push(2,`${dueRec} recurring transaction${dueRec>1?'s':''} due`,'These post automatically — review them if anything looks off.','Open Recurring','recurring');
+  if(dueRec>0)push(2,`${dueRec} recurring transaction${dueRec>1?'s':''} due`,'These post automatically. Review them if anything looks off.','Open Recurring','recurring');
 
-  // 8. Empty state — a genuinely new user should see a start, not alarms
+  // 8. Empty state: a genuinely new user should see a start, not alarms
   if((data.transactions||[]).length===0)push(2,'No transactions yet','Add your first income or expense to unlock every metric here.','Add transaction','expense');
 
   return out.sort((a,b)=>a.sev-b.sev);
@@ -1527,7 +1527,7 @@ function PageDashboard({data,setPage}){
 
   return(
     <div className="page">
-      {/* ══ TIER 1 · HERO — headline first, then the arithmetic that produced it ══ */}
+      {/* ══ TIER 1 · HERO: headline first, then the arithmetic that produced it ══ */}
       <div className="hero mb3">
         <div style={{position:'relative',zIndex:1}}>
           <div className="hero-label">Net Worth</div>
@@ -1564,7 +1564,7 @@ function PageDashboard({data,setPage}){
         </div>
       </div>
 
-      {/* ══ TIER 1 · Short-term liquidity — net worth's near-term sibling ══ */}
+      {/* ══ TIER 1 · Short-term liquidity: net worth's near-term sibling ══ */}
       <div className="card mb3 stl-card">
         <div className="sh mb2">
           <div className="sh-t"><Ic n="bank" s={14} c="var(--b)"/>Fund Balance (Excl. Long-Term Loans)</div>
@@ -1575,8 +1575,8 @@ function PageDashboard({data,setPage}){
             <div className="stl-val" style={{color:f.fundBalExclLTL>=0?'var(--pos)':'var(--neg)'}}>{fmtINR(f.fundBalExclLTL)}</div>
             <div className="stl-sub">
               What your funds cover once only near-term obligations are settled.
-              {f.longTermLoanOS>0&&<> Long-term loan principal of <strong>{fmtINR(f.longTermLoanOS,true)}</strong> is excluded — it is not due yet.</>}
-              {f.invCorpus>0&&<> Investments of <strong>{fmtINR(f.invCorpus,true)}</strong> are excluded too — they count towards net worth, not towards spendable funds.</>}
+              {f.longTermLoanOS>0&&<> Long-term loan principal of <strong>{fmtINR(f.longTermLoanOS,true)}</strong> is excluded. It is not due yet.</>}
+              {f.invCorpus>0&&<> Investments of <strong>{fmtINR(f.invCorpus,true)}</strong> are excluded too. They count towards net worth, not towards spendable funds.</>}
             </div>
           </div>
           <div className="stl-calc">
@@ -1641,7 +1641,7 @@ function PageDashboard({data,setPage}){
         </div>
       )}
 
-      {/* ══ TIER 1 · Cash waterfall — where the period's money actually went ══ */}
+      {/* ══ TIER 1 · Cash waterfall: where the period's money actually went ══ */}
       <div className="card mb3 stl-card">
         <div className="sh mb2">
           <div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Income to Balance Cash</div>
@@ -1651,7 +1651,7 @@ function PageDashboard({data,setPage}){
           <div className="stl-main">
             <div className="stl-val" style={{color:f.cashBalance>=0?'var(--pos)':'var(--neg)'}}>{fmtINR(f.cashBalance)}</div>
             <div className="stl-sub">
-              <strong>Balance Cash</strong> — what the period left you after living costs and after the money you
+              <strong>Balance Cash</strong> is what the period left you after living costs and after the money you
               committed to investments.
               {f.invPeriod>0
                 ? <> The {fmtINR(f.invPeriod,true)} you invested is not gone: it sits in <strong>Net Worth</strong> as an
@@ -1686,7 +1686,7 @@ function PageDashboard({data,setPage}){
           </div>
         </div>
         <div className="stl-foot">
-          <span>Investments are a transfer, not a cost — they never appear in <strong>Period Expense</strong>.</span>
+          <span>Investments are a transfer, not a cost. They never appear in <strong>Period Expense</strong>.</span>
           <span>Lifetime invested <strong>{fmtINR(f.invTotal,true)}</strong> · worth <strong>{fmtINR(f.invCorpus,true)}</strong> today
             {f.invTotal>0&&<> · {f.invGain>=0?'gain':'loss'} {fmtINR(Math.abs(f.invGain),true)}</>}</span>
         </div>
@@ -1719,7 +1719,7 @@ function PageDashboard({data,setPage}){
                     <div style={{fontSize:11.5,color:'var(--n500)',lineHeight:1.45}}>{a.detail}</div>
                   </div>
                   <button className="btn btn-s btn-sm" style={{fontSize:10.5,flexShrink:0,whiteSpace:'nowrap'}}
-                    onClick={()=>setPage(a.page)} aria-label={`${a.cta} — ${a.title}`}>{a.cta} →</button>
+                    onClick={()=>setPage(a.page)} aria-label={`${a.cta}: ${a.title}`}>{a.cta} →</button>
                 </div>
               );
             })}
@@ -1807,7 +1807,7 @@ function PageDashboard({data,setPage}){
               </div>
             </div>
             {topMerchants.length===0
-              ?<div style={{fontSize:12,color:'var(--n400)',padding:'8px 0'}}>No merchant data yet — add a Merchant/Vendor when logging expenses.</div>
+              ?<div style={{fontSize:12,color:'var(--n400)',padding:'8px 0'}}>No merchant data yet. Add a Merchant/Vendor when logging expenses.</div>
               :topMerchants.map(([m,amt],i)=>{
                 const pct=f.totalExp>0?amt/f.totalExp*100:0;
                 const colors=['var(--p)','var(--b)','var(--t)','var(--o)','var(--g)'];
@@ -1843,7 +1843,7 @@ function PageDashboard({data,setPage}){
                 <button className="btn btn-g btn-sm" onClick={()=>setPage('goals')} style={{marginLeft:'auto',fontSize:11}} aria-label="View all savings goals">View All →</button>
               </div>
               {(data.goals||[]).length===0
-                ?<div style={{fontSize:12,color:'var(--n400)',padding:'8px 0'}}>No goals set — go to Savings Goals to create your first target.</div>
+                ?<div style={{fontSize:12,color:'var(--n400)',padding:'8px 0'}}>No goals set. Go to Savings Goals to create your first target.</div>
                 :(data.goals||[]).slice(0,3).map(g=>{
                   const pct=g.targetAmount>0?Math.min(100,g.currentAmount/g.targetAmount*100):0;
                   const monthsLeft=g.targetDate?Math.max(1,(new Date(g.targetDate)-new Date())/86400000/30):1;
@@ -1945,7 +1945,7 @@ function PageDashboard({data,setPage}){
         </div>
       </details>
 
-      {/* Forecast and CFO analytics live on their own pages — no duplicate panels here. */}
+      {/* Forecast and CFO analytics live on their own pages, so there are no duplicate panels here. */}
       <div style={{display:'flex',gap:10,flexWrap:'wrap',marginTop:16}}>
         <button className="btn btn-s btn-sm" onClick={()=>setPage('cfo')}>Open CFO Dashboard →</button>
         <button className="btn btn-s btn-sm" onClick={()=>setPage('forecast')}>Open Financial Forecast →</button>
@@ -2086,7 +2086,7 @@ function PageFund({data,setData,toast}){
         <input type="number" value={form.opening} onChange={e=>setForm(f=>({...f,opening:e.target.value}))} placeholder="Leave blank to infer it"/>
         <div style={{fontSize:10.5,color:'var(--n400)',marginTop:4}}>
           What this account held on the first day of your reporting period. Reconciliation uses it to check
-          your ledger against this balance — leave it blank and the page will work out what it must have been.
+          your ledger against this balance. Leave it blank and the page will work out what it must have been.
         </div>
       </div>
       <div className="fg"><label>Brand Color (for icon)</label><input type="color" value={form.color} onChange={e=>setForm(f=>({...f,color:e.target.value}))} style={{height:36,padding:'3px 6px'}}/></div>
@@ -2226,7 +2226,7 @@ function PageReconcile({data,setData,toast,setPage}){
         <div className="stl-row">
           <div className="stl-main">
             <div className="stl-val" style={{color:!r.hasOpenings?'var(--warn)':r.balanced?'var(--pos)':'var(--neg)'}}>
-              {!r.hasOpenings?'—':r.balanced?fmtINR(0):fmtINR(Math.abs(r.totals.diff))}
+              {!r.hasOpenings?'–':r.balanced?fmtINR(0):fmtINR(Math.abs(r.totals.diff))}
             </div>
             <div className="stl-sub">
               {!r.hasOpenings
@@ -2241,8 +2241,8 @@ function PageReconcile({data,setData,toast,setPage}){
                         {' '}{r.tracked.filter(x=>!x.openingSet).map(x=>x.label).join(' and ')} to check
                         {' '}{fmtINR(r.totals.actual-r.checked.actual,true)} more.</>)
                 : <>{r.totals.diff>0
-                    ? <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} more</strong> than your recorded transactions explain — money came in that you have not logged.</>
-                    : <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} less</strong> than your recorded transactions explain — money went out that you have not logged.</>}
+                    ? <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} more</strong> than your recorded transactions explain. Money came in that you have not logged.</>
+                    : <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} less</strong> than your recorded transactions explain. Money went out that you have not logged.</>}
                   </>}
             </div>
           </div>
@@ -2263,7 +2263,7 @@ function PageReconcile({data,setData,toast,setPage}){
                 {x.op&&<span className="stl-op" aria-hidden="true">{x.op}</span>}
                 <div className="stl-term">
                   <div className="stl-term-l">{x.l}</div>
-                  <div className="stl-term-v" style={{color:x.c,fontWeight:x.bold?800:700}}>{x.dash?'—':fmtINR(x.v,true)}</div>
+                  <div className="stl-term-v" style={{color:x.c,fontWeight:x.bold?800:700}}>{x.dash?'–':fmtINR(x.v,true)}</div>
                   {x.note&&<div className="stl-term-n">{x.note}</div>}
                 </div>
               </React.Fragment>
@@ -2271,7 +2271,7 @@ function PageReconcile({data,setData,toast,setPage}){
           </div>
         </div>
         <div className="stl-foot">
-          <span>Fixed deposits ({fmtINR(r.fdBal,true)}) are excluded — they move by maturity, not by daily spending.</span>
+          <span>Fixed deposits ({fmtINR(r.fdBal,true)}) are excluded. They move by maturity, not by daily spending.</span>
           <span>Differences under {fmtINR(r.tolerance)} are treated as rounding.</span>
         </div>
       </div>
@@ -2348,7 +2348,7 @@ function PageReconcile({data,setData,toast,setPage}){
           <span className="tag tx" style={{fontSize:10}}>As at {months.length?months[0].label:'period start'}</span>
         </div>
         <div className="alert ai mb2"><Ic n="prov" s={13}/>
-          <span>What each account held on the first day of the period. Take it from your statement — this is
+          <span>What each account held on the first day of the period. Take it from your statement. This is
           the anchor the whole check hangs on. Leave one blank and the table shows the figure it would need
           to be for your ledger to balance.</span>
         </div>
@@ -2392,7 +2392,7 @@ function PageReconcile({data,setData,toast,setPage}){
           ):(
             <>
               <div style={{fontSize:11.5,color:'var(--n500)',marginBottom:8}}>
-                These carry no usable payment mode, so they cannot be assigned to a fund — the single most
+                These carry no usable payment mode, so they cannot be assigned to a fund, the single most
                 common reason a reconciliation fails. Worth {fmtINR(r.unclassifiedIn+r.unclassifiedOut,true)} in total.
               </div>
               <div className="tw" style={{maxHeight:230,overflowY:'auto'}}>
@@ -2402,7 +2402,7 @@ function PageReconcile({data,setData,toast,setPage}){
                     {r.unclassified.slice(0,25).map((t,i)=>(
                       <tr key={t.id||i}>
                         <td style={{whiteSpace:'nowrap'}}>{fmtDate(t.date)}</td>
-                        <td style={{fontSize:11.5}}>{t.desc||t.category||'—'}</td>
+                        <td style={{fontSize:11.5}}>{t.desc||t.category||'–'}</td>
                         <td className={`num ${t.type==='income'?'pos':'neg'}`}>{fmtINR(t.amount,true)}</td>
                         <td style={{fontSize:11,color:'var(--n500)'}}>{t.why}</td>
                       </tr>
@@ -2422,7 +2422,7 @@ function PageReconcile({data,setData,toast,setPage}){
           <div className="sh mb2"><div className="sh-t"><Ic n="prov" s={14} c="var(--n500)"/>Deliberately not counted</div></div>
           <div className="sr">
             <span className="sr-l">Spending on credit cards
-              <div style={{fontSize:10.5,color:'var(--n400)'}}>{r.ccCount} entr{r.ccCount===1?'y':'ies'} — a card spend creates a liability, it does not move your cash</div>
+              <div style={{fontSize:10.5,color:'var(--n400)'}}>{r.ccCount} entr{r.ccCount===1?'y':'ies'}. A card spend creates a liability, it does not move your cash</div>
             </span>
             <span className="sr-v">{fmtINR(r.ccSpend,true)}</span>
           </div>
@@ -2490,7 +2490,7 @@ function PageTx({data,setData,toast,type}){
   };
   const startEdit=t=>{setEid(t.id);setForm({date:t.date,category:t.category,desc:t.desc,amount:String(t.amount),paymentMode:t.paymentMode||'',merchant:t.merchant||''});setAutoCat('');};
   // Typing a merchant fills category and payment mode from this user's own history.
-  // Only fills blanks, or replaces a value we auto-filled — a manual pick always wins.
+  // Only fills blanks, or replaces a value we auto-filled. A manual pick always wins.
   const onMerchantChange=v=>{
     setForm(f=>{
       const next={...f,merchant:v};
@@ -2513,13 +2513,13 @@ function PageTx({data,setData,toast,type}){
     setEid(copy.id);
     setForm({date:copy.date,category:copy.category,desc:copy.desc,amount:String(copy.amount),paymentMode:copy.paymentMode||'',merchant:copy.merchant||''});
     if(selM!=='all'&&selM!==copy.month)setSelM('all'); // make sure the copy is visible
-    toast('Duplicated to today — adjust and Update','g');
+    toast('Duplicated to today. Adjust and Update','g');
     window.scrollTo({top:0,behavior:'smooth'});
   };
   const cancel=()=>{setEid(null);setForm(ef);};
   const undoDel=makeUndoDelete(data,setData,toast);
   const del=id=>undoDel('Entry deleted',d=>({...d,transactions:d.transactions.filter(t=>t.id!==id)}));
-  // Bulk clone — the common case is "last month's fixed costs happened again".
+  // Bulk clone. The common case is "last month's fixed costs happened again".
   // Keeps each entry's day-of-month, moved into the current month.
   const bulkDuplicate=()=>{
     if(!sel.size)return;
@@ -2777,7 +2777,7 @@ function PageBudget({data,setData,toast}){
   const [selM,setSelM]=useState(months.find(m=>m.key===_curMK)?.key||months[months.length-1]?.key||months[0]?.key||'');
 
   // Actuals only ever cover elapsed months, so the "Full Period" allowance must be
-  // pro-rated to the same window — otherwise every category looks comfortably under budget
+  // pro-rated to the same window, otherwise every category looks comfortably under budget
   // simply because the year hasn't finished yet.
   const _nowMK=`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
   const elapsedMonths=Math.min(months.length,Math.max(1,months.filter(m=>m.key<=_nowMK).length));
@@ -2870,7 +2870,7 @@ function PagePnL({data}){
         ))}
       </div>
       <div className="alert ai mb3"><Ic n="pnl" s={13}/>
-        <span>Investments are money moved, not money spent — they never appear in <strong>Total Expense</strong>.
+        <span>Investments are money moved, not money spent. They never appear in <strong>Total Expense</strong>.
         They come off the surplus to give you <strong>Balance Cash</strong>, and the same amount lands on the
         balance sheet as an asset inside <strong>Net Worth</strong>.</span>
       </div>
@@ -3010,7 +3010,7 @@ function PageCC({data,setData,toast}){
                     <div style={{flex:1}}>
                       <div style={{fontWeight:700,fontSize:13}}>{cc.bank} – {cc.type}</div>
                       <div style={{fontSize:11,color:'var(--n500)',marginTop:1}}>
-                        {d===0?'⚠ DUE TODAY — Pay immediately!':d===1?'⚠ Due TOMORROW!':d===2?'⚠ Due in 2 days':d===3?'Due in 3 days':''}
+                        {d===0?'⚠ DUE TODAY. Pay immediately!':d===1?'⚠ Due TOMORROW!':d===2?'⚠ Due in 2 days':d===3?'Due in 3 days':''}
                       </div>
                     </div>
                     <div style={{textAlign:'right'}}>
@@ -3081,8 +3081,8 @@ function PageCC({data,setData,toast}){
         </div>
       </div>
       {/* 30% Alert + Insights */}
-      {util>30&&<div className="alert ae mt3"><Ic n="prov" s={14}/>⚠ <strong>Credit Utilization at {util.toFixed(1)}%</strong> — exceeds 30% threshold. This may impact your credit score. Consider paying down balances on high-utilization cards.</div>}
-      {util>15&&util<=30&&<div className="alert aw mt3"><Ic n="prov" s={14}/>Credit utilization at {util.toFixed(1)}% — approaching the 30% recommended limit.</div>}
+      {util>30&&<div className="alert ae mt3"><Ic n="prov" s={14}/>⚠ <strong>Credit Utilization at {util.toFixed(1)}%</strong> exceeds the 30% threshold. This may impact your credit score. Consider paying down balances on high-utilization cards.</div>}
+      {util>15&&util<=30&&<div className="alert aw mt3"><Ic n="prov" s={14}/>Credit utilization at {util.toFixed(1)}%, approaching the 30% recommended limit.</div>}
       <div className="card mt3">
         <div className="sh mb2"><div className="sh-t"><Ic n="budget" s={14} c="var(--g)"/>Per-Card Utilization Insights</div></div>
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))',gap:10}}>
@@ -3164,7 +3164,7 @@ function LoanCard({l,buildAmort,openEdit,del,setData,toast}){
               const end=l.endDate?new Date(l.endDate):null;
               const isST=end&&isFinite(end)&&end<=h;
               return <span className={`tag ${isST?'to':'tx'}`} style={{marginLeft:6,fontSize:9.5}}
-                title={isST?'Finishes within 12 months — counted as a short-term liability in Fund Balance (Excl. Long-Term Loans)':'Runs beyond 12 months — excluded from Fund Balance (Excl. Long-Term Loans)'}>
+                title={isST?'Finishes within 12 months, counted as a short-term liability in Fund Balance (Excl. Long-Term Loans)':'Runs beyond 12 months, excluded from Fund Balance (Excl. Long-Term Loans)'}>
                 {isST?'Short Term':'Long Term'}</span>;
             })()}
             {l.phases&&l.phases.length>1&&<span className="tag to" style={{marginLeft:6,fontSize:9.5}}>Variable EMI</span>}
@@ -3349,7 +3349,7 @@ function PageLoans({data,setData,toast}){
     const phases=l.phases&&l.phases.length?[...l.phases].sort((a,b)=>a.fromMonth-b.fromMonth):[{fromMonth:1,emi:l.emi,roi:l.roi}];
     const now=new Date(),start=new Date(l.startDate||new Date());
     const elapsed=Math.max(0,(now.getFullYear()-start.getFullYear())*12+(now.getMonth()-start.getMonth()));
-    // Use paid EMI count as the source of truth for next installment — whichever is higher wins
+    // Use paid EMI count as the source of truth for next installment. Whichever is higher wins
     const paidCount=(l.paidEmis||[]).length;
     const startFrom=Math.max(elapsed,paidCount);
     const rows=[];let bal=l.outstanding;
@@ -3448,7 +3448,7 @@ function PageLoans({data,setData,toast}){
           <Ic n="plus" s={11}/>Add Revision
         </button>
       </div>
-      {form.phases.length===0&&<div style={{fontSize:11.5,color:'var(--n400)',padding:'8px 0'}}>No revisions — single EMI &amp; ROI for full tenure.</div>}
+      {form.phases.length===0&&<div style={{fontSize:11.5,color:'var(--n400)',padding:'8px 0'}}>No revisions. Single EMI &amp; ROI for full tenure.</div>}
       {form.phases.length>0&&(
         <div style={{border:'1px solid var(--n100)',borderRadius:'var(--r8)',overflow:'hidden'}}>
           <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
@@ -3587,10 +3587,10 @@ function PageProvision({data,setData,toast}){
     setData(d=>({...d,provisions:d.provisions.map(x=>x.id===p.id
       ?{...x,paid:paying,paidOn:paying?new Date().toISOString().slice(0,10):undefined}
       :x)}));
-    toast(paying?`Marked paid — ${fmtINR(p.amount,true)} released back to net worth`:'Moved back to expected','g');
+    toast(paying?`Marked paid. ${fmtINR(p.amount,true)} released back to net worth`:'Moved back to expected','g');
   };
 
-  // Timing analysis — an expected outflow is only useful if you know WHEN it lands.
+  // Timing analysis: an expected outflow is only useful if you know WHEN it lands.
   const nowMK=`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
   const addMonths=(mk,n)=>{const[y,m]=mk.split('-').map(Number);const d=new Date(y,m-1+n,1);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;};
   const in3=addMonths(nowMK,3);
@@ -3620,7 +3620,7 @@ function PageProvision({data,setData,toast}){
         </div>
       </div>
       <input type="file" ref={provFileRef} accept=".csv" style={{display:'none'}} onChange={handleProvCSV}/>
-      <div className="alert ai mb3"><Ic n="prov" s={13}/>Money you expect to pay out later but have not spent yet — repairs, insurance renewals, school fees, medical contingencies. Recording them here <strong>reserves the amount against your net worth</strong>, so your available balance reflects what is genuinely free to spend.</div>
+      <div className="alert ai mb3"><Ic n="prov" s={13}/>Money you expect to pay out later but have not spent yet: repairs, insurance renewals, school fees, medical contingencies. Recording them here <strong>reserves the amount against your net worth</strong>, so your available balance reflects what is genuinely free to spend.</div>
       <div className="g4 mb3">
         <div className="card"><div className="cl">Total Expected</div><div className="cv o">{fmtINR(total)}</div><div className="cm" style={{color:'var(--r)',fontWeight:600}}>Reserved against net worth</div></div>
         <div className="card"><div className="cl">Past Due</div><div className={`cv ${dueOverdue>0?'r':''}`}>{fmtINR(dueOverdue,true)}</div><div className="cm">{dueOverdue>0?'Paid already? Remove it':'Nothing overdue ✓'}</div></div>
@@ -3644,7 +3644,7 @@ function PageProvision({data,setData,toast}){
         <table>
           <thead><tr><th>Expected</th><th>Timing</th><th>For Whom</th><th>Category</th><th>What For</th><th className="num">Estimated ({CUR.sym})</th><th>Actions</th></tr></thead>
           <tbody>
-            {sorted.length===0&&<tr><td colSpan={7}><div style={{textAlign:'center',padding:'28px',color:'var(--n400)',fontSize:12.5}}>Nothing recorded. Add anything you know is coming — an insurance renewal, a school fee, a service due.</div></td></tr>}
+            {sorted.length===0&&<tr><td colSpan={7}><div style={{textAlign:'center',padding:'28px',color:'var(--n400)',fontSize:12.5}}>Nothing recorded. Add anything you know is coming: an insurance renewal, a school fee, a service due.</div></td></tr>}
             {sorted.map(p=>{
               const b=BUCKET[bucketOf(p)];
               return(
@@ -3656,7 +3656,7 @@ function PageProvision({data,setData,toast}){
                   <td style={{fontSize:12.5}}>{p.narration}</td>
                   <td className="num bold" style={{color:p.amount>0?'var(--o)':'var(--n400)'}}>{fmtNum(p.amount)}</td>
                   <td><div style={{display:'flex',gap:4}}>
-                    <button className="bic" onClick={()=>togglePaid(p)} aria-label="Mark as paid" title="Mark as paid — releases it from net worth, keeps the record" style={{color:'var(--g)'}}><Ic n="ok" s={11}/></button>
+                    <button className="bic" onClick={()=>togglePaid(p)} aria-label="Mark as paid" title="Mark as paid. Releases it from net worth, keeps the record" style={{color:'var(--g)'}}><Ic n="ok" s={11}/></button>
                     <button className="bic" onClick={()=>se(p)} aria-label="Edit expected outflow" title="Edit"><Ic n="edit" s={11}/></button>
                     <button className="bic red" onClick={()=>del(p.id)} aria-label="Remove expected outflow" title="Delete permanently"><Ic n="del" s={11}/></button>
                   </div></td>
@@ -3668,11 +3668,11 @@ function PageProvision({data,setData,toast}){
         </table>
       </div>
 
-      {/* Settled history — no longer affects net worth, kept as a record */}
+      {/* Settled history, no longer affects net worth, kept as a record */}
       {settled.length>0&&(
         <details className="dsec" style={{marginTop:14}}>
           <summary className="dsec-s"><span className="dsec-c"/>Already Paid
-            <span className="dsec-h">{settled.length} settled · {fmtINR(settledTotal,true)} — no longer reduces net worth</span>
+            <span className="dsec-h">{settled.length} settled · {fmtINR(settledTotal,true)} · no longer reduces net worth</span>
           </summary>
           <div className="dsec-b">
             <div className="tw">
@@ -3687,7 +3687,7 @@ function PageProvision({data,setData,toast}){
                       <td style={{fontSize:12.5}}>{p.narration}</td>
                       <td className="num bold" style={{color:'var(--n500)'}}>{fmtNum(p.amount)}</td>
                       <td><div style={{display:'flex',gap:4}}>
-                        <button className="bic" onClick={()=>togglePaid(p)} aria-label="Move back to expected" title="Not actually paid — move back"><Ic n="refresh" s={11}/></button>
+                        <button className="bic" onClick={()=>togglePaid(p)} aria-label="Move back to expected" title="Not actually paid, move back"><Ic n="refresh" s={11}/></button>
                         <button className="bic red" onClick={()=>del(p.id)} aria-label="Delete record" title="Delete permanently"><Ic n="del" s={11}/></button>
                       </div></td>
                     </tr>
@@ -3882,7 +3882,7 @@ function PageMaster({data,setData,toast}){
    → Paste Client ID into GOOGLE_CLIENT_ID below
 ══════════════════════════════════════════════════════════ */
 
-// ▼▼▼ Google Client ID — can be set via UI or hardcoded here ▼▼▼
+// ▼▼▼ Google Client ID: can be set via UI or hardcoded here ▼▼▼
 let GOOGLE_CLIENT_ID = (()=>{try{return localStorage.getItem('fm_google_client_id')||'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com';}catch{return 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com';}})();
 // ▲▲▲ ──────────────────────────────────────────────────────── ▲▲▲
 
@@ -3938,7 +3938,7 @@ const DriveService = {
     return this._initPromise;
   },
 
-  /* Silent token — uses existing Google session cookie, never shows a popup */
+  /* Silent token: uses existing Google session cookie, never shows a popup */
   _silentToken() {
     return new Promise((resolve, reject) => {
       if (!this._client) { reject(new Error('not ready')); return; }
@@ -3953,7 +3953,7 @@ const DriveService = {
     });
   },
 
-  /* Explicit connect — prompt:'' uses existing Google session; GIS falls back to picker if needed */
+  /* Explicit connect: prompt:'' uses existing Google session; GIS falls back to picker if needed */
   getToken() {
     return new Promise((resolve, reject) => {
       if (!this._client) { reject(new Error('GIS not initialised.')); return; }
@@ -4062,7 +4062,7 @@ function PageData({data,setData,toast}){
   const imp=()=>fileRef.current.click();
   const exportXLSX=()=>{
     try{
-      if(typeof XLSX==='undefined'){toast('SheetJS not loaded — check internet connection','r');return;}
+      if(typeof XLSX==='undefined'){toast('SheetJS not loaded. Check internet connection','r');return;}
       const wb=XLSX.utils.book_new();
       const months=getPeriodMonths(data.profile.periodStart,data.profile.periodEnd);
       // Same engine as every screen, so the workbook can never drift from the app.
@@ -4072,7 +4072,7 @@ function PageData({data,setData,toast}){
       const imonth=t=>t.month||(t.date||'').slice(0,7);
       // Sheet 1: Summary
       const sumRows=[
-        ['MiyeeCFO — Export',data.profile.name,new Date().toLocaleDateString('en-IN')],
+        ['MiyeeCFO Export',data.profile.name,new Date().toLocaleDateString('en-IN')],
         [],
         ['Period',`${data.profile.periodStart} to ${data.profile.periodEnd}`],
         ['Total Income (Period)',totalInc],
@@ -4152,7 +4152,7 @@ function PageData({data,setData,toast}){
     if(!d.recurring)d.recurring=[];
     if(!d.investmentTxs)d.investmentTxs=[];
     // Reconciliation: `opening` is the balance at the start of the reporting period.
-    // Left null for existing data — the Reconciliation page infers it and offers to adopt it.
+    // Left null for existing data. The Reconciliation page infers it and offers to adopt it.
     d.accounts=d.accounts.map(a=>({...a,opening:a.opening===undefined?null:a.opening}));
     // Ensure profile.features exists
     if(!d.profile.features)d.profile.features={investmentTracker:true};
@@ -4218,7 +4218,7 @@ function PageData({data,setData,toast}){
         const raw=JSON.parse(ev.target.result);
         const migrated=migrateData(raw);
         setData(cur=>{
-          // Merge by id — skip any record whose id already exists in current data
+          // Merge by id: skip any record whose id already exists in current data
           const existTx=new Set(cur.transactions.map(t=>t.id));
           const existAcc=new Set(cur.accounts.map(a=>a.id));
           const existCC=new Set(cur.creditCards.map(c=>c.id));
@@ -4278,7 +4278,7 @@ function PageData({data,setData,toast}){
         {[{l:'Transactions',v:data.transactions.length},{l:'Accounts',v:data.accounts.length},{l:'Credit Cards',v:data.creditCards.length},{l:'Loans',v:data.loans.length},{l:'Future Outflows',v:data.provisions.length},{l:'Expense Cats',v:data.expenseCategories.length},{l:'Income Cats',v:data.incomeCategories.length},{l:'Budget Limits',v:Object.keys(data.budgetLimits).length}].map(s=><div className="card" key={s.l}><div className="cl">{s.l}</div><div className="cv" style={{fontSize:18}}>{s.v}</div></div>)}
       </div>
 
-      <div className="alert as mb3"><Ic n="ok" s={13}/>Auto-backup active — data saved to browser storage on every change. Use Google Drive Sync for cloud backup.</div>
+      <div className="alert as mb3"><Ic n="ok" s={13}/>Auto-backup active. Data saved to browser storage on every change. Use Google Drive Sync for cloud backup.</div>
 
       {/* Backup preference */}
       <div className="card mb3">
@@ -4290,14 +4290,14 @@ function PageData({data,setData,toast}){
         </div>
         <p style={{fontSize:12.5,color:'var(--n500)',marginBottom:12}}>
           A backup writes a JSON snapshot to your Downloads folder. By default MiyeeCFO only backs up
-          when you press <strong>Export JSON File</strong> below — it never downloads on its own. Opt in here
+          when you press <strong>Export JSON File</strong> below. It never downloads on its own. Opt in here
           if you would rather it save a copy automatically when the app opens.
         </p>
         <div className="tgl" style={{display:'inline-flex'}}>
           {[
             {k:'off',l:'Manual Only'},
-            {k:'daily',l:'Auto — Once a Day'},
-            {k:'always',l:'Auto — Every Launch'},
+            {k:'daily',l:'Auto · Once a Day'},
+            {k:'always',l:'Auto · Every Launch'},
           ].map(o=>(
             <button key={o.k} className={`tgo ${autoBackup===o.k?'on':''}`}
               onClick={()=>{setAutoBackup(o.k);try{localStorage.setItem('fm_autobackup',o.k);}catch{}toast(`Backup: ${o.l}`,'g');}}>
@@ -4306,7 +4306,7 @@ function PageData({data,setData,toast}){
           ))}
         </div>
         <div style={{fontSize:11,color:'var(--n400)',marginTop:10,lineHeight:1.5}}>
-          <strong>Manual Only</strong> is the default — nothing downloads unless you ask. On the auto settings your
+          <strong>Manual Only</strong> is the default. Nothing downloads unless you ask. On the auto settings your
           browser may ask once for permission to download multiple files from this site; allow it, otherwise the
           snapshot is skipped. <strong>Every Launch</strong> writes a file on every refresh.
         </div>
@@ -4328,7 +4328,7 @@ function PageData({data,setData,toast}){
         </div>
         <div className="card" style={{border:'1.5px solid var(--g)',background:'var(--gxl)'}}>
           <div className="sh mb2"><div className="sh-t" style={{color:'var(--gd)'}}><Ic n="refresh" s={14} c="var(--g)"/>Merge Import Old Data</div></div>
-          <p style={{fontSize:12.5,color:'var(--n600)',marginBottom:12}}><strong>Adds</strong> transactions, accounts, cards, loans & provisions from an old backup into your current data — without overwriting anything. Duplicate IDs are skipped automatically.</p>
+          <p style={{fontSize:12.5,color:'var(--n600)',marginBottom:12}}><strong>Adds</strong> transactions, accounts, cards, loans & provisions from an old backup into your current data, without overwriting anything. Duplicate IDs are skipped automatically.</p>
           <button className="btn btn-p" onClick={()=>mergeRef.current.click()}><Ic n="up" s={13} c="#fff"/>Choose JSON to Merge</button>
         </div>
       </div>
@@ -4340,7 +4340,7 @@ function PageData({data,setData,toast}){
           <Ic n="prov" s={13}/>
           <div style={{fontSize:12}}>
             Have a JSON export from an older version of MiyeeCFO, FundFlow, or any prior release?<br/>
-            This importer <strong>auto-migrates</strong> your data — filling missing fields, converting old field names, and ensuring compatibility with the current schema.<br/>
+            This importer <strong>auto-migrates</strong> your data, filling missing fields, converting old field names, and ensuring compatibility with the current schema.<br/>
             <strong>Supported:</strong> FundFlow v3, v4, v5, FinManager v1–v5, and any JSON with transactions/accounts/creditCards arrays.
           </div>
         </div>
@@ -4407,7 +4407,7 @@ function PageDriveSync({data,setData,toast,syncMode,toggleSyncMode}){
       if(res.ok && DriveService._token){
         setStatus('connected');
         setMsg(res.restored
-          ? '✓ Reconnected automatically — session restored.'
+          ? '✓ Reconnected automatically. Session restored.'
           : 'Session token still active from earlier this session.');
       }
     });
@@ -4439,7 +4439,7 @@ function PageDriveSync({data,setData,toast,syncMode,toggleSyncMode}){
       await DriveService.save(data);
       const t=ts(); setLastSave(t);
       setStatus('connected');
-      setMsg(`Saved to Drive > ${DRIVE_FOLDER} > ${DRIVE_FILENAME} — ${t}`);
+      setMsg(`Saved to Drive > ${DRIVE_FOLDER} > ${DRIVE_FILENAME} · ${t}`);
       toast('Saved to Google Drive ✓','g');
     }catch(e){
       if(e.message==='TOKEN_EXPIRED'){
@@ -4466,7 +4466,7 @@ function PageDriveSync({data,setData,toast,syncMode,toggleSyncMode}){
         const cleanLocal={...data};delete cleanLocal._lastSyncedAt;delete cleanLocal._syncSource;
 
         if(localTime && localTime > driveTime){
-          // Local is newer — ask user
+          // Local is newer, ask user
           const useLocal=window.confirm(
             `Your LOCAL data is NEWER than Drive data.\n\nLocal: ${localTime.toLocaleString(CUR.locale)}\nDrive: ${driveTime.toLocaleString(CUR.locale)}\n\nClick OK to keep local (and push to Drive).\nClick Cancel to overwrite local with Drive data.`
           );
@@ -4474,21 +4474,21 @@ function PageDriveSync({data,setData,toast,syncMode,toggleSyncMode}){
             await DriveService.save(data);
             const t=ts(); setLastSave(t);
             setStatus('connected');
-            setMsg(`Local data was newer — pushed to Drive at ${t}`);
+            setMsg(`Local data was newer, pushed to Drive at ${t}`);
             toast('Local data pushed to Drive ✓','g');
           }else{
             setData(result.data);
             const t=ts(); setLastLoad(t);
             setStatus('connected');
-            setMsg(`Loaded older Drive data — ${t}`);
+            setMsg(`Loaded older Drive data · ${t}`);
             toast('Loaded from Drive ✓','g');
           }
         }else{
-          // Drive is newer or same — load it
+          // Drive is newer or same, load it
           setData(result.data);
           const t=ts(); setLastLoad(t);
           setStatus('connected');
-          setMsg(`Loaded from Drive > ${DRIVE_FOLDER} — ${t}${result.syncedAt?' (synced '+new Date(result.syncedAt).toLocaleString(CUR.locale)+')':''}`);
+          setMsg(`Loaded from Drive > ${DRIVE_FOLDER} · ${t}${result.syncedAt?' (synced '+new Date(result.syncedAt).toLocaleString(CUR.locale)+')':''}`);
           toast('Loaded from Google Drive ✓','g');
         }
       }else{
@@ -4534,7 +4534,7 @@ function PageDriveSync({data,setData,toast,syncMode,toggleSyncMode}){
           <div className="ptitle" style={{display:'flex',alignItems:'center',gap:10}}>
             <DriveLogo sz={24}/>Google Drive Sync
           </div>
-          <div className="psub">Cloud backup — save &amp; load from any device</div>
+          <div className="psub">Cloud backup · save &amp; load from any device</div>
         </div>
         <span style={{fontSize:11.5,fontWeight:700,color:sc[status],background:'var(--n50)',border:'1.5px solid var(--n200)',borderRadius:99,padding:'5px 13px'}}>
           ● {status.charAt(0).toUpperCase()+status.slice(1)}
@@ -4651,7 +4651,7 @@ function PageDriveSync({data,setData,toast,syncMode,toggleSyncMode}){
           </div>
           {syncMode==='auto'&&(
             <div style={{marginTop:10,padding:'8px 12px',background:'var(--gl)',borderRadius:'var(--r6)',fontSize:11.5,color:'var(--gd)',display:'flex',alignItems:'center',gap:6}}>
-              <Ic n="ok" s={12} c="var(--g)"/>Auto-sync active — changes save to Drive > {DRIVE_FOLDER} every 5 min. Free, no charges.
+              <Ic n="ok" s={12} c="var(--g)"/>Auto-sync active. Changes save to Drive > {DRIVE_FOLDER} every 5 min. Free, no charges.
             </div>
           )}
         </div>
@@ -4691,7 +4691,7 @@ function PageDriveSync({data,setData,toast,syncMode,toggleSyncMode}){
           {[
             {n:'1',t:'Paste Client ID',d:'Get a free Google OAuth Client ID from console.cloud.google.com and paste it in the field above.'},
             {n:'2',t:'Host on GitHub Pages',d:'Upload index.html to a GitHub repo. Enable Pages. Open the https:// URL.'},
-            {n:'3',t:'Sign in & Connect',d:'Click "Sign in with Google". A popup appears — log in and allow drive.file access.'},
+            {n:'3',t:'Sign in & Connect',d:'Click "Sign in with Google". A popup appears. Log in and allow drive.file access.'},
             {n:'4',t:'Auto or Manual Sync',d:`Toggle Auto to sync every 5 min, or keep Manual and click "☁ Sync". File saves to Drive > ${DRIVE_FOLDER} > ${DRIVE_FILENAME}.`},
           ].map(s=>(
             <div key={s.n} style={{display:'flex',gap:11,marginBottom:11,alignItems:'flex-start'}}>
@@ -4768,24 +4768,24 @@ function PageProfile({data,setData,toast}){
                 {editing
                   ?(opts
                     ?<select value={form[k]||'INR'} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))}>
-                       {opts.map(c=><option key={c} value={c}>{CURRENCIES[c].sym.trim()} · {c} — {CURRENCIES[c].name}</option>)}
+                       {opts.map(c=><option key={c} value={c}>{CURRENCIES[c].sym.trim()} · {c} · {CURRENCIES[c].name}</option>)}
                      </select>
                     :<input value={form[k]||''} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))}/>)
                   :<div style={{padding:'8px 11px',background:'var(--n50)',borderRadius:'var(--r6)',fontSize:13,color:'var(--n700)',border:'1.5px solid var(--n100)'}}>
-                     {k==='currency'&&CURRENCIES[profile[k]]?`${CURRENCIES[profile[k]].sym.trim()} · ${profile[k]} — ${CURRENCIES[profile[k]].name}`:(profile[k]||'–')}
+                     {k==='currency'&&CURRENCIES[profile[k]]?`${CURRENCIES[profile[k]].sym.trim()} · ${profile[k]} · ${CURRENCIES[profile[k]].name}`:(profile[k]||'–')}
                    </div>}
               </div>
             ))}
             <div className="fg" style={{gridColumn:'1 / -1'}}>
               <div style={{fontSize:11,color:'var(--n400)',lineHeight:1.5}}>
-                Currency is global — it changes the symbol, digit grouping and short-scale
+                Currency is global. It changes the symbol, digit grouping and short-scale
                 (Indian lakh/crore vs thousand/million) everywhere in the app. It does not convert
                 existing amounts; the numbers you have entered stay as they are.
               </div>
             </div>
           </div>
 
-          {/* APPEARANCE — device preference, always editable */}
+          {/* APPEARANCE: device preference, always editable */}
           <div style={{marginBottom:16,background:'var(--bl)',border:'1.5px solid rgba(37,99,235,.2)',borderRadius:8,padding:'14px 16px'}}>
             <div style={{fontWeight:700,fontSize:13,color:'var(--b)',marginBottom:10,display:'flex',alignItems:'center',gap:7}}>🎨 Appearance</div>
             <div className="f2">
@@ -4796,7 +4796,7 @@ function PageProfile({data,setData,toast}){
                 </select>
               </div>
               <div className="fg" style={{display:'flex',alignItems:'flex-end'}}>
-                <div style={{fontSize:15,fontWeight:700,color:'var(--n700)'}}>The quick brown fox — 12,345</div>
+                <div style={{fontSize:15,fontWeight:700,color:'var(--n700)'}}>The quick brown fox · 12,345</div>
               </div>
             </div>
             <div style={{fontSize:11,color:'var(--n400)',marginTop:8,lineHeight:1.5}}>
@@ -4809,7 +4809,7 @@ function PageProfile({data,setData,toast}){
           {/* DYNAMIC PERIOD SECTION */}
           <div style={{background:'var(--gl)',border:'1.5px solid var(--g)',borderRadius:'var(--r8)',padding:'14px 16px'}}>
             <div style={{fontWeight:700,fontSize:13,color:'var(--gd)',marginBottom:3,display:'flex',alignItems:'center',gap:7}}><Ic n="cal" s={14} c="var(--g)"/>Budget Period Settings</div>
-            <div style={{fontSize:12,color:'var(--gd)',opacity:.8,marginBottom:12}}>All charts, P&L, and Budget pages use this period. Change anytime — not locked to a financial year.</div>
+            <div style={{fontSize:12,color:'var(--gd)',opacity:.8,marginBottom:12}}>All charts, P&L, and Budget pages use this period. Change anytime. Not locked to a financial year.</div>
             <div className="f2">
               <div className="fg">
                 <label style={{color:'var(--gd)'}}>Period Start (Month)</label>
@@ -5163,7 +5163,7 @@ function PageDebtOptimizer({data,setData,toast}){
 
       <div className="alert ai mb3"><Ic n="prov" s={13}/>
         <strong>{strategy==='avalanche'?'Avalanche Strategy':'Snowball Strategy'}:</strong>{' '}
-        {strategy==='avalanche'?'Pay minimums on all debts, throw extra cash at HIGHEST interest rate debt first. Mathematically optimal — saves the most interest.':'Pay minimums on all debts, throw extra cash at SMALLEST balance first. Psychologically rewarding — builds momentum.'}
+        {strategy==='avalanche'?'Pay minimums on all debts, throw extra cash at HIGHEST interest rate debt first. Mathematically optimal. Saves the most interest.':'Pay minimums on all debts, throw extra cash at SMALLEST balance first. Psychologically rewarding. Builds momentum.'}
       </div>
 
       {/* Priority List */}
@@ -5287,7 +5287,7 @@ function PageAI({data,toast}){
     const totalEMI=loans.reduce((s,l)=>s+l.emi,0);
     const totalLimit=creditCards.reduce((s,c)=>s+c.limit,0);
     const f=n=>Math.round(n);// compact numbers
-    // Canonical engine figures — investments, balance cash and the true net worth.
+    // Canonical engine figures: investments, balance cash and the true net worth.
     const fin=computeFin(data,months);
 
     // Top 6 expense cats only
@@ -5369,7 +5369,7 @@ GOALS:${(()=>{
       let text='';
 
       if(provider==='groq'&&hasKey){
-        // ── Groq API (FREE — uses Llama/Mixtral, very fast) ──
+        // ── Groq API (FREE: uses Llama/Mixtral, very fast) ──
         const response=await fetch('https://api.groq.com/openai/v1/chat/completions',{
           method:'POST',
           headers:{'Content-Type':'application/json','Authorization':`Bearer ${apiKey.trim()}`},
@@ -5410,7 +5410,7 @@ GOALS:${(()=>{
         let lastErr='';
         for(const model of modelsToTry){
           try{
-            // Key goes in a header, not the query string — query params leak into
+            // Key goes in a header, not the query string. Query params leak into
             // proxy logs, browser history and Referer headers.
             const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{
               method:'POST',
@@ -5442,7 +5442,7 @@ GOALS:${(()=>{
         if(!text)throw new Error(`All Gemini models exhausted. Last error: ${lastErr}\n\nTip: Your free tier quota may be depleted. Wait 15-60 seconds and retry, or try a different model from the dropdown.`);
 
       }else{
-        // ── Anthropic Claude API (default — works inside claude.ai artifacts OR with API key) ──
+        // ── Anthropic Claude API (default: works inside claude.ai artifacts OR with API key) ──
         const headers={'Content-Type':'application/json'};
         if(hasKey){
           headers['x-api-key']=apiKey.trim();
@@ -5477,7 +5477,7 @@ GOALS:${(()=>{
       }
       setKeyStatus('saved');
     }catch(err){
-      const errMsg=`AI Error: ${err.message||'Connection failed'}.\n\nIf you are on GitHub Pages, make sure your API key is correct. For Anthropic keys, CORS may block direct browser calls — try using OpenAI or Gemini as the provider instead.`;
+      const errMsg=`AI Error: ${err.message||'Connection failed'}.\n\nIf you are on GitHub Pages, make sure your API key is correct. For Anthropic keys, CORS may block direct browser calls. Try using OpenAI or Gemini as the provider instead.`;
       if(isChat){setChatHistory(h=>[...h,{role:'user',content:userPrompt},{role:'assistant',content:errMsg}]);}
       else{setResult(errMsg);}
       if(err.message?.includes?.('401')||err.message?.includes?.('invalid'))setKeyStatus('invalid');
@@ -5489,11 +5489,11 @@ GOALS:${(()=>{
   const PROMPTS=[
     {id:'health',icon:'🏥',label:'Financial Health Check',color:'#7c3aed',bg:'#f5f3ff',desc:'Overall assessment of your finances with a health score breakdown',prompt:'Give me a comprehensive financial health check. Score my finances 0-100 across: savings rate, debt management, liquidity, investment readiness, and expense control. For each dimension, explain what I am doing well and what needs attention. End with a 30-60-90 day action plan.'},
     {id:'expense',icon:'📊',label:'Expense Deep Dive',color:'#dc2626',bg:'#fef2f2',desc:'Analyze spending patterns, find leaks, and suggest cuts',prompt:`Do a deep-dive analysis of my expenses. Identify: (1) Which categories are over budget and by how much? (2) What are the top 3 areas where I can realistically cut 10-20% spending? (3) Any unusual spending patterns or spikes in specific months? (4) How does my expense structure compare to the ideal 50-30-20 rule? Give specific ${CUR.sym} amounts I could save.`},
-    {id:'income',icon:'💰',label:'Income & Savings Analysis',color:'#059669',bg:'#ecfdf5',desc:'Income stability, savings trajectory, and growth opportunities',prompt:`Analyze my income and savings. Cover: (1) Income stability and diversification — am I too dependent on one source? (2) Monthly savings trend — is it improving or declining? (3) What savings rate should I target and how to get there? (4) At my current savings rate, project my wealth in 1, 3, and 5 years. (5) Suggest 2-3 ways to increase income or optimise tax savings available in my country.`},
-    {id:'debt',icon:'⚡',label:'Debt Strategy',color:'#d97706',bg:'#fffbeb',desc:'Optimal payoff plan for loans and credit cards',prompt:`Create a debt optimization strategy. Analyze: (1) Total debt burden vs income — is it sustainable? (2) Rank my debts by interest cost and suggest avalanche vs snowball approach. (3) Should I prepay any loan? Calculate interest saved with an extra payment. (4) CC utilization impact on credit score. (5) Give me a month-by-month debt freedom timeline.`},
+    {id:'income',icon:'💰',label:'Income & Savings Analysis',color:'#059669',bg:'#ecfdf5',desc:'Income stability, savings trajectory, and growth opportunities',prompt:`Analyze my income and savings. Cover: (1) Income stability and diversification: am I too dependent on one source? (2) Monthly savings trend: is it improving or declining? (3) What savings rate should I target and how to get there? (4) At my current savings rate, project my wealth in 1, 3, and 5 years. (5) Suggest 2-3 ways to increase income or optimise tax savings available in my country.`},
+    {id:'debt',icon:'⚡',label:'Debt Strategy',color:'#d97706',bg:'#fffbeb',desc:'Optimal payoff plan for loans and credit cards',prompt:`Create a debt optimization strategy. Analyze: (1) Total debt burden vs income: is it sustainable? (2) Rank my debts by interest cost and suggest avalanche vs snowball approach. (3) Should I prepay any loan? Calculate interest saved with an extra payment. (4) CC utilization impact on credit score. (5) Give me a month-by-month debt freedom timeline.`},
     {id:'emergency',icon:'🛡️',label:'Emergency Fund Review',color:'#0d9488',bg:'#f0fdfa',desc:'Is your safety net adequate? Gap analysis and action plan',prompt:'Review my emergency fund preparedness. Analyze: (1) How many months of essential expenses can I currently cover? (2) What is the ideal target for my situation? (3) Where should I park the emergency fund (savings account, liquid fund, FD split)? (4) How long will it take to fully fund it at current savings rate? (5) What risks am I exposed to without adequate emergency funds?'},
     {id:'tax',icon:'📋',label:'Tax Optimization Tips',color:'#1d4ed8',bg:'#eff6ff',desc:'Tax planning strategies for your country',prompt:`Based on my income and expense pattern, suggest tax optimisation strategies. ${TAX_HINT()} Cover: (1) Which deductions or allowances am I likely under-using? (2) Any choice of tax regime or filing status worth reviewing? (3) Reliefs for medical insurance, education loan interest and housing. (4) Tax-advantaged retirement contributions. (5) Estimate potential tax savings with specific amounts.`},
-    {id:'month',icon:'📅',label:'Month-over-Month Trends',color:'#7c3aed',bg:'#f5f3ff',desc:'Compare months, spot trends, and forecast next month',prompt:'Analyze month-over-month trends in my financial data. (1) Which month was best/worst for savings? Why? (2) Are expenses trending up or down? Any seasonal patterns? (3) Income consistency — any gaps or irregularities? (4) Project next month\'s likely income, expense, and surplus based on the trend. (5) What should I watch out for next month?'},
+    {id:'month',icon:'📅',label:'Month-over-Month Trends',color:'#7c3aed',bg:'#f5f3ff',desc:'Compare months, spot trends, and forecast next month',prompt:'Analyze month-over-month trends in my financial data. (1) Which month was best/worst for savings? Why? (2) Are expenses trending up or down? Any seasonal patterns? (3) Income consistency: any gaps or irregularities? (4) Project next month\'s likely income, expense, and surplus based on the trend. (5) What should I watch out for next month?'},
     {id:'custom',icon:'💬',label:'Ask AI Anything',color:'#475569',bg:'#f8fafc',desc:'Start a conversation with AI about your finances',prompt:null},
   ];
 
@@ -5548,7 +5548,7 @@ GOALS:${(()=>{
           <div style={{flex:1}}>
             <div style={{fontSize:16,fontWeight:800,marginBottom:4}}>Your Personal Finance AI Advisor</div>
             <div style={{fontSize:12,opacity:.7,lineHeight:1.6}}>
-              Select an analysis below or ask a custom question. The AI reads your actual financial data — income, expenses, loans, credit cards, budget, and provisions — to give you personalized, data-driven insights in the context of your selected currency and country.
+              Select an analysis below or ask a custom question. The AI reads your actual financial data (income, expenses, loans, credit cards, budget, and provisions) to give you personalized, data-driven insights in the context of your selected currency and country.
             </div>
           </div>
           <div style={{textAlign:'right',flexShrink:0}}>
@@ -5588,14 +5588,14 @@ GOALS:${(()=>{
         {isInsideArtifact&&(
           <div className="alert as" style={{marginBottom:0}}>
             <Ic n="ok" s={13}/>
-            Running inside Claude.ai — AI is available automatically. No API key needed.
+            Running inside Claude.ai. AI is available automatically. No API key needed.
           </div>
         )}
 
         {!isInsideArtifact&&(
           <div>
             <div style={{fontSize:12.5,color:'var(--n500)',marginBottom:12,lineHeight:1.6}}>
-              To use AI Insights on GitHub Pages or local hosting, add an API key below. Your key is stored only in your browser's localStorage — never sent anywhere except the AI provider.
+              To use AI Insights on GitHub Pages or local hosting, add an API key below. Your key is stored only in your browser's localStorage, never sent anywhere except the AI provider.
             </div>
 
             {/* Provider Selection */}
@@ -5619,7 +5619,7 @@ GOALS:${(()=>{
             <div className="alert ai mb2" style={{marginBottom:10}}>
               <Ic n="prov" s={13}/>
               <div style={{fontSize:11.5}}>
-                {provider==='groq'&&<span><strong>Groq (Recommended — Completely Free):</strong> Go to <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style={{color:'var(--bd)',textDecoration:'underline'}}>console.groq.com/keys</a> → Sign up (free) → Create API Key → Paste below. Uses Llama 3.3 70B. No credit card needed. 30 requests/minute free.</span>}
+                {provider==='groq'&&<span><strong>Groq (Recommended, Completely Free):</strong> Go to <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style={{color:'var(--bd)',textDecoration:'underline'}}>console.groq.com/keys</a> → Sign up (free) → Create API Key → Paste below. Uses Llama 3.3 70B. No credit card needed. 30 requests/minute free.</span>}
                 {provider==='gemini'&&<span><strong>Google Gemini:</strong> Go to <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style={{color:'var(--bd)',textDecoration:'underline'}}>aistudio.google.com/apikey</a> → Create API Key → Paste below. Note: Free tier may require billing account linked (no charge). If quota errors persist, use Groq instead.</span>}
                 {provider==='openai'&&<span><strong>OpenAI:</strong> Go to <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" style={{color:'var(--bd)',textDecoration:'underline'}}>platform.openai.com/api-keys</a> → Create new key → Paste below. Uses GPT-4o-mini. Requires credits.</span>}
                 {provider==='anthropic'&&<span><strong>Anthropic Claude:</strong> Go to <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" style={{color:'var(--bd)',textDecoration:'underline'}}>console.anthropic.com</a> → API Keys → Create → Paste below. Note: CORS may block browser calls; if it fails, use Groq instead.</span>}
@@ -5776,8 +5776,8 @@ GOALS:${(()=>{
         <div className="sh mb2"><div className="sh-t"><Ic n="prov" s={14} c="var(--n400)"/>How AI Insights Works</div></div>
         <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12}}>
           {[
-            {n:'1',t:'Add Your API Key',d:'Get a free Gemini key or use OpenAI/Anthropic. Key stays in your browser only — never stored on any server.'},
-            {n:'2',t:'Real Numbers, Real Advice',d:'AI reads your actual transactions, balances, budgets, loans, and credit cards — not generic tips.'},
+            {n:'1',t:'Add Your API Key',d:'Get a free Gemini key or use OpenAI/Anthropic. Key stays in your browser only, never stored on any server.'},
+            {n:'2',t:'Real Numbers, Real Advice',d:'AI reads your actual transactions, balances, budgets, loans, and credit cards, not generic tips.'},
             {n:'3',t:'Local Context',d:'Tax-saving suggestions, investment planning and EMI optimisation matched to your selected currency and country.'},
           ].map(s=>(
             <div key={s.n} style={{display:'flex',gap:10,alignItems:'flex-start'}}>
@@ -5910,7 +5910,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
             <div className="stl-sub">
               <strong>Balance Cash</strong> after the {fmtINR(fin.invPeriod,true)} you have invested this period.
               Every entry below comes off your surplus and is added straight back to <strong>Net Worth</strong> as an
-              asset — nothing is treated as an expense, so your expense ratios stay honest.
+              asset. Nothing is treated as an expense, so your expense ratios stay honest.
             </div>
             <button className="btn btn-s btn-sm" style={{marginTop:10}} onClick={()=>setPage('dashboard')}>
               <Ic n="home" s={11}/>See it on the Dashboard
@@ -5937,7 +5937,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
         </div>
         <div className="stl-foot">
           <span>Net Worth <strong>{fmtINR(fin.netWorth,true)}</strong> = liquid {fmtINR(fin.liquidNetWorth,true)} + investments {fmtINR(fin.invCorpus,true)}</span>
-          <span>Do not also record these as expenses — that would count the same money twice.</span>
+          <span>Do not also record these as expenses. That would count the same money twice.</span>
         </div>
       </div>
 
@@ -6087,7 +6087,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                         <td style={{fontSize:11}}>{instr?<><span style={{fontSize:9,fontWeight:700,color:TC[instr.type]||'var(--n500)',background:TBG[instr.type]||'var(--n100)',padding:'1px 5px',borderRadius:4,marginRight:4}}>{instr.type}</span>{instr.name}</>:'–'}</td>
                         <td className="num" style={{fontFamily:'var(--m)',fontWeight:700}}>{fmtINR(tx.amount,true)}</td>
                         <td className="num" style={{fontFamily:'var(--m)',color:'var(--g)',fontWeight:700}}>{fmtINR(txCorpus,true)}</td>
-                        <td style={{color:'var(--n400)',fontSize:11}}>{tx.notes||'—'}</td>
+                        <td style={{color:'var(--n400)',fontSize:11}}>{tx.notes||'–'}</td>
                         <td><button className="bic red" onClick={()=>delTx(tx.id)}><Ic n="del" s={11}/></button></td>
                       </tr>
                     );
@@ -6109,13 +6109,13 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
               <div className="f2 mb2">
                 <div className="fg fg-full"><label>Goal *</label>
                   <select value={form.goalId} onChange={e=>ff({goalId:e.target.value,instrumentId:''})}>
-                    <option value="">— Select Goal —</option>
+                    <option value="">Select Goal…</option>
                     {allGoals.filter(g=>(g.instruments||[]).length>0).map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
                   </select>
                 </div>
                 <div className="fg fg-full"><label>Instrument *</label>
                   <select value={form.instrumentId} onChange={e=>ff({instrumentId:e.target.value,amount:String(selInstrList.find(i=>i.id===e.target.value)?.amount||'')})}>
-                    <option value="">— Select Instrument —</option>
+                    <option value="">Select Instrument…</option>
                     {selInstrList.map(i=><option key={i.id} value={i.id}>{i.name} ({i.type} · {fmtINR(i.amount,true)}/mo)</option>)}
                   </select>
                 </div>
@@ -6168,7 +6168,7 @@ function PageForecast({data,toast}){
   const avgExp=pExp/fcD*30;
   const netSav=avgInc-avgExp;
 
-  // ── Liquid NW — matches Dashboard formula ──
+  // ── Liquid NW: matches Dashboard formula ──
   const _bankBal=accounts.filter(a=>a.type==='bank').reduce((s,a)=>s+(a.balance||0),0);
   const _cashBal=accounts.filter(a=>a.type==='cash'||a.type==='wallet').reduce((s,a)=>s+(a.balance||0),0);
   const _fdBal=accounts.filter(a=>a.type==='fd').reduce((s,a)=>s+(a.balance||0),0);
@@ -6450,7 +6450,7 @@ function PageGoals({data,setData,toast}){
   const INV_TYPES=['SIP','Mutual Fund','RD','FD','PPF'];
   // SIP/MF FV formula
   const sipFV=(amt,rate,yr)=>{const r2=rate/100/12,n=Math.round(yr*12);if(!amt||!yr)return 0;return r2===0?amt*n:amt*(((1+r2)**n-1)/r2)*(1+r2);};
-  // Lump-sum FV (for FD/RD/PPF where full corpus sits post-maturity — here we use SIP-FV since contributions are periodic)
+  // Lump-sum FV (for FD/RD/PPF where full corpus sits post-maturity; here we use SIP-FV since contributions are periodic)
   const getCorpus=(instr)=>{
     if(!instr.amount||!instr.years)return 0;
     if(instr.type==='SIP'||instr.type==='Mutual Fund'||instr.type==='RD'){
@@ -6460,7 +6460,7 @@ function PageGoals({data,setData,toast}){
       }
       return sipFV(instr.amount,instr.returnRate||0,instr.years);
     }
-    // FD/PPF — lump-sum compound
+    // FD/PPF: lump-sum compound
     return instr.amount*(1+instr.returnRate/100)**instr.years;
   };
   // Goal form state
@@ -6718,7 +6718,7 @@ function PageGoals({data,setData,toast}){
         {goals.length===0&&<div className="card" style={{gridColumn:'1/-1',textAlign:'center',padding:'32px',color:'var(--n400)'}}>
           <div style={{fontSize:32,marginBottom:10}}>🎯</div>
           <div style={{fontWeight:700,fontSize:14,marginBottom:6}}>No goals yet</div>
-          <div style={{fontSize:12.5,marginBottom:16}}>Create your first savings goal — house down payment, vacation, emergency fund top-up…</div>
+          <div style={{fontSize:12.5,marginBottom:16}}>Create your first savings goal: house down payment, vacation, emergency fund top-up…</div>
           <button className="btn btn-p" onClick={open}><Ic n="plus" s={13} c="#fff"/>Add Your First Goal</button>
         </div>}
       </div>
@@ -6781,13 +6781,13 @@ function PageRecurring({data,setData,toast}){
         <div className="fg"><label>Start / Next Date</label><input type="date" value={form.startDate} onChange={e=>setForm(f=>({...f,startDate:e.target.value}))}/></div>
         <div className="fg"><label>🎯 Link to Savings Goal (optional)</label>
           <select value={form.goalId||''} onChange={e=>setForm(f=>({...f,goalId:e.target.value}))}>
-            <option value="">— No goal —</option>
+            <option value="">No goal</option>
             {goals.map(g=><option key={g.id} value={g.id}>{g.name} ({CUR.sym}{g.targetAmount?.toLocaleString(CUR.locale)})</option>)}
           </select>
         </div>
         {form.goalId&&<div className="fg"><label>📈 Link to Instrument (optional)</label>
           <select value={form.investmentId||''} onChange={e=>setForm(f=>({...f,investmentId:e.target.value}))}>
-            <option value="">— No instrument —</option>
+            <option value="">No instrument</option>
             {(goals.find(g=>g.id===form.goalId)?.instruments||[]).map(i=><option key={i.id} value={i.id}>{i.name} ({i.type})</option>)}
           </select>
         </div>}
@@ -6808,7 +6808,7 @@ function PageRecurring({data,setData,toast}){
       {recurring.length===0?<div className="card" style={{textAlign:'center',padding:'32px',color:'var(--n400)'}}>
         <div style={{fontSize:32,marginBottom:10}}>🔁</div>
         <div style={{fontWeight:700,fontSize:14,marginBottom:6}}>No recurring rules yet</div>
-        <div style={{fontSize:12.5,marginBottom:16}}>Add rules for monthly salary, rent, subscriptions, EMIs — they auto-generate transactions on app open.</div>
+        <div style={{fontSize:12.5,marginBottom:16}}>Add rules for monthly salary, rent, subscriptions, EMIs. They auto-generate transactions on app open.</div>
         <button className="btn btn-p" onClick={open}><Ic n="plus" s={13} c="#fff"/>Add First Rule</button>
       </div>:(
         <div className="tw">
@@ -6860,7 +6860,7 @@ function QuickAdd({data,setData,toast,onClose}){
   useEffect(()=>{setTimeout(()=>amtRef.current&&amtRef.current.focus(),120);},[]);
 
   // Merchant → category/mode, learned from history. Only ever fills a blank field,
-  // or replaces a value we ourselves auto-filled — never overwrites a manual choice.
+  // or replaces a value we ourselves auto-filled. Never overwrites a manual choice.
   const onMerchant=v=>{
     setMerchant(v);
     const c=inferCategory(data.transactions,v,type);
@@ -6880,7 +6880,7 @@ function QuickAdd({data,setData,toast,onClose}){
     return true;
   };
   const save=()=>{if(commit())onClose();};
-  // Ctrl/Cmd+Enter keeps the sheet open for the next entry — the fast path when
+  // Ctrl/Cmd+Enter keeps the sheet open for the next entry, the fast path when
   // logging a batch of receipts. Category/mode/date are deliberately retained.
   const saveAndNext=()=>{
     if(!commit())return;
@@ -6908,16 +6908,16 @@ function QuickAdd({data,setData,toast,onClose}){
           <button className={`tgo${type==='expense'?' on':''}`} style={{flex:1}} onClick={()=>{setType('expense');setCategory('');}}>💸 Expense</button>
           <button className={`tgo${type==='income'?' on':''}`} style={{flex:1}} onClick={()=>{setType('income');setCategory('');}}>💰 Income</button>
         </div>
-        {/* Amount — big, prominent */}
+        {/* Amount: big, prominent */}
         <div style={{position:'relative',marginBottom:14}}>
           <span style={{position:'absolute',left:14,top:'50%',transform:'translateY(-50%)',fontFamily:'var(--m)',fontSize:22,fontWeight:700,color:'var(--n400)',pointerEvents:'none'}}>{CUR.sym}</span>
           <input ref={amtRef} type="number" placeholder="0" value={amount} onChange={e=>setAmount(e.target.value)}
             style={{width:'100%',padding:'14px 14px 14px 38px',fontSize:26,fontWeight:800,fontFamily:'var(--m)',border:`2px solid ${type==='expense'?'var(--r)':'var(--g)'}`,borderRadius:12,color:'var(--n900)',background:'var(--W)',outline:'none',letterSpacing:-1}}/>
         </div>
         {/* Category */}
-        {/* Merchant first — typing it fills category and payment mode below */}
+        {/* Merchant first: typing it fills category and payment mode below */}
         <div className="fg" style={{marginBottom:12}}>
-          <label>Merchant / Vendor <span style={{fontWeight:400,textTransform:'none',color:'var(--n400)'}}>optional — fills category</span></label>
+          <label>Merchant / Vendor <span style={{fontWeight:400,textTransform:'none',color:'var(--n400)'}}>optional · fills category</span></label>
           <input list="qa-merchant-list" placeholder="e.g. Swiggy, DMart…" value={merchant} onChange={e=>onMerchant(e.target.value)}/>
           <datalist id="qa-merchant-list">{[...new Set(data.transactions.filter(t=>t.merchant).map(t=>t.merchant))].map(m=><option key={m} value={m}/>)}</datalist>
         </div>
@@ -6968,7 +6968,7 @@ function QuickAdd({data,setData,toast,onClose}){
    NAVIGATION
    Nine destinations instead of twenty. Pages that answer the same
    question are now tabs within one destination rather than separate
-   sidebar entries — the leaf page ids are unchanged, so every
+   sidebar entries. The leaf page ids are unchanged, so every
    setPage('cc') call elsewhere in the app still works.
 ══════════════════════════════════════ */
 const NAV=[
@@ -7050,7 +7050,7 @@ function App(){
   }catch(e){};},[data]);
 
   // ── AUTO BACKUP: write a JSON snapshot to Downloads when the app opens ──
-  // Modes: 'off' (default — MANUAL ONLY, no download on launch), 'daily', 'always'.
+  // Modes: 'off' (default: MANUAL ONLY, no download on launch), 'daily', 'always'.
   // Default is OFF: a first-time user must never see an unexpected download, which
   // reads as malware. Auto-download happens only after they opt in from Settings.
   const autoBackupRan=useRef(false);
@@ -7161,7 +7161,7 @@ function App(){
   const [toast,setToast]=useState(null);
   // 4th arg turns the toast into an undoable one: showToast(msg,type,'Undo',fn)
   const showToast=(msg,type,action,onAction)=>setToast({msg,type,action,onAction,k:Date.now()});
-  // Restore a previous `data` snapshot — the generic undo used by every delete.
+  // Restore a previous `data` snapshot. The generic undo used by every delete.
   const undoTo=snapshot=>()=>{setData(snapshot);showToast('Restored','g');};
   const [mobMenu,setMobMenu]=useState(false);
   const [quickAdd,setQuickAdd]=useState(false);
@@ -7316,7 +7316,7 @@ function App(){
                 return(
                   <div key={item.id} role="link" tabIndex={0}
                     aria-current={on?'page':undefined}
-                    aria-label={locked?`${item.l} (locked — enable Investment Tracker)`:item.l}
+                    aria-label={locked?`${item.l} (locked: enable Investment Tracker)`:item.l}
                     className={`sb-item ${on&&!locked?'on':''} ${locked?'sb-disabled':''}`}
                     style={locked?{opacity:.45,cursor:'not-allowed'}:{}}
                     onClick={()=>locked?goto(item.id):goto(item.id)}
@@ -7346,7 +7346,7 @@ function App(){
         <div className="topbar">
           <div className="tb-left">
             <div className="tb-title">{GROUP_TITLE[activeRoot]||PT[pg]}</div>
-            {/* Period is changed here, where it is read — not buried in a settings page. */}
+            {/* Period is changed here, where it is read, not buried in a settings page. */}
             {!isMobile&&(
               <div className="per-pick" title="Reporting period">
                 <input type="month" value={data.profile.periodStart} max={data.profile.periodEnd}
@@ -7410,7 +7410,7 @@ function App(){
           </div>
         </div>
 
-        {/* Sub-page tabs — only where a destination actually has more than one view */}
+        {/* Sub-page tabs: only where a destination actually has more than one view */}
         {curTabs.length>1&&(
           <div className="tabs" role="tablist" aria-label={`${GROUP_TITLE[activeRoot]||''} sections`}>
             {curTabs.map(t=>(
@@ -7434,7 +7434,7 @@ function App(){
 
       {quickAdd&&<QuickAdd data={data} setData={setData} toast={showToast} onClose={()=>setQuickAdd(false)}/>}
 
-      {/* Shortcut cheat-sheet — press ? */}
+      {/* Shortcut cheat-sheet: press ? */}
       {showKeys&&(
         <div className="ov" onClick={()=>setShowKeys(false)}>
           <div className="modal" style={{maxWidth:380}} onClick={e=>e.stopPropagation()}>
