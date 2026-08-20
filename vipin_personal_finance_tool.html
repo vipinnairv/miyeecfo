@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Personal Finance Made Simple — by Vipin Nair</title>
-<meta name="description" content="A complete personal finance planner for Indian households — insurance, emergency fund, SIPs, gold, tax. Built by Vipin Nair." />
+<title>Personal Finance Made Simple · by Vipin Nair</title>
+<meta name="description" content="A complete personal finance planner for Indian households: insurance, emergency fund, SIPs, gold, tax. Built by Vipin Nair." />
 
 <!-- React + Babel via CDN -->
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -16,7 +16,7 @@
 
 <style>
 /* ==========================================================================
-   DESIGN TOKENS — light mode, matches Vipin's PPT
+   DESIGN TOKENS: light mode, matches Vipin's PPT
    ========================================================================== */
 :root {
   --ink:         #0F1B2D;
@@ -665,26 +665,26 @@ input, select, textarea { font-family: inherit; font-size: 0.95rem; }
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 /* =============================================================================
-   DATA — FUNDS, INSURANCE PLANS, TAX RATES (April 2026)
+   DATA: FUNDS, INSURANCE PLANS, TAX RATES (April 2026)
    ============================================================================= */
 
 const MUTUAL_FUNDS = [
-  { name: "Parag Parikh Flexi Cap",           category: "Flexi Cap",        cagr3: 20.5, cagr5: 17.1, expense: 0.74, risk: "High",      note: "Gold standard — up to 35% international exposure (Alphabet, Amazon)." },
+  { name: "Parag Parikh Flexi Cap",           category: "Flexi Cap",        cagr3: 20.5, cagr5: 17.1, expense: 0.74, risk: "High",      note: "Gold standard, with up to 35% international exposure (Alphabet, Amazon)." },
   { name: "HDFC Flexi Cap Direct",             category: "Flexi Cap",        cagr3: 20.3, cagr5: 20.9, expense: 0.76, risk: "High",      note: "Very consistent across market cycles." },
   { name: "UTI Nifty 50 Index Fund",           category: "Index / Passive",  cagr3: 14.5, cagr5: 14.8, expense: 0.20, risk: "Moderate",  note: "Lowest expense ratio. Core holding." },
   { name: "Motilal Oswal Midcap",              category: "Mid Cap",          cagr3: 25.9, cagr5: 21.1, expense: 0.75, risk: "High",      note: "Picks quality mid-caps early." },
   { name: "HDFC Mid Cap Opportunities",        category: "Mid Cap",          cagr3: 27.3, cagr5: 30.7, expense: 0.74, risk: "High",      note: "Largest & most consistent mid-cap (AUM ₹85k+ cr)." },
   { name: "Nippon India Small Cap",            category: "Small Cap",        cagr3: 24.2, cagr5: 33.9, expense: 0.64, risk: "Very High", note: "Well-diversified. For 7+ year SIPs." },
   { name: "HDFC Small Cap Fund",               category: "Small Cap",        cagr3: 24.5, cagr5: 31.7, expense: 0.66, risk: "Very High", note: "Strong research depth." },
-  { name: "Motilal Oswal NASDAQ 100 FoF",      category: "International",    cagr3: 20.0, cagr5: 18.5, expense: 0.27, risk: "High",      note: "Apple, Microsoft, Google — plus a USD hedge." },
+  { name: "Motilal Oswal NASDAQ 100 FoF",      category: "International",    cagr3: 20.0, cagr5: 18.5, expense: 0.27, risk: "High",      note: "Apple, Microsoft, Google, plus a USD hedge." },
   { name: "Quant ELSS Tax Saver",              category: "ELSS (Tax Saver)", cagr3: 19.5, cagr5: 22.0, expense: 0.77, risk: "High",      note: "For 80C tax-saving (Old Regime). 3-year lock-in." },
   { name: "ICICI Pru Equity & Debt",           category: "Aggressive Hybrid",cagr3: 18.0, cagr5: 17.5, expense: 1.05, risk: "Moderate",  note: "65–80% equity. Smoother ride for beginners." },
 ];
 
 const HEALTH_PLANS = [
-  { name: "HDFC ERGO Optima Secure",        csr: 97, hospitals: "15,000+", strength: "Doubles cover in 2 yrs; non-medical items covered", bestFor: "Most families — safest default" },
+  { name: "HDFC ERGO Optima Secure",        csr: 97, hospitals: "15,000+", strength: "Doubles cover in 2 yrs; non-medical items covered", bestFor: "Most families: safest default" },
   { name: "Niva Bupa ReAssure 2.0",         csr: 92, hospitals: "10,000+", strength: "Unlimited restoration; 'lock the clock' on age",       bestFor: "Younger couples, long-term cover" },
-  { name: "Care Supreme",                   csr: 96, hospitals: "11,400+", strength: "Modular — pay only for what you need",                 bestFor: "Budget-conscious buyers" },
+  { name: "Care Supreme",                   csr: 96, hospitals: "11,400+", strength: "Modular: pay only for what you need",                 bestFor: "Budget-conscious buyers" },
   { name: "Aditya Birla Activ One Max",     csr: 96, hospitals: "12,900+", strength: "Rewards fitness; wide OPD & day-care",                 bestFor: "Young professionals" },
   { name: "ICICI Lombard Complete Health",  csr: 97, hospitals: "10,600+", strength: "Strong service, fast cashless claims",                 bestFor: "Service-sensitive buyers" },
   { name: "Star Health Comprehensive",      csr: 99, hospitals: "14,000+", strength: "Largest senior-citizen network; Tier-2/3 friendly",    bestFor: "Senior citizens, smaller towns" },
@@ -711,7 +711,7 @@ const TAX_RATES = [
   { asset: "Stocks, Equity MFs, ELSS", shortTerm: "20% (< 12 months)",   longTerm: "12.5% over ₹1.25 L (≥ 12 months)", good: "long" },
   { asset: "Debt Mutual Funds",        shortTerm: "Slab rate",            longTerm: "12.5% (no indexation)" },
   { asset: "Gold ETFs / Gold Funds",   shortTerm: "Slab rate",            longTerm: "12.5% (≥ 12 months)" },
-  { asset: "SGB (held to maturity)",   shortTerm: "—",                    longTerm: "100% TAX-FREE ★", good: "long", special: true },
+  { asset: "SGB (held to maturity)",   shortTerm: "–",                    longTerm: "100% TAX-FREE ★", good: "long", special: true },
   { asset: "Real Estate",              shortTerm: "Slab (< 24 months)",   longTerm: "12.5% (≥ 24 months)" },
   { asset: "Bank FD / Savings",        shortTerm: "Slab rate",             longTerm: "Slab rate" },
   { asset: "Crypto / NFTs",            shortTerm: "30% + cess",            longTerm: "30% + cess", bad: true },
@@ -725,12 +725,12 @@ const RISK_PROFILES = {
 };
 
 const SAMPLE_PORTFOLIO = [
-  { label: "Core Equity — India (Nifty 50 + Flexi Cap)", pct: 40, color: "#0B5394" },
-  { label: "Growth Equity — Mid/Small Cap",              pct: 20, color: "#1E88E5" },
+  { label: "Core Equity: India (Nifty 50 + Flexi Cap)", pct: 40, color: "#0B5394" },
+  { label: "Growth Equity: Mid/Small Cap",              pct: 20, color: "#1E88E5" },
   { label: "International Equity (NASDAQ 100)",          pct: 10, color: "#14B8A6" },
   { label: "Gold (ETF / SGB)",                           pct: 10, color: "#D97706" },
   { label: "Debt / Stability (PPF, EPF, Bonds)",         pct: 15, color: "#6B7280" },
-  { label: "Optional — Crypto",                          pct: 5,  color: "#7C3AED" },
+  { label: "Optional: Crypto",                          pct: 5,  color: "#7C3AED" },
 ];
 
 /* =============================================================================
@@ -738,7 +738,7 @@ const SAMPLE_PORTFOLIO = [
    ============================================================================= */
 
 const STORAGE_KEY = "vipinPFM_v1";
-const FM_KEY = "ff_v5"; // FinSaveManager's localStorage key — shared sync bridge
+const FM_KEY = "ff_v5"; // FinSaveManager's localStorage key: shared sync bridge
 
 function loadState() {
   try {
@@ -806,7 +806,7 @@ function fmtPct(n, digits = 1) {
   return (n ?? 0).toFixed(digits) + "%";
 }
 
-// SIP future value — monthly compounding
+// SIP future value: monthly compounding
 function sipFV(monthly, annualRatePct, years) {
   const r = (annualRatePct / 100) / 12;
   const n = years * 12;
@@ -946,7 +946,7 @@ function HealthModule({ onBack }) {
       <div className="panel">
         <Eyebrow>Part 1 · Health Insurance</Eyebrow>
         <h2>How much cover do you really need?</h2>
-        <p>One hospital admission can wipe years of savings. Medical inflation runs 12–14% a year — significantly faster than normal inflation.</p>
+        <p>One hospital admission can wipe years of savings. Medical inflation runs 12–14% a year, significantly faster than normal inflation.</p>
 
         <div className="form-row">
           <div className="form-group">
@@ -984,7 +984,7 @@ function HealthModule({ onBack }) {
       </div>
 
       <div className="panel">
-        <h2>Best plans — April 2026</h2>
+        <h2>Best plans, April 2026</h2>
         <p>Rankings from independent advisors (Ditto, PolicyX, Onsurity) based on claim settlement ratio, hospital network, and features.</p>
         <div className="tbl-wrap">
           <table className="tbl">
@@ -1053,7 +1053,7 @@ function TermModule({ onBack }) {
       <div className="panel">
         <Eyebrow>Part 2 · Term Life Insurance</Eyebrow>
         <h2>Pure protection. Nothing fancy.</h2>
-        <p>If you die during the policy, your family gets a lump sum. If you survive, you get nothing — and that's why it's cheap. <strong>Avoid endowment plans, ULIPs, and money-back policies</strong> — they mix insurance with investment and give poor returns on both.</p>
+        <p>If you die during the policy, your family gets a lump sum. If you survive, you get nothing, and that's why it's cheap. <strong>Avoid endowment plans, ULIPs, and money-back policies.</strong> They mix insurance with investment and give poor returns on both.</p>
 
         <div className="form-row">
           <NumberInput label="Your Annual Income" value={income} onChange={setIncome} placeholder="1500000" hint="Take-home, not CTC" />
@@ -1086,7 +1086,7 @@ function TermModule({ onBack }) {
       </div>
 
       <div className="panel">
-        <h2>Best term plans — April 2026</h2>
+        <h2>Best term plans, April 2026</h2>
         <p>Premium shown for a 30-year-old non-smoking male, ₹1 Cr cover till age 70.</p>
         <div className="tbl-wrap">
           <table className="tbl">
@@ -1112,7 +1112,7 @@ function TermModule({ onBack }) {
         </div>
 
         <Callout title="If you want one answer without reading further" variant="accent">
-          <strong>Axis Max Life Smart Term Plan Plus</strong> — rated 4.7/5 by Ditto, highest CSR in the industry (99.70%). Safe default pick.
+          <strong>Axis Max Life Smart Term Plan Plus.</strong> Rated 4.7/5 by Ditto, highest CSR in the industry (99.70%). Safe default pick.
         </Callout>
       </div>
     </>
@@ -1155,7 +1155,7 @@ function AccidentModule({ onBack }) {
               sub={`${multiplier}× your annual income`}
               variant="brand" />
             <Callout title="Premiums are tiny" variant="green">
-              A ₹25 lakh PA cover costs just ₹1,000–3,000 per year. Skipping this is penny-wise, pound-foolish — especially for freelancers and field workers.
+              A ₹25 lakh PA cover costs just ₹1,000–3,000 per year. Skipping this is penny-wise, pound-foolish, especially for freelancers and field workers.
             </Callout>
           </div>
 
@@ -1241,7 +1241,7 @@ function EmergencyFundModule({ onBack }) {
       <div className="panel">
         <Eyebrow>Part 4 · Emergency Fund</Eyebrow>
         <h2>Your cushion for the unexpected</h2>
-        <p>An emergency fund absorbs job loss, medical surprises, and one-off expenses — so you don't have to sell investments at a bad time or take a high-interest loan.</p>
+        <p>An emergency fund absorbs job loss, medical surprises, and one-off expenses, so you don't have to sell investments at a bad time or take a high-interest loan.</p>
 
         <div className="form-row">
           <NumberInput label="Essential Monthly Expenses" value={monthlyExpense} onChange={setMonthlyExpense} placeholder="60000" hint="Rent + groceries + utilities + EMIs (skip discretionary)" />
@@ -1275,7 +1275,7 @@ function EmergencyFundModule({ onBack }) {
       </div>
 
       <div className="panel">
-        <h2>Where to park it — the 3-tier structure</h2>
+        <h2>Where to park it: the 3-tier structure</h2>
         <p>Don't put it all in one place. Balance instant access with better returns.</p>
 
         <div className="grid-2" style={{gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))"}}>
@@ -1299,7 +1299,7 @@ function EmergencyFundModule({ onBack }) {
         </div>
 
         <Callout title="Smart move for home-loan borrowers" variant="brand">
-          If you have a home loan, park your emergency fund in a <strong>Mortgage Offset Account</strong> — it reduces your loan principal for interest calculation, effectively earning the mortgage rate (8.5%) <em>tax-free</em>, while staying fully accessible.
+          If you have a home loan, park your emergency fund in a <strong>Mortgage Offset Account.</strong> It reduces your loan principal for interest calculation, effectively earning the mortgage rate (8.5%) <em>tax-free</em>, while staying fully accessible.
         </Callout>
       </div>
     </>
@@ -1364,7 +1364,7 @@ function SIPModule({ onBack }) {
 
       <div className="panel">
         <Eyebrow>Part 5 · SIP Calculator</Eyebrow>
-        <h2>See your money grow — with step-up SIPs</h2>
+        <h2>See your money grow: with step-up SIPs</h2>
         <p>An SIP (Systematic Investment Plan) is a monthly auto-debit into a mutual fund. The magic is compounding + step-up (increasing your SIP by 10% each year as your income grows).</p>
 
         <div className="form-row">
@@ -1422,7 +1422,7 @@ function SIPModule({ onBack }) {
       </div>
 
       <div className="panel">
-        <h2>Top mutual funds — April 2026</h2>
+        <h2>Top mutual funds, April 2026</h2>
         <p>Selected on 3-year and 5-year CAGR, consistency, expense ratio, and fund-manager track record. Past returns are not a guarantee.</p>
         <div className="tbl-wrap">
           <table className="tbl">
@@ -1459,7 +1459,7 @@ function SIPModule({ onBack }) {
           Regular plans have ~1% higher expense ratio. Over 20 years, that 1% difference = <strong>lakhs of rupees</strong> in your pocket. Buy via Groww, Kuvera, Zerodha Coin, INDmoney, or directly from the AMC website.
         </Callout>
 
-        <Callout title="Active vs Passive — the big 2025 finding" variant="brand">
+        <Callout title="Active vs Passive: the big 2025 finding" variant="brand">
           S&P SPIVA 2025: over 10 years, <strong>85% of actively managed large-cap funds FAILED to beat the Nifty 50</strong>. For large-cap exposure, just buy a Nifty 50 Index Fund. Active management still adds value in mid-cap and small-cap space.
         </Callout>
       </div>
@@ -1517,7 +1517,7 @@ function defaultTargetDate(years) {
 }
 
 function fmtTargetDate(ym) {
-  if (!ym) return "—";
+  if (!ym) return "–";
   const [y, m] = ym.split("-").map(Number);
   return new Date(y, (m || 1) - 1, 1).toLocaleDateString("en-IN", { month: "short", year: "numeric" });
 }
@@ -1569,16 +1569,16 @@ function GoalsModule({ onBack }) {
 
       <div className="panel">
         <Eyebrow>My Goals</Eyebrow>
-        <h2>Save with a purpose — one goal at a time</h2>
-        <p>Every rupee you invest should have a name on it. Create goals like Multipl does — retirement, your child's college, the down-payment — and we'll tell you the exact monthly SIP to get there.</p>
+        <h2>Save with a purpose: one goal at a time</h2>
+        <p>Every rupee you invest should have a name on it. Create goals like Multipl does (retirement, your child's college, the down-payment) and we'll tell you the exact monthly SIP to get there.</p>
 
         {fmProfile && (
-          <Callout title={`Synced with FinManager${fmProfile.name ? ` — ${fmProfile.name}` : ""}`} variant="green">
+          <Callout title={`Synced with FinManager${fmProfile.name ? ` · ${fmProfile.name}` : ""}`} variant="green">
             Liquid net worth: <strong>{fmtINR(fmProfile.liquidNetWorth, {compact:true})}</strong>
             {fmProfile.avgMonthlyExpense > 0 && <> · Avg monthly expense: <strong>{fmtINR(fmProfile.avgMonthlyExpense, {compact:true})}</strong></>}
             {fmProfile.budgetMonthly > 0 && <> · Budget: <strong>{fmtINR(fmProfile.budgetMonthly, {compact:true})}/mo</strong></>}
             <div style={{fontSize:"0.78rem", marginTop:4, color:"var(--ink-muted)"}}>
-              Your goals are mirrored into FinManager's data file — they'll ride along next time you click <strong>☁ Sync</strong> in FinManager.
+              Your goals are mirrored into FinManager's data file, and they'll ride along next time you click <strong>☁ Sync</strong> in FinManager.
               {" "}<a onClick={refreshFM} style={{cursor:"pointer"}}>Refresh</a>
             </div>
           </Callout>
@@ -1606,7 +1606,7 @@ function GoalsModule({ onBack }) {
           <div className="goal-empty">
             <div style={{fontSize: "2.4rem", marginBottom: 8}}>🎯</div>
             <h3>Start with your first goal</h3>
-            <p>Pick a template — retirement, a home, a child's education — set the amount and date, and we'll work out the monthly investment needed.</p>
+            <p>Pick a template (retirement, a home, a child's education), set the amount and date, and we'll work out the monthly investment needed.</p>
             <button className="btn btn-primary" onClick={() => { setEditing(null); setShowCreate(true); }}>
               Create your first goal
             </button>
@@ -1735,7 +1735,7 @@ function GoalEditorModal({ goal, onSave, onClose }) {
       <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
         <h2>{isNew ? "Create a goal" : "Edit goal"}</h2>
         <p style={{color: "var(--ink-muted)", fontSize: "0.88rem"}}>
-          {isNew ? "Pick a template to get sensible defaults, then tweak." : "Update any field — projections recalculate live."}
+          {isNew ? "Pick a template to get sensible defaults, then tweak." : "Update any field. Projections recalculate live."}
         </p>
 
         {isNew && (
@@ -1784,7 +1784,7 @@ function GoalEditorModal({ goal, onSave, onClose }) {
           Your plan is projected to reach <strong>{fmtINR(preview.projected, {compact:true})}</strong> ({preview.onTrackPct.toFixed(0)}% of target).
           {preview.requiredMonthly > (form.monthly || 0)
             ? <> To fully fund it, invest <strong>{fmtINR(preview.requiredMonthly, {compact:true})}/month</strong> instead.</>
-            : <> You're set — current SIP is enough.</>}
+            : <> You're set. Current SIP is enough.</>}
         </Callout>
 
         <div className="actions">
@@ -1832,7 +1832,7 @@ function GoalPlannerModule({ onBack }) {
     const monthlySIP = shortfall > 0 ? shortfall / (((Math.pow(1 + r, n) - 1) / r) * (1 + r)) : 0;
     // Recommended horizon-based allocation
     let recommendedAllocation = "";
-    if (years <= 3)      recommendedAllocation = "Liquid Funds, Arbitrage Funds, FDs — no equity";
+    if (years <= 3)      recommendedAllocation = "Liquid Funds, Arbitrage Funds, FDs, no equity";
     else if (years <= 7) recommendedAllocation = "Balanced Advantage / Aggressive Hybrid Funds, Corporate bonds (30-50% equity)";
     else                 recommendedAllocation = "Equity Mutual Funds, Index Funds, some small-cap exposure, Gold";
 
@@ -1845,8 +1845,8 @@ function GoalPlannerModule({ onBack }) {
 
       <div className="panel">
         <Eyebrow>Goal Planner</Eyebrow>
-        <h2>Plan for anything — retirement, home, education</h2>
-        <p>Use the SMART method: Specific, Measurable, Achievable, Relevant, Time-bound. Not "save for retirement" — instead "accumulate ₹5 Cr by age 60." The clearer the goal, the easier the plan.</p>
+        <h2>Plan for anything: retirement, home, education</h2>
+        <p>Use the SMART method: Specific, Measurable, Achievable, Relevant, Time-bound. Not "save for retirement", but "accumulate ₹5 Cr by age 60." The clearer the goal, the easier the plan.</p>
 
         <div className="form-row">
           <NumberInput label="Goal Amount (in today's value)" value={goalAmount} onChange={setGoalAmount} placeholder="5000000" hint="What it costs today" />
@@ -1919,15 +1919,15 @@ function GoldModule({ onBack }) {
         </div>
 
         <div className="result-grid">
-          <StatCard label="SGB — Total Value"
+          <StatCard label="SGB · Total Value"
             value={fmtINR(calc.sgbTotal, { compact: true })}
             sub={`Incl. ₹${fmtINR(calc.sgbInterest, {compact:true}).replace("₹","")} interest; tax-free at maturity`}
             variant="green" />
-          <StatCard label="Gold ETF — Net Value"
+          <StatCard label="Gold ETF · Net Value"
             value={fmtINR(calc.etfNet, { compact: true })}
             sub="After 0.35% expense + 12.5% LTCG"
             variant="brand" />
-          <StatCard label="Digital Gold — Net Value"
+          <StatCard label="Digital Gold · Net Value"
             value={fmtINR(calc.digitalNet, { compact: true })}
             sub="After 3% GST entry + 12.5% LTCG"
             variant="accent" />
@@ -1953,7 +1953,7 @@ function GoldModule({ onBack }) {
         </div>
 
         <Callout title="Important (April 2026)" variant="accent">
-          RBI has paused new SGB issues since 2024. You can still buy existing SGBs on NSE/BSE exchanges — but <strong>tax-free gains at maturity only apply to direct-from-RBI purchases</strong>. For fresh gold investments today, <strong>Gold ETFs are the most practical choice</strong>.
+          RBI has paused new SGB issues since 2024. You can still buy existing SGBs on NSE/BSE exchanges, but <strong>tax-free gains at maturity only apply to direct-from-RBI purchases</strong>. For fresh gold investments today, <strong>Gold ETFs are the most practical choice</strong>.
         </Callout>
       </div>
     </>
@@ -2000,8 +2000,8 @@ function TaxModule({ onBack }) {
         <p>Rules effective FY 2026-27. Big change from July 2024: indexation benefit on debt funds is gone.</p>
 
         <div className="form-row">
-          <NumberInput label="Equity Gains — Short-Term (< 12 months)" value={equityST} onChange={setEquityST} placeholder="0" />
-          <NumberInput label="Equity Gains — Long-Term (≥ 12 months)" value={equityLT} onChange={setEquityLT} placeholder="200000" hint="First ₹1.25 L per year is tax-free" />
+          <NumberInput label="Equity Gains: Short-Term (< 12 months)" value={equityST} onChange={setEquityST} placeholder="0" />
+          <NumberInput label="Equity Gains: Long-Term (≥ 12 months)" value={equityLT} onChange={setEquityLT} placeholder="200000" hint="First ₹1.25 L per year is tax-free" />
           <NumberInput label="Debt Fund Gains / FD Interest" value={debt} onChange={setDebt} placeholder="0" />
           <NumberInput label="Crypto Profits" value={crypto} onChange={setCrypto} placeholder="0" hint="30% flat regardless of holding period" />
           <div className="form-group">
@@ -2027,7 +2027,7 @@ function TaxModule({ onBack }) {
       </div>
 
       <div className="panel">
-        <h2>Tax rates at a glance — FY 2026-27</h2>
+        <h2>Tax rates at a glance: FY 2026-27</h2>
         <div className="tbl-wrap">
           <table className="tbl">
             <thead>
@@ -2094,10 +2094,10 @@ function PortfolioModule({ onBack }) {
           <div className="form-group">
             <label className="form-label">Your Risk Profile</label>
             <select className="form-select" value={profile} onChange={e => setProfile(e.target.value)}>
-              <option value="conservative">Conservative — stability first</option>
-              <option value="moderate">Moderate — balanced</option>
-              <option value="growth">Growth — most people</option>
-              <option value="aggressive">Aggressive — long runway, high risk</option>
+              <option value="conservative">Conservative: stability first</option>
+              <option value="moderate">Moderate: balanced</option>
+              <option value="growth">Growth: most people</option>
+              <option value="aggressive">Aggressive: long runway, high risk</option>
             </select>
           </div>
           <NumberInput label="Your Age" value={age} onChange={setAge} prefix="" placeholder="35" min={18} max={80} />
@@ -2128,14 +2128,14 @@ function PortfolioModule({ onBack }) {
                 cutout: "60%",
                 plugins: {
                   legend: { position: "bottom", labels: { font: { family: "Calibri", size: 11 }, color: "#0F1B2D", padding: 12 } },
-                  tooltip: { callbacks: { label: (ctx) => ctx.label + " — " + fmtINR(monthlyInvestable * ctx.parsed / 100, {compact: true}) + "/mo" } }
+                  tooltip: { callbacks: { label: (ctx) => ctx.label + " · " + fmtINR(monthlyInvestable * ctx.parsed / 100, {compact: true}) + "/mo" } }
                 }
               }
             })}
           />
 
           <div>
-            <h3>Your monthly split — {allocation.label} profile</h3>
+            <h3>Your monthly split: {allocation.label} profile</h3>
             <div style={{display: "grid", gap: 8, marginTop: 10}}>
               {[
                 { label: "Equity", amt: amounts.equity, pct: allocation.equity, sub: "Nifty 50 Index + Flexi Cap + Mid/Small", color: "brand" },
@@ -2150,7 +2150,7 @@ function PortfolioModule({ onBack }) {
                   borderLeft: `4px solid var(--${b.color})`
                 }}>
                   <div>
-                    <div style={{fontWeight: 600}}>{b.label} <span className="muted" style={{fontWeight: 400}}>— {b.pct}%</span></div>
+                    <div style={{fontWeight: 600}}>{b.label} <span className="muted" style={{fontWeight: 400}}>· {b.pct}%</span></div>
                     <div className="muted" style={{fontSize: "0.8rem"}}>{b.sub}</div>
                   </div>
                   <div style={{fontWeight: 700, color: "var(--brand)", whiteSpace: "nowrap"}}>
@@ -2193,7 +2193,7 @@ function PortfolioModule({ onBack }) {
               If gold has grown from 10% to 15% of your portfolio, sell the extra 5% and buy whatever is lagging (usually equity). This forces "sell high, buy low" automatically.
             </Callout>
             <Callout title="Increase SIPs 10% yearly" variant="green">
-              Every salary hike: raise your SIP first, then lifestyle. Every bonus: split into three — emergency top-up, lump-sum investment, and a small indulgence.
+              Every salary hike: raise your SIP first, then lifestyle. Every bonus: split into three: emergency top-up, lump-sum investment, and a small indulgence.
             </Callout>
           </div>
         </div>
@@ -2216,7 +2216,7 @@ function ActionPlanModule({ onBack }) {
 
   const sections = [
     {
-      title: "Month 1 — Protection", variant: "red", items: [
+      title: "Month 1: Protection", variant: "red", items: [
         { k: "m1_1", t: "Buy family health cover: ₹10-30L base + ₹50L super top-up" },
         { k: "m1_2", t: "Buy term insurance: 15× annual income, till age 65 or 70" },
         { k: "m1_3", t: "Buy personal accident cover: 5× annual income" },
@@ -2224,7 +2224,7 @@ function ActionPlanModule({ onBack }) {
       ]
     },
     {
-      title: "Months 2–3 — Emergency Fund", variant: "accent", items: [
+      title: "Months 2–3: Emergency Fund", variant: "accent", items: [
         { k: "m23_1", t: "Calculate your essential monthly expenses" },
         { k: "m23_2", t: "Keep 1 month of expenses in savings account" },
         { k: "m23_3", t: "Park 2 months in a Liquid Mutual Fund" },
@@ -2232,17 +2232,17 @@ function ActionPlanModule({ onBack }) {
       ]
     },
     {
-      title: "Month 4+ — Investing", variant: "green", items: [
+      title: "Month 4+: Investing", variant: "green", items: [
         { k: "m4_1", t: "Open a direct MF account (Groww, Kuvera, or Zerodha Coin)" },
         { k: "m4_2", t: "Start monthly SIPs across 3–4 fund categories" },
         { k: "m4_3", t: "Set up annual SIP step-up (10% increase every year)" },
-        { k: "m4_4", t: "Automate — investments come out on salary day, not as leftover" },
+        { k: "m4_4", t: "Automate: investments come out on salary day, not as leftover" },
       ]
     },
     {
       title: "Every Year", variant: "brand", items: [
-        { k: "y_1", t: "Review insurance — cover still adequate? Premiums paid?" },
-        { k: "y_2", t: "Review portfolio allocation — rebalance if needed" },
+        { k: "y_1", t: "Review insurance: cover still adequate? Premiums paid?" },
+        { k: "y_2", t: "Review portfolio allocation: rebalance if needed" },
         { k: "y_3", t: "Update nominees on all accounts" },
         { k: "y_4", t: "File ITR; track capital gains carefully" },
       ]
@@ -2260,7 +2260,7 @@ function ActionPlanModule({ onBack }) {
       <div className="panel">
         <Eyebrow>Action Plan</Eyebrow>
         <h2>Your 4-month roadmap</h2>
-        <p>Most people take 3–6 months to complete this. What matters is that you finish it. Check items off as you go — progress saves automatically.</p>
+        <p>Most people take 3–6 months to complete this. What matters is that you finish it. Check items off as you go: progress saves automatically.</p>
 
         <div style={{
           padding: "16px 20px", background: "var(--brand-lite)",
@@ -2318,7 +2318,7 @@ function ActionPlanModule({ onBack }) {
       ))}
 
       <Callout title="A final thought" variant="accent">
-        Personal finance is 80% behaviour and 20% knowledge. What you do consistently over 20 years matters far more than picking the 'perfect' fund. <strong>Start imperfectly — start today.</strong>
+        Personal finance is 80% behaviour and 20% knowledge. What you do consistently over 20 years matters far more than picking the 'perfect' fund. <strong>Start imperfectly. Start today.</strong>
       </Callout>
     </>
   );
@@ -2337,7 +2337,7 @@ function ContactModal({ onClose }) {
       <div className="modal" onClick={e => e.stopPropagation()}>
         <Eyebrow>Personal Advisory</Eyebrow>
         <h2>Book a consultation with Vipin</h2>
-        <p>Finance &amp; Accounts professional, personal finance enthusiast, and tool builder. Happy to talk through your situation — no obligation.</p>
+        <p>Finance &amp; Accounts professional, personal finance enthusiast, and tool builder. Happy to talk through your situation, no obligation.</p>
 
         <div className="contact-item">
           <span className="icon-emoji">📧</span>
@@ -2396,17 +2396,17 @@ function DisclaimerModal({ onClose }) {
 
 function Dashboard({ onOpen }) {
   const modules = [
-    { id: "goals",      icon: "🎯", title: "My Goals",              desc: "Track multiple goals — retirement, home, education — with progress & required SIPs.", variant: "accent" },
+    { id: "goals",      icon: "🎯", title: "My Goals",              desc: "Track multiple goals (retirement, home, education) with progress & required SIPs.", variant: "accent" },
     { id: "health",     icon: "🏥", title: "Health Insurance",     desc: "Figure out the right cover + see the best plans for April 2026.", variant: "red" },
     { id: "term",       icon: "🛡️", title: "Term Life Insurance",  desc: "Calculate how much you need and see the top-rated term plans.", variant: "brand" },
-    { id: "accident",   icon: "🚑", title: "Personal Accident",    desc: "The overlooked policy — ₹25L cover for ₹1-3k/year.", variant: "brand" },
+    { id: "accident",   icon: "🚑", title: "Personal Accident",    desc: "The overlooked policy: ₹25L cover for ₹1-3k/year.", variant: "brand" },
     { id: "emergency",  icon: "💰", title: "Emergency Fund",        desc: "3-tier structure across savings, liquid funds, and FDs.", variant: "green" },
     { id: "sip",        icon: "📈", title: "SIP Calculator",        desc: "See compounding with step-up SIPs + April 2026 fund picks.", variant: "brand" },
     { id: "goal",       icon: "🧮", title: "Goal Calculator",       desc: "Single-goal calculator for detailed planning.", variant: "accent" },
-    { id: "gold",       icon: "🪙", title: "Gold Comparator",       desc: "SGB vs Gold ETF vs Digital Gold — crunch the numbers.", variant: "accent" },
+    { id: "gold",       icon: "🪙", title: "Gold Comparator",       desc: "SGB vs Gold ETF vs Digital Gold: crunch the numbers.", variant: "accent" },
     { id: "tax",        icon: "🧾", title: "Tax Calculator",        desc: "Capital gains tax estimator across all asset classes (FY 26-27).", variant: "purple" },
     { id: "portfolio",  icon: "📊", title: "Portfolio Allocation",  desc: "Match risk profile to allocation; see monthly split.", variant: "brand" },
-    { id: "action",     icon: "✅", title: "4-Month Action Plan",   desc: "The full roadmap — track your progress.", variant: "green" },
+    { id: "action",     icon: "✅", title: "4-Month Action Plan",   desc: "The full roadmap: track your progress.", variant: "green" },
   ];
 
   return (
@@ -2414,7 +2414,7 @@ function Dashboard({ onOpen }) {
       <div className="hero">
         <div className="hero-eyebrow">Personal Finance · Made Simple</div>
         <h1>Protect. Save. Then <span className="highlight">Invest</span>.</h1>
-        <p>A complete planning workspace for Indian households — insurance, emergency fund, SIPs, gold, tax. Every calculation, benchmark, and recommendation is current as of April 2026.</p>
+        <p>A complete planning workspace for Indian households: insurance, emergency fund, SIPs, gold, tax. Every calculation, benchmark, and recommendation is current as of April 2026.</p>
 
         <div className="hero-stats">
           <div className="hero-stat">
@@ -2439,7 +2439,7 @@ function Dashboard({ onOpen }) {
       <div className="section-head">
         <div>
           <h2>Choose a module to begin</h2>
-          <p>Work through in order — or jump to whatever you're solving today.</p>
+          <p>Work through in order, or jump to whatever you're solving today.</p>
         </div>
       </div>
 
@@ -2496,7 +2496,7 @@ function App() {
             </div>
           </div>
           <div className="nav-actions">
-            <a href="FinSaveManager with Google Drive/index.html" className="btn btn-ghost btn-sm" title="Open your Personal FinManager — transactions, accounts, budgets, Google Drive sync" style={{textDecoration:'none'}}>
+            <a href="FinSaveManager with Google Drive/index.html" className="btn btn-ghost btn-sm" title="Open your Personal FinManager: transactions, accounts, budgets, Google Drive sync" style={{textDecoration:'none'}}>
               💼 FinManager
             </a>
             <button className="btn btn-ghost btn-sm btn-lg-hide" onClick={() => setShowDisclaimer(true)}>
