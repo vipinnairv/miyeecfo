@@ -6195,7 +6195,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                             <div style={{width:24,height:24,borderRadius:7,background:p.color||'var(--n400)',display:'grid',placeItems:'center',flexShrink:0}}><Ic n="budget" s={11} c="#fff"/></div>
                             <div>
                               <div style={{fontSize:12.5,fontWeight:800}}>{p.name}</div>
-                              <div style={{fontSize:9.5,color:'var(--n500)'}}>{p.type==='FD'||p.type==='PPF'?fmtINR(p.amount,true):fmtINR(p.amount,true)+'/mo'} · {p.returnRate}% · {p.years}yr</div>
+                              <div style={{fontSize:9.5,color:'var(--n500)'}}>{fmtINR(p.amount,true)+(p.type==='SIP'?'/mo':'')} · {p.returnRate}% · {p.years}yr</div>
                             </div>
                           </div>
                           <div style={{display:'flex',gap:5}}>
@@ -6549,7 +6549,7 @@ function PageForecast({data,toast}){
                           <span style={{fontSize:9,fontWeight:700,color:TC[i.type]||'var(--n500)',background:TBG[i.type]||'var(--n100)',padding:'1px 5px',borderRadius:4}}>{i.type}</span>
                         </div>
                         <div style={{fontSize:10,color:'var(--n500)'}}>
-                          {i.type==='FD'||i.type==='PPF'?fmtINR(i.amount||0,true):fmtINR(i.amount||0,true)+'/mo'} · {i.returnRate}% · {i.years}yr
+                          {fmtINR(i.amount||0,true)+(i.type==='SIP'?'/mo':'')} · {i.returnRate}% · {i.years}yr
                         </div>
                         <div style={{fontFamily:'var(--m)',fontSize:13,fontWeight:800,color:'var(--g)',marginTop:4}}>{fmtINR(iCorpus,true)}</div>
                       </div>
@@ -6815,7 +6815,7 @@ function PageGoals({data,setData,toast}){
             <div className="fg"><label style={{fontSize:10.5}}>Type</label><select value={instrForm.type} onChange={e=>setInstrForm(f=>({...f,type:e.target.value}))}>
               {INV_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
             </select></div>
-            <div className="fg"><label style={{fontSize:10.5}}>{instrForm.type==='FD'||instrForm.type==='PPF'?`Principal (${CUR.sym})`:`Monthly (${CUR.sym})`}</label><input type="number" placeholder="0" value={instrForm.amount} onChange={e=>setInstrForm(f=>({...f,amount:e.target.value}))}/></div>
+            <div className="fg"><label style={{fontSize:10.5}}>{instrForm.type==='SIP'?`Monthly (${CUR.sym})`:`Investment Amount (${CUR.sym})`}</label><input type="number" placeholder="0" value={instrForm.amount} onChange={e=>setInstrForm(f=>({...f,amount:e.target.value}))}/></div>
             <div className="fg"><label style={{fontSize:10.5}}>Return Rate (%)</label><input type="number" placeholder="12" value={instrForm.returnRate} onChange={e=>setInstrForm(f=>({...f,returnRate:e.target.value}))}/></div>
             <div className="fg"><label style={{fontSize:10.5}}>Duration (Years)</label><input type="number" placeholder="5" value={instrForm.years} onChange={e=>setInstrForm(f=>({...f,years:e.target.value}))}/></div>
             <div className="fg"><label style={{fontSize:10.5}}>Color</label>
@@ -6897,7 +6897,7 @@ function PageGoals({data,setData,toast}){
                           {navStale&&<span style={{fontSize:9,color:'var(--o)',fontWeight:700}}>NAV stale</span>}
                         </div>
                         <div style={{fontSize:10.5,color:'var(--n500)',paddingLeft:11,marginTop:2}}>
-                          {i.type!=='FD'&&i.type!=='PPF'?`${CUR.sym}${(i.amount||0).toLocaleString(CUR.locale)}/mo`:`${CUR.sym}${(i.amount||0).toLocaleString(CUR.locale)}`} · {i.returnRate}% · {i.years}yr
+                          {`${CUR.sym}${(i.amount||0).toLocaleString(CUR.locale)}${i.type==='SIP'?'/mo':''}`} · {i.returnRate}% · {i.years}yr
                           {hasNAV&&(i.units||0)>0&&<span style={{marginLeft:6,color:'var(--n400)'}}>· {i.units} units @{i.currentNAV||i.lastBuyNAV||0}</span>}
                         </div>
                         {/* NAV update inline */}
