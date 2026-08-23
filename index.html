@@ -5926,6 +5926,14 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
   const totalGainAll=totalCorpusAll-totalInvestedAll;
   const thisMonthTotal=instrStats.reduce((s,p)=>{const tm=new Date().toISOString().slice(0,7);return s+p.txs.filter(t=>t.date.slice(0,7)===tm).reduce((a,t)=>a+t.amount,0);},0);
 
+  // ── Asset allocation: current value grouped into broad classes ──
+  const ASSET_CLASS={'SIP':'Equity','Mutual Fund':'Equity','Equity (India)':'Equity','Equity (US)':'Equity','Crypto':'Crypto','RD':'Debt','FD':'Debt','PPF':'Debt'};
+  const CLASS_COLOR={'Equity':'#2563eb','Crypto':'#d97706','Debt':'#0d9488','Other':'#7c3aed'};
+  const allocMap={};
+  instrStats.forEach(p=>{if(p.corpus>0){const c=ASSET_CLASS[p.type]||'Other';allocMap[c]=(allocMap[c]||0)+p.corpus;}});
+  const allocRows=Object.entries(allocMap).sort((a,b)=>b[1]-a[1])
+    .map(([cls,val])=>({cls,val,pct:totalCorpusAll>0?val/totalCorpusAll*100:0,color:CLASS_COLOR[cls]||'#7c3aed'}));
+
   // ── Log Contribution Modal ──
   const EF={goalId:goals[0]?.id||'',instrumentId:'',amount:'',date:new Date().toISOString().slice(0,10),
     paymentMode:'NEFT/Bank Transfer',units:'',nav:'',notes:''};
@@ -6073,6 +6081,34 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
             </div>
           ))}
         </div>
+
+        {/* ── Asset allocation ── */}
+        {allocRows.length>0&&(
+          <div className="card mb3">
+            <div className="sh mb2">
+              <div className="sh-t"><Ic n="budget" s={14} c="var(--b)"/>Asset Allocation</div>
+              <span className="tag tx" style={{fontSize:10}}>By value today</span>
+            </div>
+            <div style={{display:'flex',gap:20,flexWrap:'wrap',alignItems:'center'}}>
+              <div style={{width:180,flexShrink:0}}>
+                <CJSDoughnut labels={allocRows.map(a=>a.cls)} values={allocRows.map(a=>a.val)} colors={allocRows.map(a=>a.color)} height={170} title="Mix"/>
+              </div>
+              <div style={{flex:1,minWidth:220}}>
+                {allocRows.map(a=>(
+                  <div key={a.cls} style={{marginBottom:10}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+                      <span style={{display:'flex',alignItems:'center',gap:7,fontSize:12.5,fontWeight:600}}>
+                        <span style={{width:9,height:9,borderRadius:2,background:a.color,display:'inline-block'}}/>{a.cls}
+                      </span>
+                      <span style={{fontFamily:'var(--m)',fontSize:12}}>{fmtINR(a.val,true)} · <strong>{a.pct.toFixed(1)}%</strong></span>
+                    </div>
+                    <div className="prog" style={{height:5}}><div className="pf" style={{width:`${a.pct}%`,background:a.color}}/></div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── Per-goal sections ── */}
         {goals.map(g=>{
