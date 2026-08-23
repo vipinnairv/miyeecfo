@@ -1100,6 +1100,41 @@ const pmClass=m=>{if(!m)return'tx';const l=m.toLowerCase();if(l.includes('credit
 ══════════════════════════════════════ */
 const monthKey=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 
+/* ── Investment instrument valuation ──────────────────────────────
+   Unit-based holdings are worth what the market says today: units held
+   times the latest price you enter. Everything else (RD/FD/PPF) has no
+   quoted price, so it falls back to a modelled compound growth.
+   New types (Equity, Crypto) join the unit-based family. Their "NAV" is
+   just a share or coin price; enter it in your own reporting currency. */
+const UNIT_TYPES=['SIP','Mutual Fund','Equity (India)','Equity (US)','Crypto'];
+const isUnitType=t=>UNIT_TYPES.includes(t);
+// What the price field is called for a given type.
+const priceLabel=t=>(t==='SIP'||t==='Mutual Fund')?'NAV':'Price';
+const unitLabel=t=>t==='Crypto'?'Coins':(t==='Equity (India)'||t==='Equity (US)')?'Shares':'Units';
+// Latest price on file for an instrument, if any.
+const instrPrice=i=>i&&(i.currentNAV||i.lastBuyNAV)||0;
+/* Value of one instrument's logged contributions as of today.
+   Preference order:
+     1. unit-based with a latest price and units held → units × latest price
+     2. otherwise → each contribution compounded from its own date at the
+        instrument's modelled return rate.
+   Returns {value, invested, units, priced} so callers can show which basis
+   was used. */
+function instrValueFromTxs(instr,txs){
+  const invested=txs.reduce((s,t)=>s+(t.amount||0),0);
+  const units=txs.reduce((s,t)=>s+(t.units||0),0);
+  const px=instrPrice(instr);
+  if(instr&&isUnitType(instr.type)&&px>0&&units>0){
+    return{value:units*px,invested,units,priced:true};
+  }
+  const r=(instr&&instr.returnRate||0)/100/12,now=Date.now();
+  const value=txs.reduce((sum,t)=>{
+    const mo=Math.max(0,(now-new Date(t.date).getTime())/(86400000*30.44));
+    return sum+(t.amount||0)*(r>0?Math.pow(1+r,mo):1);
+  },0);
+  return{value,invested,units,priced:false};
+}
+
 function computeFin(data,months){
   const {transactions=[],accounts=[],creditCards=[],loans=[],budgetLimits={},expenseCategories=[],investmentTxs=[],goals=[]}=data;
 
@@ -1152,17 +1187,17 @@ function computeFin(data,months){
   const invMonthOf=t=>t.month||(t.date||'').slice(0,7);
   const invByMonth={};
   let invTotal=0,invPeriod=0,invCorpus=0;
-  const nowMs=Date.now();
+  const txsByInstr={};
   for(const t of investmentTxs){
     const amt=t.amount||0;
     invTotal+=amt;
     const k=invMonthOf(t);
     if(mSet.has(k)){invPeriod+=amt;invByMonth[k]=(invByMonth[k]||0)+amt;}
-    // Each contribution compounds independently from the day it was made.
-    const r=(instrById[t.instrumentId]?.returnRate||0)/100/12;
-    const mo=Math.max(0,(nowMs-new Date(t.date).getTime())/(86400000*30.44));
-    invCorpus+=amt*(r>0?Math.pow(1+r,mo):1);
+    (txsByInstr[t.instrumentId||'?']=txsByInstr[t.instrumentId||'?']||[]).push(t);
   }
+  // Value each instrument by its latest price where available, else by a
+  // modelled compound. See instrValueFromTxs for the exact rule.
+  for(const id in txsByInstr)invCorpus+=instrValueFromTxs(instrById[id],txsByInstr[id]).value;
   const invGain=invCorpus-invTotal;
   const mInv=months.map(m=>invByMonth[m.key]||0);
   // What is genuinely left over once the money you committed to investing is set aside.
@@ -5803,31 +5838,20 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
   const goals=(data.goals||[]).filter(g=>(g.instruments||[]).length>0);
   const allGoals=data.goals||[];
 
-  const TC={'SIP':'var(--g)','Mutual Fund':'var(--b)','RD':'var(--t)','FD':'var(--o)','PPF':'var(--p)'};
-  const TBG={'SIP':'var(--gl)','Mutual Fund':'var(--bl)','RD':'var(--tl)','FD':'var(--ol)','PPF':'var(--pl)'};
-
-  // ── Date-accurate corpus: each logged payment grows independently ──
-  const corpusNow=(instr)=>{
-    const txs=itxs.filter(t=>t.instrumentId===instr.id);
-    if(!txs.length)return 0;
-    const r=(instr.returnRate||0)/100/12;
-    const now=Date.now();
-    return txs.reduce((sum,tx)=>{
-      const mo=Math.max(0,(now-new Date(tx.date).getTime())/(86400000*30.44));
-      return sum+(tx.amount||0)*(r>0?Math.pow(1+r,mo):1);
-    },0);
-  };
+  const TC={'SIP':'var(--g)','Mutual Fund':'var(--b)','Equity (India)':'var(--b)','Equity (US)':'var(--p)','Crypto':'var(--o)','RD':'var(--t)','FD':'var(--o)','PPF':'var(--p)'};
+  const TBG={'SIP':'var(--gl)','Mutual Fund':'var(--bl)','Equity (India)':'var(--bl)','Equity (US)':'var(--pl)','Crypto':'var(--ol)','RD':'var(--tl)','FD':'var(--ol)','PPF':'var(--pl)'};
 
   // ── All instruments across goals, with stats ──
+  // Corpus prefers the latest market price you have entered, else a modelled
+  // compound of each logged contribution (see instrValueFromTxs).
   const allInstrs=goals.flatMap(g=>(g.instruments||[]).map(i=>({...i,goalId:g.id,goalName:g.name,goalColor:g.color})));
   const instrStats=allInstrs.map(i=>{
     const txs=itxs.filter(t=>t.instrumentId===i.id);
-    const totalInvested=txs.reduce((s,t)=>s+(t.amount||0),0);
-    const corpus=corpusNow(i);
-    const gain=corpus-totalInvested;
+    const val=instrValueFromTxs(i,txs);
     const tm=new Date().toISOString().slice(0,7);
     const paidThisMonth=txs.some(t=>t.date.slice(0,7)===tm);
-    return{...i,txs,totalInvested,corpus,gain,paidThisMonth};
+    return{...i,txs,totalInvested:val.invested,corpus:val.value,gain:val.value-val.invested,
+      unitsHeld:val.units,priced:val.priced,paidThisMonth};
   });
 
   const totalInvestedAll=instrStats.reduce((s,p)=>s+p.totalInvested,0);
@@ -5846,12 +5870,25 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
   const selGoal=allGoals.find(g=>g.id===form.goalId);
   const selInstrList=selGoal?(selGoal.instruments||[]):[];
   const selInstr=selInstrList.find(i=>i.id===form.instrumentId);
-  const isNAV=selInstr&&(selInstr.type==='SIP'||selInstr.type==='Mutual Fund');
+  const isNAV=selInstr&&isUnitType(selInstr.type);
 
   const openAdd=(gId,iId)=>{
     setForm({...EF,goalId:gId||goals[0]?.id||'',instrumentId:iId||''});
     setModal(true);
   };
+
+  // ── Update latest price/NAV inline, revaluing the instrument at market ──
+  const [priceEdit,setPriceEdit]=useState(null); // instrId being edited
+  const [priceVal,setPriceVal]=useState('');
+  const savePrice=(goalId,instrId)=>{
+    const px=parseFloat(priceVal);
+    if(!px||isNaN(px)||px<=0){toast('Enter a valid price','r');return;}
+    setData(d=>({...d,goals:d.goals.map(g=>g.id!==goalId?g:{...g,
+      instruments:(g.instruments||[]).map(i=>i.id!==instrId?i:{...i,currentNAV:px,lastNAVDate:new Date().toISOString().slice(0,10)})})}));
+    toast('Latest price updated · value revalued at market','g');
+    setPriceEdit(null);setPriceVal('');
+  };
+
   const save=()=>{
     if(!form.goalId||!form.instrumentId||!form.amount){toast('Select goal, instrument & amount','r');return;}
     const tx={id:uid(),goalId:form.goalId,instrumentId:form.instrumentId,amount:+form.amount,
@@ -5893,7 +5930,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
             </div>
             Investment Tracker
           </div>
-          <div className="psub">Log contributions · Auto-updates goal progress · Date-accurate compound corpus</div>
+          <div className="psub">Log contributions · Auto-updates goal progress · Values SIPs, equity &amp; crypto at latest price</div>
         </div>
         {goals.length>0&&<button className="btn btn-p" onClick={()=>openAdd()}><Ic n="plus" s={13} c="#fff"/>Log Contribution</button>}
       </div>
@@ -5958,7 +5995,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
         <div className="g4 mb3">
           {[
             {l:'Total Invested',v:totalInvestedAll,c:'var(--b)',bg:'var(--bl)',b:'rgba(37,99,235,.15)',sub:`across ${instrStats.filter(p=>p.totalInvested>0).length} instruments`},
-            {l:'Corpus Today',v:totalCorpusAll,c:'var(--g)',bg:'var(--gl)',b:'rgba(0,179,134,.2)',sub:totalGainAll>=0?`+${fmtINR(totalGainAll,true)} gains`:'–',gsub:totalGainAll>=0},
+            {l:'Value Today',v:totalCorpusAll,c:'var(--g)',bg:'var(--gl)',b:'rgba(0,179,134,.2)',sub:`${totalGainAll>=0?'+':'−'}${fmtINR(Math.abs(totalGainAll),true)} ${totalGainAll>=0?'gains':'loss'}`,gsub:totalGainAll>=0},
             {l:'This Month',v:thisMonthTotal,c:'var(--o)',bg:'var(--ol)',b:'rgba(217,119,6,.15)',sub:`${instrStats.filter(p=>!p.paidThisMonth&&p.totalInvested>0).length} pending`},
             {l:'Instruments',v:allInstrs.length,isCount:true,c:'var(--p)',bg:'var(--pl)',b:'rgba(124,58,237,.15)',sub:`across ${goals.length} goals`},
           ].map(x=>(
@@ -5993,7 +6030,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
               ):(
                 <div className="g2">
                   {gInstrs.map(p=>{
-                    const investedPct=p.corpus>0?(p.totalInvested/p.corpus*100):100;
+                    const investedPct=p.corpus>0?Math.min(100,p.totalInvested/p.corpus*100):100;
                     const tc=TC[p.type]||'var(--n600)';
                     const tbg=TBG[p.type]||'var(--n100)';
                     return(
@@ -6023,8 +6060,8 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:8}}>
                               {[
                                 {l:'Invested',v:fmtINR(p.totalInvested,true),c:'var(--n700)'},
-                                {l:'Corpus Today',v:fmtINR(p.corpus,true),c:p.color||'var(--g)',bold:true},
-                                {l:'Gain',v:`+${fmtINR(p.gain,true)}`,c:'var(--gd)',bold:true},
+                                {l:p.priced?'Value Today':'Corpus Today',v:fmtINR(p.corpus,true),c:p.color||'var(--g)',bold:true},
+                                {l:p.gain>=0?'Gain':'Loss',v:`${p.gain>=0?'+':'−'}${fmtINR(Math.abs(p.gain),true)}`,c:p.gain>=0?'var(--gd)':'var(--r)',bold:true},
                                 {l:'Entries',v:p.txs.length+' contributions',c:'var(--n500)'},
                               ].map(x=>(
                                 <div key={x.l} style={{background:'var(--n50)',borderRadius:7,padding:'6px 9px'}}>
@@ -6041,6 +6078,29 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                               <span>Principal {investedPct.toFixed(0)}%</span>
                               <span style={{color:'var(--gd)',fontWeight:700}}>Gains {(100-investedPct).toFixed(0)}%</span>
                             </div>
+                            {/* Valuation basis: latest market price where set, else a modelled return */}
+                            {isUnitType(p.type)&&(
+                              priceEdit===p.id?(
+                                <div style={{display:'flex',gap:5,marginTop:7,alignItems:'center'}}>
+                                  <input type="number" autoFocus placeholder={`Latest ${priceLabel(p.type)}`} value={priceVal}
+                                    onChange={e=>setPriceVal(e.target.value)}
+                                    onKeyDown={e=>{if(e.key==='Enter')savePrice(g.id,p.id);if(e.key==='Escape'){setPriceEdit(null);setPriceVal('');}}}
+                                    style={{flex:1,fontSize:11,padding:'4px 8px',fontFamily:'var(--m)'}}/>
+                                  <button className="btn btn-p btn-sm" style={{fontSize:10}} onClick={()=>savePrice(g.id,p.id)}>Save</button>
+                                  <button className="bic" onClick={()=>{setPriceEdit(null);setPriceVal('');}}><Ic n="x" s={11}/></button>
+                                </div>
+                              ):(
+                                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:7,fontSize:9.5}}>
+                                  <span style={{color:'var(--n400)'}}>
+                                    {p.priced
+                                      ? <>Valued at {p.unitsHeld.toLocaleString(CUR.locale)} {unitLabel(p.type).toLowerCase()} × {fmtINR(instrPrice(p))} {priceLabel(p.type)}</>
+                                      : <>Modelled at {p.returnRate}% · add a latest {priceLabel(p.type)} to value at market</>}
+                                  </span>
+                                  <button style={{fontSize:9.5,padding:'2px 8px',borderRadius:5,border:'1.5px solid var(--n200)',background:'var(--W)',cursor:'pointer',fontWeight:600,whiteSpace:'nowrap'}}
+                                    onClick={()=>{setPriceEdit(p.id);setPriceVal(instrPrice(p)?String(instrPrice(p)):'');}}>Update {priceLabel(p.type)}</button>
+                                </div>
+                              )
+                            )}
                             <button style={{marginTop:7,width:'100%',padding:'5px',borderRadius:6,border:'1.5px solid var(--n200)',background:'var(--W)',fontSize:10.5,cursor:'pointer',fontFamily:'var(--f)',fontWeight:600}} onClick={()=>openAdd(g.id,p.id)}>+ Log Contribution</button>
                             </>
                           )}
@@ -6127,8 +6187,8 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                   </select>
                 </div>
                 {isNAV&&<>
-                  <div className="fg"><label>Units Purchased</label><input type="number" placeholder="e.g. 12.345" value={form.units} onChange={e=>ff({units:e.target.value})}/></div>
-                  <div className="fg"><label>NAV at Purchase ({CUR.sym})</label><input type="number" placeholder="e.g. 48.50" value={form.nav} onChange={e=>ff({nav:e.target.value})}/></div>
+                  <div className="fg"><label>{selInstr?unitLabel(selInstr.type):'Units'} Bought</label><input type="number" placeholder="e.g. 12.345" value={form.units} onChange={e=>ff({units:e.target.value})}/></div>
+                  <div className="fg"><label>{selInstr?priceLabel(selInstr.type):'NAV'} at Purchase ({CUR.sym})</label><input type="number" placeholder="e.g. 48.50" value={form.nav} onChange={e=>ff({nav:e.target.value})}/></div>
                 </>}
                 <div className="fg fg-full"><label>Notes</label><input placeholder="e.g. April installment" value={form.notes||''} onChange={e=>ff({notes:e.target.value})}/></div>
               </div>
@@ -6180,7 +6240,7 @@ function PageForecast({data,toast}){
   // ── Investment NW from instruments ──
   const sipFV=(amt,rate,yr)=>{const r=rate/100/12,n=Math.round(yr*12);if(!amt||!yr)return 0;return r===0?amt*n:amt*(((1+r)**n-1)/r)*(1+r);};
   const instrCurrentVal=(i)=>{
-    if((i.type==='SIP'||i.type==='Mutual Fund')&&(i.units||0)>0&&(i.currentNAV||i.lastBuyNAV)){
+    if(isUnitType(i.type)&&(i.units||0)>0&&(i.currentNAV||i.lastBuyNAV)){
       return (i.units||0)*(i.currentNAV||i.lastBuyNAV||0);
     }
     if(i.type==='FD'||i.type==='PPF'){return (i.amount||0)*Math.pow(1+(i.returnRate||0)/100,i.years||0);}
@@ -6243,8 +6303,8 @@ function PageForecast({data,toast}){
   const staleNavInstrs=allInstrs.filter(i=>(i.type==='SIP'||i.type==='Mutual Fund')&&i.lastNAVDate&&(Date.now()-new Date(i.lastNAVDate))/86400000>7);
 
   // ── Type meta ──
-  const TC={'SIP':'var(--g)','Mutual Fund':'var(--b)','RD':'var(--t)','FD':'var(--o)','PPF':'var(--p)'};
-  const TBG={'SIP':'var(--gl)','Mutual Fund':'var(--bl)','RD':'var(--tl)','FD':'var(--ol)','PPF':'var(--pl)'};
+  const TC={'SIP':'var(--g)','Mutual Fund':'var(--b)','Equity (India)':'var(--b)','Equity (US)':'var(--p)','Crypto':'var(--o)','RD':'var(--t)','FD':'var(--o)','PPF':'var(--p)'};
+  const TBG={'SIP':'var(--gl)','Mutual Fund':'var(--bl)','Equity (India)':'var(--bl)','Equity (US)':'var(--pl)','Crypto':'var(--ol)','RD':'var(--tl)','FD':'var(--ol)','PPF':'var(--pl)'};
 
   return(
     <div className="page">
@@ -6447,15 +6507,15 @@ function PageForecast({data,toast}){
 function PageGoals({data,setData,toast}){
   const goals=data.goals||[];
   const COLORS=['#00b386','#2563eb','#d97706','#7c3aed','#0d9488','#dc2626'];
-  const INV_TYPES=['SIP','Mutual Fund','RD','FD','PPF'];
+  const INV_TYPES=['SIP','Mutual Fund','Equity (India)','Equity (US)','Crypto','RD','FD','PPF'];
   // SIP/MF FV formula
   const sipFV=(amt,rate,yr)=>{const r2=rate/100/12,n=Math.round(yr*12);if(!amt||!yr)return 0;return r2===0?amt*n:amt*(((1+r2)**n-1)/r2)*(1+r2);};
   // Lump-sum FV (for FD/RD/PPF where full corpus sits post-maturity; here we use SIP-FV since contributions are periodic)
   const getCorpus=(instr)=>{
     if(!instr.amount||!instr.years)return 0;
-    if(instr.type==='SIP'||instr.type==='Mutual Fund'||instr.type==='RD'){
-      // If NAV-based: use units × currentNAV
-      if((instr.type==='SIP'||instr.type==='Mutual Fund')&&(instr.units||0)>0&&(instr.currentNAV||instr.lastBuyNAV)){
+    if(isUnitType(instr.type)||instr.type==='RD'){
+      // If a latest price is on file, value at units × price.
+      if(isUnitType(instr.type)&&(instr.units||0)>0&&(instr.currentNAV||instr.lastBuyNAV)){
         return (instr.units||0)*(instr.currentNAV||instr.lastBuyNAV||0);
       }
       return sipFV(instr.amount,instr.returnRate||0,instr.years);
@@ -6598,15 +6658,15 @@ function PageGoals({data,setData,toast}){
             <div className="fg"><label style={{fontSize:10.5}}>Type</label><select value={instrForm.type} onChange={e=>setInstrForm(f=>({...f,type:e.target.value}))}>
               {INV_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
             </select></div>
-            <div className="fg"><label style={{fontSize:10.5}}>{instrForm.type==='FD'||instrForm.type==='PPF'?'Principal ({CUR.sym})':'Monthly ({CUR.sym})'}</label><input type="number" placeholder="0" value={instrForm.amount} onChange={e=>setInstrForm(f=>({...f,amount:e.target.value}))}/></div>
+            <div className="fg"><label style={{fontSize:10.5}}>{instrForm.type==='FD'||instrForm.type==='PPF'?`Principal (${CUR.sym})`:`Monthly (${CUR.sym})`}</label><input type="number" placeholder="0" value={instrForm.amount} onChange={e=>setInstrForm(f=>({...f,amount:e.target.value}))}/></div>
             <div className="fg"><label style={{fontSize:10.5}}>Return Rate (%)</label><input type="number" placeholder="12" value={instrForm.returnRate} onChange={e=>setInstrForm(f=>({...f,returnRate:e.target.value}))}/></div>
             <div className="fg"><label style={{fontSize:10.5}}>Duration (Years)</label><input type="number" placeholder="5" value={instrForm.years} onChange={e=>setInstrForm(f=>({...f,years:e.target.value}))}/></div>
             <div className="fg"><label style={{fontSize:10.5}}>Color</label>
               <div style={{display:'flex',gap:5,marginTop:3}}>{COLORS.map(c=><div key={c} onClick={()=>setInstrForm(f=>({...f,color:c}))} style={{width:18,height:18,borderRadius:99,background:c,cursor:'pointer',border:instrForm.color===c?'2.5px solid var(--n800)':'2.5px solid transparent'}}/> )}</div>
             </div>
-            {(instrForm.type==='SIP'||instrForm.type==='Mutual Fund')&&<>
-              <div className="fg"><label style={{fontSize:10.5}}>Units Held</label><input type="number" placeholder="0" value={instrForm.units} onChange={e=>setInstrForm(f=>({...f,units:e.target.value}))}/></div>
-              <div className="fg"><label style={{fontSize:10.5}}>Current NAV ({CUR.sym})</label><input type="number" placeholder="0" value={instrForm.currentNAV} onChange={e=>setInstrForm(f=>({...f,currentNAV:e.target.value}))}/></div>
+            {isUnitType(instrForm.type)&&<>
+              <div className="fg"><label style={{fontSize:10.5}}>{unitLabel(instrForm.type)} Held</label><input type="number" placeholder="0" value={instrForm.units} onChange={e=>setInstrForm(f=>({...f,units:e.target.value}))}/></div>
+              <div className="fg"><label style={{fontSize:10.5}}>Latest {priceLabel(instrForm.type)} ({CUR.sym})</label><input type="number" placeholder="0" value={instrForm.currentNAV} onChange={e=>setInstrForm(f=>({...f,currentNAV:e.target.value}))}/></div>
             </>}
           </div>
           <div style={{display:'flex',gap:6}}>
@@ -6993,8 +7053,8 @@ const NAV=[
 const TABS={
   fund:      [{id:'fund',l:'Bank Balance'},{id:'reconcile',l:'Reconciliation'}],
   expense:   [{id:'expense',l:'Expenses'},{id:'income',l:'Income'},{id:'invtracker',l:'Investments'}],
-  budget:    [{id:'budget',l:'Budget vs Actual'},{id:'provision',l:'Future Outflows'}],
-  cc:        [{id:'cc',l:'Credit Cards'},{id:'loan',l:'Loans'},{id:'debt',l:'Debt Optimizer'}],
+  budget:    [{id:'budget',l:'Budget vs Actual'}],
+  cc:        [{id:'cc',l:'Credit Cards'},{id:'loan',l:'Loans'},{id:'debt',l:'Debt Optimizer'},{id:'provision',l:'Future Outflows'}],
   goals:     [{id:'goals',l:'Savings Goals'},{id:'recurring',l:'Recurring'},{id:'forecast',l:'Forecast'}],
   pnl:       [{id:'pnl',l:'P & L Statement'},{id:'cfo',l:'CFO Dashboard'}],
   master:    [{id:'master',l:'Master Settings'},{id:'data',l:'Data Management'},{id:'drive',l:'Google Drive'},{id:'profile',l:'Profile & Period'}],
