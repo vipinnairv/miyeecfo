@@ -1135,6 +1135,35 @@ function instrValueFromTxs(instr,txs){
   return{value,invested,units,priced:false};
 }
 
+/* XIRR: the money-weighted annual return that discounts every dated cashflow
+   back to zero. Contributions are outflows (negative), today's value is one
+   inflow (positive). Solved by bisection, which always converges for a normal
+   invest-then-value profile. Returns a percentage, or null when it cannot be
+   defined (no flows, no time elapsed, or no sign change). */
+function xirr(flows){
+  if(!flows||flows.length<2)return null;
+  const t0=Math.min(...flows.map(f=>+new Date(f.date)));
+  const yrs=f=>(+new Date(f.date)-t0)/(365*86400000);
+  const hasPos=flows.some(f=>f.amount>0),hasNeg=flows.some(f=>f.amount<0);
+  if(!hasPos||!hasNeg)return null;
+  const npv=rate=>flows.reduce((s,f)=>s+f.amount/Math.pow(1+rate,yrs(f)),0);
+  let lo=-0.9999,hi=100;
+  if(npv(lo)*npv(hi)>0)return null;
+  for(let i=0;i<200;i++){
+    const mid=(lo+hi)/2,v=npv(mid);
+    if(Math.abs(v)<1e-6)return mid*100;
+    (npv(lo)*v<0?hi=mid:lo=mid);
+  }
+  return (lo+hi)/2*100;
+}
+// XIRR from a set of contributions plus the value they are worth today.
+const xirrFromTxs=(txs,valueToday)=>{
+  if(!txs.length||valueToday<=0)return null;
+  const flows=txs.map(t=>({amount:-(t.amount||0),date:t.date}));
+  flows.push({amount:valueToday,date:new Date().toISOString().slice(0,10)});
+  return xirr(flows);
+};
+
 function computeFin(data,months){
   const {transactions=[],accounts=[],creditCards=[],loans=[],budgetLimits={},expenseCategories=[],investmentTxs=[],goals=[]}=data;
 
@@ -5889,7 +5918,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
     const tm=new Date().toISOString().slice(0,7);
     const paidThisMonth=txs.some(t=>t.date.slice(0,7)===tm);
     return{...i,txs,totalInvested:val.invested,corpus:val.value,gain:val.value-val.invested,
-      unitsHeld:val.units,priced:val.priced,paidThisMonth};
+      unitsHeld:val.units,priced:val.priced,paidThisMonth,xirr:xirrFromTxs(txs,val.value)};
   });
 
   const totalInvestedAll=instrStats.reduce((s,p)=>s+p.totalInvested,0);
@@ -6050,6 +6079,8 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
           const gInstrs=instrStats.filter(i=>i.goalId===g.id);
           const gCorpus=gInstrs.reduce((s,i)=>s+i.corpus,0);
           const gInvested=gInstrs.reduce((s,i)=>s+i.totalInvested,0);
+          // Money-weighted return across every contribution to this goal.
+          const gXirr=xirrFromTxs(gInstrs.flatMap(i=>i.txs),gCorpus);
           const pct=g.targetAmount>0?Math.min(100,g.currentAmount/g.targetAmount*100):0;
           return(
             <div key={g.id} className="card mb3">
@@ -6100,6 +6131,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                                 {l:'Invested',v:fmtINR(p.totalInvested,true),c:'var(--n700)'},
                                 {l:p.priced?'Value Today':'Corpus Today',v:fmtINR(p.corpus,true),c:p.color||'var(--g)',bold:true},
                                 {l:p.gain>=0?'Gain':'Loss',v:`${p.gain>=0?'+':'−'}${fmtINR(Math.abs(p.gain),true)}`,c:p.gain>=0?'var(--gd)':'var(--r)',bold:true},
+                                {l:'XIRR',v:p.xirr==null?'–':`${p.xirr>=0?'':'−'}${Math.abs(p.xirr).toFixed(1)}%`,c:p.xirr==null?'var(--n400)':p.xirr>=0?'var(--gd)':'var(--r)',bold:true},
                                 {l:'Entries',v:p.txs.length+' contributions',c:'var(--n500)'},
                               ].map(x=>(
                                 <div key={x.l} style={{background:'var(--n50)',borderRadius:7,padding:'6px 9px'}}>
@@ -6150,6 +6182,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
               )}
               {gInstrs.length>0&&<div style={{marginTop:10,paddingTop:8,borderTop:'1px solid var(--n100)',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:11.5}}>
                 <span style={{color:'var(--n500)'}}>Invested: <strong>{fmtINR(gInvested,true)}</strong></span>
+                <span style={{color:'var(--n500)'}}>XIRR: <strong style={{color:gXirr==null?'var(--n400)':gXirr>=0?'var(--gd)':'var(--r)'}}>{gXirr==null?'–':`${gXirr>=0?'':'−'}${Math.abs(gXirr).toFixed(1)}%`}</strong></span>
                 <span style={{color:'var(--g)',fontWeight:700}}>Corpus: {fmtINR(gCorpus,true)}</span>
               </div>}
             </div>
