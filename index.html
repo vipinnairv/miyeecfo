@@ -1347,8 +1347,17 @@ function computeReconciliation(data,months){
 
   for(const t of transactions){
     if(!mSet.has(monthOf(t)))continue;
-    if(t.type!=='income'&&t.type!=='expense')continue;
     const amt=t.amount||0;
+    // Self-transfer: money leaves one fund and lands in another. Net zero
+    // across your funds, but each bucket must see its side of the move.
+    if(t.type==='transfer'){
+      const fb=FUND_OF_MODE[t.paymentMode||''],tb=FUND_OF_MODE[t.transferTo||''];
+      if(fb){mv[fb].outflow+=amt;mv[fb].outCount++;note(fb,'out','Transfer out',amt);}
+      if(tb){mv[tb].inflow+=amt;mv[tb].inCount++;note(tb,'in','Transfer in',amt);}
+      if(!fb&&!tb){unclassified.push({...t,why:'Transfer with no recognised fund on either side'});}
+      continue;
+    }
+    if(t.type!=='income'&&t.type!=='expense')continue;
     const mode=t.paymentMode||'';
     if(mode==='Credit Card'){
       // A card spend hits the card, not your cash. Income on a card is not a
@@ -2195,6 +2204,19 @@ function PageReconcile({data,setData,toast,setPage}){
   const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
   const r=useReconciliation(data,months);
   const [showModes,setShowModes]=useState(false);
+  // ── Record a self-transfer between two of your own funds ──
+  const BUCKET_MODE={bank:'NEFT/Bank Transfer',cash:'Cash',wallet:'Wallet'};
+  const tef={from:'bank',to:'cash',amount:'',date:new Date().toISOString().slice(0,10),notes:''};
+  const [xfer,setXfer]=useState(null);
+  const saveXfer=()=>{
+    if(!xfer.amount||+xfer.amount<=0){toast('Enter an amount','r');return;}
+    if(xfer.from===xfer.to){toast('Pick two different funds','r');return;}
+    const tx={id:uid(),type:'transfer',amount:+xfer.amount,date:xfer.date,month:xfer.date.slice(0,7),
+      category:'Self-transfer',desc:xfer.notes||`Transfer ${xfer.from} → ${xfer.to}`,
+      paymentMode:BUCKET_MODE[xfer.from],transferTo:BUCKET_MODE[xfer.to],merchant:''};
+    setData(d=>({...d,transactions:[...d.transactions,tx]}));
+    toast('Transfer recorded','g');setXfer(null);
+  };
 
   const setOpening=(id,val)=>setData(d=>({...d,
     accounts:d.accounts.map(a=>a.id===id?{...a,opening:val===''||val===null?null:+val}:a)}));
@@ -2232,8 +2254,24 @@ function PageReconcile({data,setData,toast,setPage}){
             Does what you recorded moving agree with what you say you hold? · {periodLabel(profile.periodStart,profile.periodEnd)}
           </div>
         </div>
-        <button className="btn btn-s btn-sm" onClick={()=>setPage('fund')}><Ic n="bank" s={12}/>Edit accounts</button>
+        <div style={{display:'flex',gap:6}}>
+          <button className="btn btn-s btn-sm" onClick={()=>setXfer(tef)}><Ic n="refresh" s={12}/>Record transfer</button>
+          <button className="btn btn-s btn-sm" onClick={()=>setPage('fund')}><Ic n="bank" s={12}/>Edit accounts</button>
+        </div>
       </div>
+      {xfer&&<Modal title="Record a self-transfer" onClose={()=>setXfer(null)}
+        foot={<><button className="btn btn-s btn-sm" onClick={()=>setXfer(null)}>Cancel</button><button className="btn btn-p btn-sm" onClick={saveXfer}><Ic n="ok" s={12} c="#fff"/>Save</button></>}>
+        <div className="alert ai mb2"><Ic n="prov" s={13}/><span>Moving money between your own funds nets to zero overall, but each fund needs to see its side so reconciliation balances.</span></div>
+        <div className="f2 mb2">
+          <div className="fg"><label>From</label><select value={xfer.from} onChange={e=>setXfer(x=>({...x,from:e.target.value}))}>{FUND_BUCKETS.map(b=><option key={b.key} value={b.key}>{b.label}</option>)}</select></div>
+          <div className="fg"><label>To</label><select value={xfer.to} onChange={e=>setXfer(x=>({...x,to:e.target.value}))}>{FUND_BUCKETS.map(b=><option key={b.key} value={b.key}>{b.label}</option>)}</select></div>
+        </div>
+        <div className="f2 mb2">
+          <div className="fg"><label>Amount ({CUR.sym})</label><input type="number" placeholder="0" value={xfer.amount} onChange={e=>setXfer(x=>({...x,amount:e.target.value}))}/></div>
+          <div className="fg"><label>Date</label><input type="date" value={xfer.date} onChange={e=>setXfer(x=>({...x,date:e.target.value}))}/></div>
+        </div>
+        <div className="fg"><label>Note (optional)</label><input value={xfer.notes} onChange={e=>setXfer(x=>({...x,notes:e.target.value}))} placeholder="e.g. ATM withdrawal"/></div>
+      </Modal>}
 
       {noAccounts?(
         <div className="card" style={{textAlign:'center',padding:'40px 20px'}}>
@@ -2470,10 +2508,10 @@ function PageReconcile({data,setData,toast,setPage}){
           <div style={{marginTop:12,padding:'10px 12px',background:'var(--ol)',borderRadius:8,border:'1px solid rgba(217,119,6,.2)'}}>
             <div style={{fontSize:11.5,fontWeight:700,color:'var(--o)',marginBottom:5}}>Known gaps</div>
             <div style={{fontSize:11,color:'var(--n600)',lineHeight:1.55}}>
-              Two things genuinely move your cash but are not recorded as transactions, so they will show up
-              as a difference: <strong>credit card bill payments</strong> and <strong>transfers between your own
-              accounts</strong>. If your bank bucket is short by roughly what you paid off your cards this
-              period, that is almost certainly the reason.
+              <strong>Credit card bill payments</strong> are not recorded as transactions, so they will show up
+              as a difference. If your bank bucket is short by roughly what you paid off your cards this period,
+              that is almost certainly the reason. <strong>Transfers between your own funds</strong> are now
+              covered: use <strong>Record transfer</strong> above and both sides balance.
             </div>
           </div>
         </div>
