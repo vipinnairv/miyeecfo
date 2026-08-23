@@ -965,6 +965,29 @@ function CJSBar({months,incomes,expenses,height=200}){
   return <div style={{height}}><canvas ref={ref}/></div>;
 }
 
+function CJSLine({labels,values,height=200,color='#00b386'}){
+  const ref=useRef();const inst=useRef();
+  useEffect(()=>{
+    if(!ref.current||!labels.length)return;
+    if(inst.current){inst.current.destroy();inst.current=null;}
+    inst.current=new Chart(ref.current,{
+      type:'line',
+      data:{labels,datasets:[{data:values,borderColor:color,backgroundColor:color+'14',borderWidth:2.5,
+        pointRadius:3,pointBackgroundColor:color,fill:true,tension:.3}]},
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmtINR(ctx.raw,true)}}},
+        scales:{
+          y:{ticks:{font:{size:9.5},callback:v=>v>=10000000?`${(v/10000000).toFixed(1)}Cr`:v>=100000?`${(v/100000).toFixed(0)}L`:v>=1000?`${(v/1000).toFixed(0)}K`:`${v}`,maxTicksLimit:6},grid:{color:'rgba(0,0,0,.05)'}},
+          x:{ticks:{font:{size:10}},grid:{display:false}}
+        }
+      }
+    });
+    return()=>{if(inst.current){inst.current.destroy();inst.current=null;}};
+  },[JSON.stringify(labels),JSON.stringify(values)]);
+  return <div style={{height}}><canvas ref={ref}/></div>;
+}
+
 function CJSDoughnut({labels,values,colors,height=210,title=''}){
   const ref=useRef();const inst=useRef();
   useEffect(()=>{
@@ -1581,6 +1604,19 @@ function PageDashboard({data,setPage}){
     return{cats:top,labels:top.map(([c])=>c),values:top.map(([,v])=>v),colors:top.map((_,i)=>CHART_COLORS[i%CHART_COLORS.length])};
   },[f.catMap]);
   const dues=useMemo(()=>creditCards.filter(c=>c.dueDate&&c.payable>0).sort((a,b)=>new Date(a.dueDate)-new Date(b.dueDate)),[creditCards]);
+  // Net worth month by month, modelled backward from today's figure using each
+  // month's retained cash and loan principal repaid. Investment value is held
+  // flat (no historical NAV), so this tracks the cash-driven build of net worth.
+  const nwTrend=useMemo(()=>{
+    const nowKey=monthKey(new Date());
+    const idxs=months.map((m,i)=>i).filter(i=>months[i].key<=nowKey);
+    if(idxs.length<2)return{labels:[],values:[]};
+    const pr=f.monthlyPrincipalRepaid||0;
+    const delta=i=>((f.mInc[i]||0)-(f.mExp[i]||0))+pr;
+    const values=[];let nw=f.netWorth;
+    for(let k=idxs.length-1;k>=0;k--){values[k]=Math.round(nw);nw-=delta(idxs[k]);}
+    return{labels:idxs.map(i=>months[i].label),values};
+  },[months,f.mInc,f.mExp,f.monthlyPrincipalRepaid,f.netWorth]);
 
   const sevStyle=s=>s===0
     ?{bg:'var(--rl)',border:'rgba(220,38,38,.3)',dot:'var(--r)',label:'Act now'}
@@ -1764,6 +1800,20 @@ function PageDashboard({data,setPage}){
             {f.invTotal>0&&<> · {f.invGain>=0?'gain':'loss'} {fmtINR(Math.abs(f.invGain),true)}</>}</span>
         </div>
       </div>
+
+      {/* ══ TIER 1 · NET WORTH OVER TIME ══ */}
+      {nwTrend.values.length>=2&&(
+        <div className="card mb3">
+          <div className="sh mb2">
+            <div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Net Worth Over Time</div>
+            <span className="tag tx" style={{fontSize:10}}>Modelled from monthly cash flow</span>
+          </div>
+          <CJSLine labels={nwTrend.labels} values={nwTrend.values} height={200} color={f.netWorth>=0?'#00b386':'#ef4444'}/>
+          <div style={{fontSize:10.5,color:'var(--n400)',marginTop:8}}>
+            Each month walks back from today's <strong style={{color:'var(--n600)'}}>{fmtINR(f.netWorth,true)}</strong> by the cash you kept and the loan principal you repaid. Investment value is held flat, since past prices are not stored.
+          </div>
+        </div>
+      )}
 
       {/* ══ TIER 1 · WHAT NEEDS YOUR ATTENTION ══ */}
       <div className="card mb3">
