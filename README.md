@@ -38,3 +38,16 @@ Sync: Connect your Google Drive in the Drive Sync tab for multi-device access.
 
 Analyze: Use the AI Insights tab to identify "leaks" in your budget.
 Note: For personalized professional help, use the Book Consultation button in the top bar to connect directly with Vipin Nair via Google Calendar. 📅
+
+## Development
+
+The UI is authored as JSX in `src/app.jsx` (the source of truth). `index.html` ships **precompiled** JavaScript inlined between the `__APP_START__` / `__APP_END__` markers, so browsers load no Babel and do no runtime transpiling, so the app starts in about a second instead of 20–30.
+
+After editing `src/app.jsx`, regenerate `index.html`:
+
+```
+npm install   # once, to fetch @babel/standalone
+npm run build # transpiles src/app.jsx and injects it into index.html
+```
+
+Do not hand-edit the compiled block in `index.html`; it is overwritten on every build.
