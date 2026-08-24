@@ -1,0 +1,7171 @@
+
+const {useState,useEffect,useRef,useMemo,useCallback}=React;
+
+/* ══════════════════════════════════════
+   SEED DATA
+══════════════════════════════════════ */
+const SEED={
+  profile:{
+    name:'Your Name',email:'you@example.com',phone:'',pan:'',
+    currency:'INR',city:'',avatar:'YN',
+    periodStart:'2025-04',
+    periodEnd:'2026-03',
+  },
+  accounts:[
+    {id:'a1',name:'Sample Bank Account',type:'bank',accNo:'XXXX-0000',balance:50000,opening:null,color:'#003366'},
+    {id:'f1',name:'Sample Fixed Deposit',type:'fd',accNo:'XXXX-0001',balance:100000,opening:null,color:'#007A62'},
+  ],
+  creditCards:[
+    {id:'cc1',bank:'Sample Bank',type:'Rewards Card (Visa)',accNo:'XXXX-XXXX-XXXX-0000',limit:100000,payable:5000,provision:0,dueDate:'2026-04-15'},
+  ],
+  loans:[],
+  provisions:[],
+  incomeCategories:['Salary / Consultancy','Freelance Income','Interest Income','Rental Income','Dividend Income','Other Income'],
+  expenseCategories:['House Rent','Groceries & Food','Electricity','Internet','Mobile Recharge','Insurance','Medical Expense','Entertainment','Travel','Education','Shopping','Other Expense'],
+  budgetLimits:{'House Rent':15000,'Groceries & Food':8000,'Electricity':2000,'Internet':800,'Mobile Recharge':500,'Insurance':1000,'Medical Expense':2000,'Entertainment':2000,'Travel':3000,'Education':1000,'Shopping':3000,'Other Expense':2000},
+  majorExpenseCategories:['House Rent','Insurance','Medical Expense'],
+  emergencyFund:{accountIds:[],targetMonths:6},
+  transactions:[
+    {id:'t1',date:'2025-04-01',type:'income',category:'Salary / Consultancy',desc:'April Salary',amount:60000,month:'2025-04',paymentMode:'NEFT/Bank Transfer',merchant:''},
+    {id:'t2',date:'2025-04-05',type:'expense',category:'House Rent',desc:'April Rent',amount:15000,month:'2025-04',paymentMode:'NEFT/Bank Transfer',merchant:''},
+    {id:'t3',date:'2025-04-10',type:'expense',category:'Groceries & Food',desc:'Monthly groceries',amount:4500,month:'2025-04',paymentMode:'UPI',merchant:''},
+  ],
+  goals:[],
+  recurring:[],
+  investmentTxs:[],
+}
+
+/* ══════════════════════════════════════
+   HELPERS
+══════════════════════════════════════ */
+const uid=()=>Math.random().toString(36).slice(2,9);
+
+/* ── CSV UTILITIES ─────────────────────────────────────────────
+   parseCSVLine : handles quoted fields with embedded commas/quotes
+   normalizeDate: accepts any common date format → YYYY-MM-DD
+   flexCol      : resolve column value by multiple alias names
+──────────────────────────────────────────────────────────────── */
+const parseCSVLine=(line)=>{
+  const res=[];let cur='';let inQ=false;
+  for(let i=0;i<line.length;i++){
+    const ch=line[i];
+    if(ch==='"'){if(inQ&&line[i+1]==='"'){cur+='"';i++;}else inQ=!inQ;}
+    else if(ch===','&&!inQ){res.push(cur.trim());cur='';}
+    else cur+=ch;
+  }
+  res.push(cur.trim());
+  return res;
+};
+const normalizeDate=(raw)=>{
+  if(!raw)return'';
+  const s=raw.trim().replace(/^["']|["']$/g,'');
+  if(!s)return'';
+  // Already ISO YYYY-MM-DD
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;
+  // DD/MM/YYYY  DD-MM-YYYY  DD.MM.YYYY
+  const dmy=s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
+  if(dmy){
+    const[,d,m,y]=dmy;
+    // if "month" part >12 it's actually day (some tools export M/D/Y)
+    if(+m>12)return`${y}-${d.padStart(2,'0')}-${m.padStart(2,'0')}`;
+    return`${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+  }
+  // YYYY/MM/DD  YYYY.MM.DD
+  const ymd=s.match(/^(\d{4})[\/\.](\d{1,2})[\/\.](\d{1,2})$/);
+  if(ymd){const[,y,m,d]=ymd;return`${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;}
+  // DD-Mon-YYYY  DD Mon YYYY  e.g. 15-Apr-2025  15 Apr 2025
+  const dMonY=s.match(/^(\d{1,2})[\s\-]([A-Za-z]{3,9})[\s\-](\d{4})$/);
+  if(dMonY){
+    const[,d,mon,y]=dMonY;
+    const mn={'jan':1,'feb':2,'mar':3,'apr':4,'may':5,'jun':6,'jul':7,'aug':8,'sep':9,'oct':10,'nov':11,'dec':12};
+    const m=mn[mon.slice(0,3).toLowerCase()];
+    if(m)return`${y}-${String(m).padStart(2,'0')}-${d.padStart(2,'0')}`;
+  }
+  // Mon DD, YYYY  e.g. Apr 15, 2025
+  const monDY=s.match(/^([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})$/);
+  if(monDY){
+    const[,mon,d,y]=monDY;
+    const mn={'jan':1,'feb':2,'mar':3,'apr':4,'may':5,'jun':6,'jul':7,'aug':8,'sep':9,'oct':10,'nov':11,'dec':12};
+    const m=mn[mon.slice(0,3).toLowerCase()];
+    if(m)return`${y}-${String(m).padStart(2,'0')}-${d.padStart(2,'0')}`;
+  }
+  // Fallback: try native Date (handles "April 15 2025", ISO with time, etc.)
+  const dt=new Date(s);
+  if(!isNaN(dt.getTime()))return dt.toISOString().slice(0,10);
+  return s; // return as-is; show error downstream
+};
+// Resolve a value from an object using multiple possible key aliases
+const flexCol=(o,...keys)=>{
+  for(const k of keys){const v=o[k.toLowerCase().replace(/[\s_\-]/g,'')];if(v!==undefined&&v!=='')return v;}
+  return'';
+};
+
+// Generate period months dynamically from profile
+function getPeriodMonths(start,end){
+  const months=[];
+  let [sy,sm]=start.split('-').map(Number);
+  const [ey,em]=end.split('-').map(Number);
+  while(sy<ey||(sy===ey&&sm<=em)){
+    const key=`${sy}-${String(sm).padStart(2,'0')}`;
+    const d=new Date(sy,sm-1);
+    const label=d.toLocaleString('en-IN',{month:'short',year:'2-digit'}).replace(' ','-');
+    months.push({key,label});
+    sm++;if(sm>12){sm=1;sy++;}
+  }
+  return months;
+}
+
+/* ══════════════════════════════════════
+   CURRENCY
+   One global setting drives every figure in the app. Indian currencies use the
+   lakh/crore scale; everything else uses thousands/millions/billions.
+══════════════════════════════════════ */
+const CURRENCIES={
+  INR:{sym:'₹',   name:'Indian Rupee',      locale:'en-IN',scale:'in'},
+  USD:{sym:'$',   name:'US Dollar',         locale:'en-US',scale:'west'},
+  EUR:{sym:'€',   name:'Euro',              locale:'de-DE',scale:'west'},
+  GBP:{sym:'£',   name:'British Pound',     locale:'en-GB',scale:'west'},
+  AED:{sym:'AED ',name:'UAE Dirham',        locale:'en-AE',scale:'west'},
+  SGD:{sym:'S$',  name:'Singapore Dollar',  locale:'en-SG',scale:'west'},
+  AUD:{sym:'A$',  name:'Australian Dollar', locale:'en-AU',scale:'west'},
+  CAD:{sym:'C$',  name:'Canadian Dollar',   locale:'en-CA',scale:'west'},
+  CHF:{sym:'CHF ',name:'Swiss Franc',       locale:'de-CH',scale:'west'},
+  JPY:{sym:'¥',   name:'Japanese Yen',      locale:'ja-JP',scale:'west'},
+  ZAR:{sym:'R',   name:'South African Rand',locale:'en-ZA',scale:'west'},
+  MYR:{sym:'RM',  name:'Malaysian Ringgit', locale:'ms-MY',scale:'west'},
+};
+// Module-level so the plain formatter functions below can read it without prop drilling.
+// App() sets it during render, before any child renders, so it is always current.
+let CUR=CURRENCIES.INR;
+const setCurrency=code=>{CUR=CURRENCIES[code]||CURRENCIES.INR;};
+
+// Name kept as fmtINR because it is called in ~400 places; it is currency-aware now.
+const fmtINR=(n,short=false)=>{
+  if(n===undefined||n===null||!isFinite(n))return'–';
+  const abs=Math.abs(n);const S=CUR.sym;let s;
+  if(short){
+    if(CUR.scale==='in'){
+      if(abs>=1e7)s=`${S}${(abs/1e7).toFixed(2)}Cr`;
+      else if(abs>=1e5)s=`${S}${(abs/1e5).toFixed(2)}L`;
+      else if(abs>=1e3)s=`${S}${(abs/1e3).toFixed(1)}K`;
+      else s=`${S}${Math.round(abs).toLocaleString(CUR.locale)}`;
+    }else{
+      if(abs>=1e9)s=`${S}${(abs/1e9).toFixed(2)}B`;
+      else if(abs>=1e6)s=`${S}${(abs/1e6).toFixed(2)}M`;
+      else if(abs>=1e3)s=`${S}${(abs/1e3).toFixed(1)}K`;
+      else s=`${S}${Math.round(abs).toLocaleString(CUR.locale)}`;
+    }
+  // Round sub-thousand values. A computed average such as a daily burn rate is
+  // otherwise rendered as "₹53.571" straight out of toLocaleString.
+  }else s=`${S}${Math.round(abs).toLocaleString(CUR.locale)}`;
+  return n<0?`-${s}`:s;
+};
+// Plain grouped number, no symbol. For table cells that carry the symbol in the header.
+const fmtNum=n=>(!isFinite(n)?'–':Math.round(n).toLocaleString(CUR.locale));
+
+// Tells the AI which currency and number scale to speak in, so switching to USD
+// stops it answering in lakhs and quoting Indian tax sections.
+const CUR_COUNTRY={INR:'India',USD:'the United States',EUR:'the Eurozone',GBP:'the United Kingdom',
+  AED:'the UAE',SGD:'Singapore',AUD:'Australia',CAD:'Canada',CHF:'Switzerland',JPY:'Japan',
+  ZAR:'South Africa',MYR:'Malaysia'};
+const curCode=()=>Object.keys(CURRENCIES).find(k=>CURRENCIES[k]===CUR)||'INR';
+const LOCALE_HINT=()=>{
+  const code=curCode();
+  const scale=CUR.scale==='in'?'Lakhs (L) and Thousands (K)':'Millions (M) and Thousands (K)';
+  return`All amounts are in ${code} and should be written with the "${CUR.sym.trim()}" symbol. Express large numbers in ${scale}. The user is based in ${CUR_COUNTRY[code]||'their country'}.`;
+};
+const TAX_HINT=()=>{
+  const code=curCode();
+  const country=CUR_COUNTRY[code]||'the user’s country';
+  return code==='INR'
+    ? 'Use Indian tax law: Sections 80C, 80D, 80E, 80CCD(1B) NPS, HRA, and the old vs new regime choice.'
+    : `Use the tax rules that apply in ${country}. If you are not confident about current thresholds there, say so and give the general principle instead of inventing figures.`;
+};
+
+// DD-MMM-YYYY format
+const fmtDate=d=>{
+  if(!d)return'–';
+  const dt=new Date(d);
+  return`${String(dt.getDate()).padStart(2,'0')}-${dt.toLocaleString('en-IN',{month:'short'})}-${dt.getFullYear()}`;
+};
+const fmtMonth=m=>{if(!m)return'–';const[y,mo]=m.split('-');return new Date(y,+mo-1).toLocaleString('en-IN',{month:'short',year:'2-digit'}).replace(' ','-');};
+const daysDiff=d=>{if(!d)return null;return Math.round((new Date(d)-new Date())/86400000);};
+const periodLabel=(s,e)=>{
+  const ds=new Date(s+'-01'),de=new Date(e+'-01');
+  const fmt=x=>x.toLocaleString('en-IN',{month:'short',year:'numeric'});
+  return`${fmt(ds)} – ${fmt(de)}`;
+};
+
+/* ══════════════════════════════════════
+   ICONS
+══════════════════════════════════════ */
+const Ic=({n,s=15,c='currentColor'})=>{
+  const ic={
+    home:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
+    fund:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>,
+    pnl:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>,
+    budget:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>,
+    exp:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>,
+    inc:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>,
+    prov:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+    loan:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>,
+    cc:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>,
+    gear:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+    db:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>,
+    user:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
+    plus:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+    del:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>,
+    edit:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
+    dl:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
+    up:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>,
+    refresh:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>,
+    ok:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>,
+    x:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+    bank:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><line x1="3" y1="22" x2="21" y2="22"/><line x1="6" y1="18" x2="6" y2="11"/><line x1="10" y1="18" x2="10" y2="11"/><line x1="14" y1="18" x2="14" y2="11"/><line x1="18" y1="18" x2="18" y2="11"/><polygon points="12 2 20 7 4 7"/></svg>,
+    wallet:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>,
+    bell:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>,
+    shield:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
+    cal:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
+    drive:<svg width={s} height={s} viewBox="0 0 87.3 78" fill="none"><path d="M6.6 66.85l3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3L27.5 53H0c0 1.55.4 3.1 1.2 4.5l5.4 9.35z" fill="#0066DA"/><path d="M43.65 25L29.9 1.2C28.55.4 27 0 25.45 0c-1.55 0-3.1.4-4.45 1.2L7.25 24.6c-.8 1.4-1.2 2.95-1.2 4.5h27.5L43.65 25z" fill="#00AC47"/><path d="M73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5H60.1l5.8 11.6 7.65 12.2z" fill="#EA4335"/><path d="M43.65 25L57.4 1.2C56.05.4 54.5 0 52.95 0H34.35c-1.55 0-3.1.4-4.45 1.2L43.65 25z" fill="#00832D"/><path d="M60.1 53H27.5L13.75 76.8c1.35.8 2.9 1.2 4.45 1.2h50.9c1.55 0 3.1-.4 4.45-1.2L60.1 53z" fill="#2684FC"/><path d="M73.4 28.5c-.8-1.4-1.95-2.5-3.3-3.3L56.4 1.5 43.65 25l16.45 28H87.3c0-1.55-.4-3.1-1.2-4.5L73.4 28.5z" fill="#FFBA00"/></svg>,
+    ai:<svg width={s} height={s} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M12 2l2.09 6.26L20 10.27l-4.91 3.82L16.18 22 12 18.27 7.82 22l1.09-7.91L4 10.27l5.91-2.01z"/></svg>,
+  };
+  return ic[n]||<svg width={s} height={s}/>;
+};
+
+/* ══════════════════════════════════════
+   TOAST
+══════════════════════════════════════ */
+function Toast({msg,type,action,onAction,onClose}){
+  // Undoable toasts linger longer. 3s is not enough to read a message and decide.
+  useEffect(()=>{const t=setTimeout(onClose,action?6000:3000);return()=>clearTimeout(t);},[action]);
+  return(
+    <div className={`toast ${type||'x'}`} role="status">
+      <Ic n="ok" s={13} c="#fff"/>{msg}
+      {action&&(
+        <button className="toast-act" onClick={()=>{onAction&&onAction();onClose();}}>{action}</button>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   CATEGORY INFERENCE
+   Learns purely from the user's own history. "DMart" has been filed under
+   "Groceries & Food" nine times, so offer that. No hardcoded merchant list.
+══════════════════════════════════════ */
+const inferCategory=(transactions,merchant,type)=>{
+  const m=(merchant||'').trim().toLowerCase();
+  if(m.length<2)return'';
+  const counts={};
+  for(const t of transactions){
+    if(t.type!==type||!t.merchant)continue;
+    const tm=t.merchant.trim().toLowerCase();
+    // exact, or either side a prefix of the other, so "DMart Powai" still matches "DMart"
+    if(tm!==m&&!tm.startsWith(m)&&!m.startsWith(tm))continue;
+    counts[t.category]=(counts[t.category]||0)+1;
+  }
+  let best='',n=0;
+  for(const k in counts)if(counts[k]>n){n=counts[k];best=k;}
+  return best;
+};
+// Same idea for payment mode. Most people pay a given merchant the same way.
+const inferPaymentMode=(transactions,merchant,type)=>{
+  const m=(merchant||'').trim().toLowerCase();
+  if(m.length<2)return'';
+  const counts={};
+  for(const t of transactions){
+    if(t.type!==type||!t.merchant||!t.paymentMode)continue;
+    const tm=t.merchant.trim().toLowerCase();
+    if(tm!==m&&!tm.startsWith(m)&&!m.startsWith(tm))continue;
+    counts[t.paymentMode]=(counts[t.paymentMode]||0)+1;
+  }
+  let best='',n=0;
+  for(const k in counts)if(counts[k]>n){n=counts[k];best=k;}
+  return best;
+};
+
+/* ══════════════════════════════════════
+   UNDOABLE DELETE
+   A confirm() dialog is friction people learn to click through, and it still
+   loses the data. Capturing the pre-delete state and offering it back for a few
+   seconds is both faster to use and safer.
+══════════════════════════════════════ */
+const makeUndoDelete=(data,setData,toast)=>(msg,mutate)=>{
+  const snapshot=data;                       // state as it is *before* the mutation
+  setData(mutate);
+  toast(msg,'x','Undo',()=>setData(snapshot));
+};
+
+/* ══════════════════════════════════════
+   MODAL
+══════════════════════════════════════ */
+function Modal({title,onClose,children,foot}){
+  return(
+    <div className="ov" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="mh"><div className="mt">{title}</div><button className="bic" onClick={onClose} aria-label="Close dialog"><Ic n="x" s={13}/></button></div>
+        <div className="mb">{children}</div>
+        {foot&&<div className="mf">{foot}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   DONUT RING
+══════════════════════════════════════ */
+function Donut({pct,color,size=86,stroke=9,label}){
+  const p=Math.min(100,Math.max(0,pct||0));
+  const r=(size-stroke*2)/2,c=2*Math.PI*r,off=c*(1-p/100);
+  return(
+    <div className="donut" style={{width:size,height:size}}>
+      <svg width={size} height={size} style={{transform:'rotate(-90deg)'}}>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="var(--n100)" strokeWidth={stroke}/>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeDasharray={c} strokeDashoffset={off} strokeLinecap="round" style={{transition:'stroke-dashoffset .6s ease'}}/>
+      </svg>
+      <div className="donut-c">
+        <div style={{fontFamily:'var(--m)',fontSize:13,fontWeight:800,color,lineHeight:1}}>{p.toFixed(1)}%</div>
+        {label&&<div style={{fontSize:8,color:'var(--n400)',textTransform:'uppercase',letterSpacing:.5,marginTop:1}}>{label}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   BAR CHART
+══════════════════════════════════════ */
+function BarChart({months,incomes,expenses,height=90}){
+  const max=Math.max(...incomes,...expenses,1);
+  const [hov,setHov]=useState(null);
+  return(
+    <div>
+      {hov!==null&&<div style={{textAlign:'center',fontSize:11,color:'var(--n500)',marginBottom:4,height:16}}>
+        <span style={{color:'var(--gd)',fontWeight:600}}>{fmtINR(incomes[hov],true)}</span>
+        <span style={{color:'var(--n400)',margin:'0 6px'}}>vs</span>
+        <span style={{color:'var(--r)',fontWeight:600}}>{fmtINR(expenses[hov],true)}</span>
+        <span style={{color:'var(--n400)',marginLeft:6}}>{months[hov]?.label}</span>
+      </div>}
+      {hov===null&&<div style={{height:16}}/>}
+      <div className="barchart" style={{height}}>
+        {months.map((m,i)=>{
+          const ip=(incomes[i]||0)/max*(height-22),ep=(expenses[i]||0)/max*(height-22);
+          return(
+            <div key={m.key} className="barcol" onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)}>
+              <div className="barpair" style={{height:height-22}}>
+                <div className="bar" style={{height:Math.max(2,ip),background:hov===i?'var(--g)':'rgba(0,179,134,.55)',alignSelf:'flex-end'}}/>
+                <div className="bar" style={{height:Math.max(2,ep),background:hov===i?'#ef4444':'rgba(239,68,68,.45)',alignSelf:'flex-end'}}/>
+              </div>
+              <div className="bar-lbl">{m.label}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
+/* ══════════════════════════════════════
+   CHART.JS COMPONENTS
+══════════════════════════════════════ */
+const CHART_COLORS=['#00b386','#3b82f6','#f59e0b','#8b5cf6','#ef4444','#06b6d4','#84cc16','#f43f5e','#6366f1','#fb923c'];
+
+function CJSBar({months,incomes,expenses,height=200}){
+  const ref=useRef();const inst=useRef();
+  useEffect(()=>{
+    if(!ref.current)return;
+    if(inst.current){inst.current.destroy();inst.current=null;}
+    const savings=incomes.map((v,i)=>v-(expenses[i]||0));
+    inst.current=new Chart(ref.current,{
+      type:'bar',
+      data:{
+        labels:months.map(m=>m.label),
+        datasets:[
+          {label:'Income',data:incomes,backgroundColor:'rgba(0,179,134,.75)',borderRadius:5,borderSkipped:false,order:2},
+          {label:'Expense',data:expenses,backgroundColor:'rgba(239,68,68,.65)',borderRadius:5,borderSkipped:false,order:3},
+          {label:'Savings',data:savings,type:'line',borderColor:'#3b82f6',backgroundColor:'rgba(59,130,246,.08)',borderWidth:2.5,pointRadius:4,pointBackgroundColor:'#3b82f6',fill:true,tension:.35,order:1,yAxisID:'y'},
+        ]
+      },
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{
+          legend:{position:'bottom',labels:{font:{size:11},boxWidth:11,padding:14}},
+          tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${fmtINR(ctx.raw,true)}`}}
+        },
+        scales:{
+          y:{beginAtZero:true,ticks:{font:{size:9.5},callback:v=>v>=10000000?`${(v/10000000).toFixed(1)}Cr`:v>=100000?`${(v/100000).toFixed(0)}L`:v>=1000?`${(v/1000).toFixed(0)}K`:`${v}`,maxTicksLimit:6},grid:{color:'rgba(0,0,0,.05)'}},
+          x:{ticks:{font:{size:10}},grid:{display:false}}
+        }
+      }
+    });
+    return()=>{if(inst.current){inst.current.destroy();inst.current=null;}};
+  },[JSON.stringify(months.map(m=>m.key)),JSON.stringify(incomes),JSON.stringify(expenses)]);
+  return <div style={{height}}><canvas ref={ref}/></div>;
+}
+
+function CJSLine({labels,values,height=200,color='#00b386'}){
+  const ref=useRef();const inst=useRef();
+  useEffect(()=>{
+    if(!ref.current||!labels.length)return;
+    if(inst.current){inst.current.destroy();inst.current=null;}
+    inst.current=new Chart(ref.current,{
+      type:'line',
+      data:{labels,datasets:[{data:values,borderColor:color,backgroundColor:color+'14',borderWidth:2.5,
+        pointRadius:3,pointBackgroundColor:color,fill:true,tension:.3}]},
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmtINR(ctx.raw,true)}}},
+        scales:{
+          y:{ticks:{font:{size:9.5},callback:v=>v>=10000000?`${(v/10000000).toFixed(1)}Cr`:v>=100000?`${(v/100000).toFixed(0)}L`:v>=1000?`${(v/1000).toFixed(0)}K`:`${v}`,maxTicksLimit:6},grid:{color:'rgba(0,0,0,.05)'}},
+          x:{ticks:{font:{size:10}},grid:{display:false}}
+        }
+      }
+    });
+    return()=>{if(inst.current){inst.current.destroy();inst.current=null;}};
+  },[JSON.stringify(labels),JSON.stringify(values)]);
+  return <div style={{height}}><canvas ref={ref}/></div>;
+}
+
+function CJSDoughnut({labels,values,colors,height=210,title=''}){
+  const ref=useRef();const inst=useRef();
+  useEffect(()=>{
+    if(!ref.current||!labels.length)return;
+    if(inst.current){inst.current.destroy();inst.current=null;}
+    const total=values.reduce((a,b)=>a+b,0);
+    inst.current=new Chart(ref.current,{
+      type:'doughnut',
+      data:{labels,datasets:[{data:values,backgroundColor:colors,borderWidth:2.5,borderColor:'#fff',hoverBorderColor:'#fff',hoverOffset:6}]},
+      options:{
+        responsive:true,maintainAspectRatio:false,cutout:'66%',
+        plugins:{
+          legend:{display:false},
+          tooltip:{callbacks:{label:ctx=>`${ctx.label}: ${fmtINR(ctx.raw,true)} (${total>0?(ctx.raw/total*100).toFixed(1):0}%)`}}
+        }
+      }
+    });
+    return()=>{if(inst.current){inst.current.destroy();inst.current=null;}};
+  },[JSON.stringify(labels),JSON.stringify(values)]);
+  return <div style={{position:'relative',height}}>
+    <canvas ref={ref}/>
+    {title&&<div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%)',textAlign:'center',pointerEvents:'none'}}>
+      <div style={{fontSize:9,color:'var(--n400)',fontWeight:600,textTransform:'uppercase',letterSpacing:.5}}>{title}</div>
+    </div>}
+  </div>;
+}
+
+/* ══════════════════════════════════════
+   EMERGENCY FUND CARD (Dashboard widget)
+══════════════════════════════════════ */
+function EfCard({data,accounts,avgMonthlyExp:fallbackExp,setPage}){
+  const ef=data.emergencyFund||{accountIds:[],targetMonths:6};
+  const efAccs=accounts.filter(a=>ef.accountIds.includes(a.id));
+  const efBalance=efAccs.reduce((s,a)=>s+a.balance,0);
+  // Emergency Fund target = Total monthly budget of ★ Major categories × target months
+  const majorCats=data.majorExpenseCategories||[];
+  const majorMonthlyBudget=majorCats.reduce((s,c)=>(data.budgetLimits[c]||0)+s,0);
+  const avgMonthlyExp=majorMonthlyBudget>0?majorMonthlyBudget:(fallbackExp||0);
+  const target=avgMonthlyExp*(ef.targetMonths||6);
+  const efPct=target>0?Math.min(100,efBalance/target*100):0;
+  const monthsCovered=avgMonthlyExp>0?efBalance/avgMonthlyExp:0;
+  const progressColor=efPct>=100?'#6ee7b7':efPct>=50?'#fcd34d':'#fca5a5';
+  const statusBg=efPct>=100?'rgba(0,179,134,.3)':efPct>=50?'rgba(217,119,6,.3)':'rgba(220,38,38,.3)';
+
+  // Never call an unconfigured fund "Underfunded". That reads as a failing grade
+  // for something the user has not set up yet. Show a neutral setup prompt instead.
+  const notSetUp=efAccs.length===0;
+  if(notSetUp)return(
+    <div className="ef-card">
+      <div style={{position:'relative',zIndex:1}}>
+        <div style={{fontSize:10,opacity:.6,textTransform:'uppercase',letterSpacing:.7,marginBottom:6}}>Emergency Fund</div>
+        <div style={{fontSize:15,fontWeight:700,marginBottom:6}}>Not set up yet</div>
+        <div style={{fontSize:11.5,opacity:.65,lineHeight:1.5,marginBottom:12,maxWidth:380}}>
+          Choose which of your accounts hold emergency savings and MiyeeCFO will track how many
+          months of expenses they cover.
+        </div>
+        <button className="btn btn-sm" onClick={()=>setPage&&setPage('master')}
+          aria-label="Set up emergency fund in Master Settings"
+          style={{background:'rgba(255,255,255,.16)',color:'#fff',border:'1px solid rgba(255,255,255,.28)'}}>
+          Link accounts →
+        </button>
+      </div>
+    </div>
+  );
+
+  const efStatus=efPct>=100?'Fully Funded':efPct>=50?'Partially Funded':'Underfunded';
+  return(
+    <div className="ef-card">
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',position:'relative',zIndex:1}}>
+        <div>
+          <div style={{fontSize:10,opacity:.6,textTransform:'uppercase',letterSpacing:.7,marginBottom:3}}>Emergency Fund</div>
+          <div style={{fontFamily:'var(--m)',fontSize:24,fontWeight:800}}>{fmtINR(efBalance)}</div>
+          <div style={{fontSize:11,opacity:.6,marginTop:3,fontFamily:'var(--m)'}}>{fmtINR(efBalance,true)} · {monthsCovered.toFixed(1)} months covered</div>
+        </div>
+        <div style={{textAlign:'right'}}>
+          <div style={{fontSize:10,opacity:.6,textTransform:'uppercase',letterSpacing:.5,marginBottom:4}}>Status</div>
+          <span style={{background:statusBg,color:progressColor,padding:'4px 10px',borderRadius:'99px',fontSize:11,fontWeight:700}}>{efStatus}</span>
+          <div style={{fontSize:10,opacity:.5,marginTop:4}}>Target: {ef.targetMonths||6} months</div>
+        </div>
+      </div>
+      <div style={{marginTop:8,position:'relative',zIndex:1,fontSize:10,opacity:.6}}>
+        {majorCats.length>0
+          ?`Based on \u2605 Major categories budget: ${fmtINR(majorMonthlyBudget,true)}/mo (${majorCats.join(', ')})`
+          :'No \u2605 Major categories set. Using avg monthly expense as fallback. Mark categories as Major in Master Settings.'}
+      </div>
+      <div style={{marginTop:8,position:'relative',zIndex:1}}>
+        <div style={{height:6,background:'rgba(255,255,255,.15)',borderRadius:99,overflow:'hidden'}}>
+          <div style={{height:'100%',width:`${efPct}%`,background:progressColor,borderRadius:99,transition:'width .5s'}}/>
+        </div>
+        <div style={{display:'flex',justifyContent:'space-between',marginTop:5}}>
+          <span style={{fontSize:10,opacity:.5}}>{efPct.toFixed(0)}% of target</span>
+          <span style={{fontSize:10,opacity:.5}}>Target: {fmtINR(target,true)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   PAYMENT MODE CARD (Dashboard widget)
+══════════════════════════════════════ */
+function PmCard({pmMap,totalExp}){
+  const pmList=Object.entries(pmMap||{}).sort((a,b)=>b[1]-a[1]);
+  return(
+    <div className="card">
+      <div className="sh mb3">
+        <div className="sh-t"><Ic n="fund" s={14} c="var(--g)"/>Payment Mode Breakdown</div>
+        <span className="tag tx" style={{fontSize:10}}>Period</span>
+      </div>
+      {pmList.length===0?(
+        <div style={{textAlign:'center',padding:'16px',color:'var(--n400)',fontSize:12}}>No payment mode data yet. Add transactions with payment modes.</div>
+      ):pmList.map(([pm,v])=>(
+        <div key={pm} style={{marginBottom:10}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
+            <span className={`pm-badge ${pmClass(pm)}`}>{pm}</span>
+            <span style={{fontFamily:'var(--m)',fontSize:12,fontWeight:600}}>{fmtINR(v,true)}</span>
+          </div>
+          <div className="prog"><div className="pf" style={{width:`${totalExp>0?v/totalExp*100:0}%`,background:'var(--g)'}}/></div>
+          <div style={{fontSize:10,color:'var(--n400)',marginTop:2}}>{totalExp>0?(v/totalExp*100).toFixed(1):0}% of expenses</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const PAYMENT_MODES=['Credit Card','UPI','NEFT/Bank Transfer','Cash','Debit Card','Wallet'];
+const pmClass=m=>{if(!m)return'tx';const l=m.toLowerCase();if(l.includes('credit'))return'pm-cc';if(l.includes('upi'))return'pm-upi';if(l.includes('neft')||l.includes('bank'))return'pm-neft';if(l.includes('cash'))return'pm-cash';if(l.includes('debit'))return'pm-dc';if(l.includes('wallet'))return'pm-wallet';return'tx';};
+
+/* ══════════════════════════════════════
+   FINANCIAL ENGINE: single source of truth
+   Every page derives its numbers from here so that
+   "Net Worth" means exactly one thing app-wide.
+══════════════════════════════════════ */
+const monthKey=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+
+/* ── Investment instrument valuation ──────────────────────────────
+   Unit-based holdings are worth what the market says today: units held
+   times the latest price you enter. Everything else (RD/FD/PPF) has no
+   quoted price, so it falls back to a modelled compound growth.
+   New types (Equity, Crypto) join the unit-based family. Their "NAV" is
+   just a share or coin price; enter it in your own reporting currency. */
+const UNIT_TYPES=['SIP','Mutual Fund','Equity (India)','Equity (US)','Crypto'];
+const isUnitType=t=>UNIT_TYPES.includes(t);
+// What the price field is called for a given type.
+const priceLabel=t=>(t==='SIP'||t==='Mutual Fund')?'NAV':'Price';
+const unitLabel=t=>t==='Crypto'?'Coins':(t==='Equity (India)'||t==='Equity (US)')?'Shares':'Units';
+// Latest price on file for an instrument, if any.
+const instrPrice=i=>i&&(i.currentNAV||i.lastBuyNAV)||0;
+/* Value of one instrument's logged contributions as of today.
+   Preference order:
+     1. unit-based with a latest price and units held → units × latest price
+     2. otherwise → each contribution compounded from its own date at the
+        instrument's modelled return rate.
+   Returns {value, invested, units, priced} so callers can show which basis
+   was used. */
+function instrValueFromTxs(instr,txs){
+  const invested=txs.reduce((s,t)=>s+(t.amount||0),0);
+  const units=txs.reduce((s,t)=>s+(t.units||0),0);
+  const px=instrPrice(instr);
+  if(instr&&isUnitType(instr.type)&&px>0&&units>0){
+    return{value:units*px,invested,units,priced:true};
+  }
+  const r=(instr&&instr.returnRate||0)/100/12,now=Date.now();
+  const value=txs.reduce((sum,t)=>{
+    const mo=Math.max(0,(now-new Date(t.date).getTime())/(86400000*30.44));
+    return sum+(t.amount||0)*(r>0?Math.pow(1+r,mo):1);
+  },0);
+  return{value,invested,units,priced:false};
+}
+
+/* XIRR: the money-weighted annual return that discounts every dated cashflow
+   back to zero. Contributions are outflows (negative), today's value is one
+   inflow (positive). Solved by bisection, which always converges for a normal
+   invest-then-value profile. Returns a percentage, or null when it cannot be
+   defined (no flows, no time elapsed, or no sign change). */
+function xirr(flows){
+  if(!flows||flows.length<2)return null;
+  const t0=Math.min(...flows.map(f=>+new Date(f.date)));
+  const yrs=f=>(+new Date(f.date)-t0)/(365*86400000);
+  const hasPos=flows.some(f=>f.amount>0),hasNeg=flows.some(f=>f.amount<0);
+  if(!hasPos||!hasNeg)return null;
+  const npv=rate=>flows.reduce((s,f)=>s+f.amount/Math.pow(1+rate,yrs(f)),0);
+  let lo=-0.9999,hi=100;
+  if(npv(lo)*npv(hi)>0)return null;
+  for(let i=0;i<200;i++){
+    const mid=(lo+hi)/2,v=npv(mid);
+    if(Math.abs(v)<1e-6)return mid*100;
+    (npv(lo)*v<0?hi=mid:lo=mid);
+  }
+  return (lo+hi)/2*100;
+}
+// XIRR from a set of contributions plus the value they are worth today.
+const xirrFromTxs=(txs,valueToday)=>{
+  if(!txs.length||valueToday<=0)return null;
+  const flows=txs.map(t=>({amount:-(t.amount||0),date:t.date}));
+  flows.push({amount:valueToday,date:new Date().toISOString().slice(0,10)});
+  return xirr(flows);
+};
+
+function computeFin(data,months){
+  const {transactions=[],accounts=[],creditCards=[],loans=[],budgetLimits={},expenseCategories=[],investmentTxs=[],goals=[]}=data;
+
+  // ── Balance sheet ──
+  const bankBal=accounts.filter(a=>a.type==='bank').reduce((s,a)=>s+a.balance,0);
+  const cashBal=accounts.filter(a=>a.type==='cash'||a.type==='wallet').reduce((s,a)=>s+a.balance,0);
+  const fdBal=accounts.filter(a=>a.type==='fd').reduce((s,a)=>s+a.balance,0);
+  const liquid=bankBal+cashBal;
+  const assets=liquid+fdBal;
+  const ccPay=creditCards.reduce((s,c)=>s+c.payable,0);
+  const ccProv=creditCards.reduce((s,c)=>s+c.provision,0);
+  const ccLiab=ccPay+ccProv;
+  const totalLimit=creditCards.reduce((s,c)=>s+c.limit,0);
+  const ccUtil=totalLimit>0?ccLiab/totalLimit*100:0;
+  const loanOS=loans.reduce((s,l)=>s+l.outstanding,0);
+  const provTotal=(data.provisions||[]).filter(p=>!p.paid).reduce((s,p)=>s+p.amount,0);
+  const liabilities=ccLiab+loanOS+provTotal;
+  // Liquid assets only, net of every liability. Investments are deliberately absent:
+  // this is the figure the runway and fund-balance cards are built on.
+  const liquidNetWorth=assets-liabilities;
+
+  // ── Period flows (single pass; months lookup is a Set) ──
+  const mSet=new Set(months.map(m=>m.key));
+  const periodTxs=transactions.filter(t=>mSet.has(t.month));
+  let totalInc=0,totalExp=0;
+  const incByMonth={},expByMonth={},catMap={},merchantMap={},merchantCnt={},pmMap={};
+  for(const t of periodTxs){
+    if(t.type==='income'){totalInc+=t.amount;incByMonth[t.month]=(incByMonth[t.month]||0)+t.amount;}
+    else if(t.type==='expense'){
+      totalExp+=t.amount;expByMonth[t.month]=(expByMonth[t.month]||0)+t.amount;
+      catMap[t.category]=(catMap[t.category]||0)+t.amount;
+      if(t.merchant){merchantMap[t.merchant]=(merchantMap[t.merchant]||0)+t.amount;merchantCnt[t.merchant]=(merchantCnt[t.merchant]||0)+1;}
+      const pm=t.paymentMode||'Unknown';pmMap[pm]=(pmMap[pm]||0)+t.amount;
+    }
+  }
+  const surplus=totalInc-totalExp;
+  const savingsRate=totalInc>0?surplus/totalInc*100:0;
+  const mInc=months.map(m=>incByMonth[m.key]||0);
+  const mExp=months.map(m=>expByMonth[m.key]||0);
+
+  // ── Investments ──────────────────────────────────────────────
+  // Money you put into an instrument is not spending, so it never touches `totalExp`.
+  // It leaves your cash though, which is why the P&L waterfall carries on past the
+  // surplus:  Income − Expense = Surplus − Investments = Balance Cash.
+  // The same money does not vanish. It reappears on the balance sheet as `invCorpus`,
+  // grown from each contribution's own date at its instrument's rate, and lands in
+  // net worth as an asset.
+  const instrById={};
+  for(const g of goals)for(const i of (g.instruments||[]))instrById[i.id]=i;
+  const invMonthOf=t=>t.month||(t.date||'').slice(0,7);
+  const invByMonth={};
+  let invTotal=0,invPeriod=0,invCorpus=0;
+  const txsByInstr={};
+  for(const t of investmentTxs){
+    const amt=t.amount||0;
+    invTotal+=amt;
+    const k=invMonthOf(t);
+    if(mSet.has(k)){invPeriod+=amt;invByMonth[k]=(invByMonth[k]||0)+amt;}
+    (txsByInstr[t.instrumentId||'?']=txsByInstr[t.instrumentId||'?']||[]).push(t);
+  }
+  // Value each instrument by its latest price where available, else by a
+  // modelled compound. See instrValueFromTxs for the exact rule.
+  for(const id in txsByInstr)invCorpus+=instrValueFromTxs(instrById[id],txsByInstr[id]).value;
+  const invGain=invCorpus-invTotal;
+  const mInv=months.map(m=>invByMonth[m.key]||0);
+  // What is genuinely left over once the money you committed to investing is set aside.
+  const cashBalance=surplus-invPeriod;
+  const investRate=totalInc>0?invPeriod/totalInc*100:0;
+  // THE canonical figure. Liquid net worth plus what your investments are worth today.
+  const netWorth=liquidNetWorth+invCorpus;
+
+  // ── Elapsed basis ── how much of the period has actually happened.
+  // Everything time-normalised (budgets, averages) MUST use this, never months.length,
+  // otherwise part-year spend gets compared against a full-year allowance.
+  const nowKey=monthKey(new Date());
+  const elapsedMonths=Math.min(months.length,Math.max(1,months.filter(m=>m.key<=nowKey).length));
+  const startDate=months.length?new Date(months[0].key+'-01'):new Date();
+  const [ey,em]=(months.length?months[months.length-1].key:nowKey).split('-').map(Number);
+  const endDate=new Date(ey,em,0); // last day of final month
+  const effectiveDate=new Date(Math.min(Date.now(),endDate.getTime()));
+  const daysElapsed=Math.max(1,Math.round((effectiveDate-startDate)/86400000));
+  const avgDailyBurn=totalExp/daysElapsed;
+  const avgMonthlyInc=totalInc/daysElapsed*30;
+  const avgMonthlyExp=totalExp/daysElapsed*30;
+  const cashSurplus=avgMonthlyInc-avgMonthlyExp;
+
+  // ── Budget, pro-rated to elapsed months ──
+  const budgetMonthly=expenseCategories.reduce((s,c)=>s+(budgetLimits[c]||0),0);
+  const budgetToDate=budgetMonthly*elapsedMonths;   // fair comparison vs totalExp
+  const budgetFullPeriod=budgetMonthly*months.length; // informational only
+  const budgetPct=budgetToDate>0?totalExp/budgetToDate*100:0;
+
+  // ── Liability tenure classification (the 12-month rule) ──
+  // A liability is SHORT TERM if it falls due within the next 12 months.
+  //  · Credit cards  are always short term by nature
+  //  · Overdraft     is a bank account with a negative balance; already inside `liquid`
+  //  · Loans         are short term only when they finish inside the window
+  //  · Expected future outflows are short term when their expected month is inside it
+  const horizon=new Date();horizon.setMonth(horizon.getMonth()+12);
+  const horizonKey=`${horizon.getFullYear()}-${String(horizon.getMonth()+1).padStart(2,'0')}`;
+  const isShortTermLoan=l=>{
+    if(!l.endDate)return false;                    // open-ended → treat as long term
+    const end=new Date(l.endDate);
+    return isFinite(end)&&end<=horizon;
+  };
+  const shortTermLoans=loans.filter(isShortTermLoan);
+  const longTermLoans=loans.filter(l=>!isShortTermLoan(l));
+  const shortTermLoanOS=shortTermLoans.reduce((s,l)=>s+(l.outstanding||0),0);
+  const longTermLoanOS=longTermLoans.reduce((s,l)=>s+(l.outstanding||0),0);
+  // Overdrafts, broken out for display only. They already reduce `bankBal`.
+  const odBal=Math.abs(accounts.filter(a=>a.type==='bank'&&a.balance<0).reduce((s,a)=>s+a.balance,0));
+  // Expected future outflows landing inside the window
+  const provShortTerm=(data.provisions||[]).filter(p=>!p.paid&&(p.month||'')<=horizonKey).reduce((s,p)=>s+p.amount,0);
+  const shortTermLiab=ccLiab+shortTermLoanOS+provShortTerm;
+  // THE figure: what your funds cover once only near-term obligations are netted off.
+  // Long-term loan principal is deliberately excluded. It is not due yet.
+  const fundBalExclLTL=assets-shortTermLiab;
+  // For context: the slice of long-term debt that *is* payable in the next 12 months.
+  const ltCurrentPortion=longTermLoans.reduce((s,l)=>s+Math.min((l.emi||0)*12,l.outstanding||0),0);
+
+  // ── Loans ──
+  const totalEmi=loans.reduce((s,l)=>s+(l.emi||0),0);
+  const monthlyInterestCost=loans.reduce((s,l)=>s+(l.outstanding||0)*((l.roi||0)/100/12),0);
+  const monthlyPrincipalRepaid=Math.max(0,totalEmi-monthlyInterestCost);
+  const monthlyNWGrowth=cashSurplus+monthlyPrincipalRepaid;
+  const emiRatio=avgMonthlyInc>0?totalEmi/avgMonthlyInc*100:0;
+
+  // ── Runway ──
+  const burnRate=avgDailyBurn*30;
+  const liquidRunway=burnRate>0?liquid/burnRate:99;
+  const fundRunway=burnRate>0?assets/burnRate:99;
+
+  // ── Month-over-month deltas (last two COMPLETE months) ──
+  const completed=months.filter(m=>m.key<nowKey);
+  const lastM=completed[completed.length-1],prevM=completed[completed.length-2];
+  const mom=(map)=>{
+    if(!lastM||!prevM)return null;
+    const cur=map[lastM.key]||0,prv=map[prevM.key]||0;
+    if(prv===0)return null;
+    return{pct:(cur-prv)/Math.abs(prv)*100,cur,prv,label:lastM.label};
+  };
+  const momInc=mom(incByMonth),momExp=mom(expByMonth);
+
+  return{
+    bankBal,cashBal,fdBal,liquid,assets,ccPay,ccProv,ccLiab,totalLimit,ccUtil,
+    loanOS,provTotal,liabilities,netWorth,liquidNetWorth,
+    invTotal,invPeriod,invCorpus,invGain,mInv,cashBalance,investRate,
+    shortTermLoans,longTermLoans,shortTermLoanOS,longTermLoanOS,odBal,
+    provShortTerm,shortTermLiab,fundBalExclLTL,ltCurrentPortion,
+    periodTxs,totalInc,totalExp,surplus,savingsRate,mInc,mExp,
+    catMap,merchantMap,merchantCnt,pmMap,
+    elapsedMonths,daysElapsed,avgDailyBurn,burnRate,avgMonthlyInc,avgMonthlyExp,cashSurplus,
+    budgetMonthly,budgetToDate,budgetFullPeriod,budgetPct,
+    totalEmi,monthlyInterestCost,monthlyPrincipalRepaid,monthlyNWGrowth,emiRatio,
+    liquidRunway,fundRunway,momInc,momExp,
+  };
+}
+// Memoised so a keystroke elsewhere doesn't re-run every reduce on the dashboard.
+const useFin=(data,months)=>useMemo(()=>computeFin(data,months),[data,months]);
+
+/* ══════════════════════════════════════
+   RECONCILIATION ENGINE
+   Answers one question: does the money you have recorded moving
+   agree with the balances you say you hold?
+
+     Opening + Money In − Money Out = Expected Closing
+     Expected Closing vs Actual Balance = the difference to explain
+
+   Transactions carry a payment mode, not an account id, so the check runs
+   per FUND TYPE (bank / cash / wallet) rather than per account. Fixed
+   deposits are excluded. They move by maturity and transfer, not by
+   day-to-day spending, so folding them in would only add noise.
+══════════════════════════════════════ */
+
+// Which pot a payment mode draws on. Credit Card is deliberately absent:
+// spending on a card creates a liability, it does not move your own cash
+// until the bill is paid.
+const FUND_OF_MODE={
+  'NEFT/Bank Transfer':'bank',
+  'UPI':'bank',
+  'Debit Card':'bank',
+  'Cash':'cash',
+  'Wallet':'wallet',
+};
+const FUND_BUCKETS=[
+  {key:'bank',  label:'Bank',          types:['bank'],   modes:['NEFT/Bank Transfer','UPI','Debit Card']},
+  {key:'cash',  label:'Cash In Hand',  types:['cash'],   modes:['Cash']},
+  {key:'wallet',label:'Digital Wallet',types:['wallet'], modes:['Wallet']},
+];
+
+function computeReconciliation(data,months){
+  const {accounts=[],transactions=[],investmentTxs=[]}=data;
+  const mSet=new Set(months.map(m=>m.key));
+  const monthOf=t=>t.month||(t.date||'').slice(0,7);
+
+  const blank=()=>({inflow:0,outflow:0,invested:0,inCount:0,outCount:0,invCount:0,byMode:{}});
+  const mv={};FUND_BUCKETS.forEach(b=>{mv[b.key]=blank();});
+  // Movements that never touch your own funds, tracked so the page can say so.
+  let ccSpend=0,ccCount=0;
+  // Anything whose payment mode is missing or unrecognised: the reason a
+  // reconciliation fails to balance more often than not.
+  const unclassified=[];
+  let unclassifiedIn=0,unclassifiedOut=0;
+
+  const note=(bucket,kind,mode,amt)=>{
+    const m=mv[bucket];if(!m)return;
+    m.byMode[mode]=m.byMode[mode]||{in:0,out:0,inv:0};
+    m.byMode[mode][kind]+=amt;
+  };
+
+  for(const t of transactions){
+    if(!mSet.has(monthOf(t)))continue;
+    const amt=t.amount||0;
+    // Self-transfer: money leaves one fund and lands in another. Net zero
+    // across your funds, but each bucket must see its side of the move.
+    if(t.type==='transfer'){
+      const fb=FUND_OF_MODE[t.paymentMode||''],tb=FUND_OF_MODE[t.transferTo||''];
+      if(fb){mv[fb].outflow+=amt;mv[fb].outCount++;note(fb,'out','Transfer out',amt);}
+      if(tb){mv[tb].inflow+=amt;mv[tb].inCount++;note(tb,'in','Transfer in',amt);}
+      if(!fb&&!tb){unclassified.push({...t,why:'Transfer with no recognised fund on either side'});}
+      continue;
+    }
+    if(t.type!=='income'&&t.type!=='expense')continue;
+    const mode=t.paymentMode||'';
+    if(mode==='Credit Card'){
+      // A card spend hits the card, not your cash. Income on a card is not a
+      // real thing, so only expenses are counted here.
+      if(t.type==='expense'){ccSpend+=amt;ccCount++;}
+      else{unclassified.push({...t,why:'Income marked as paid by credit card'});unclassifiedIn+=amt;}
+      continue;
+    }
+    const bucket=FUND_OF_MODE[mode];
+    if(!bucket){
+      unclassified.push({...t,why:mode?`Unrecognised payment mode "${mode}"`:'No payment mode recorded'});
+      if(t.type==='income')unclassifiedIn+=amt;else unclassifiedOut+=amt;
+      continue;
+    }
+    const m=mv[bucket];
+    if(t.type==='income'){m.inflow+=amt;m.inCount++;note(bucket,'in',mode,amt);}
+    else{m.outflow+=amt;m.outCount++;note(bucket,'out',mode,amt);}
+  }
+
+  // Investment contributions leave the fund they were paid from.
+  for(const t of investmentTxs){
+    if(!mSet.has(monthOf(t)))continue;
+    const amt=t.amount||0;
+    const mode=t.paymentMode||'NEFT/Bank Transfer';
+    const bucket=FUND_OF_MODE[mode];
+    if(!bucket){
+      unclassified.push({...t,type:'investment',category:'Investment contribution',
+        why:mode?`Unrecognised payment mode "${mode}"`:'No payment mode recorded'});
+      unclassifiedOut+=amt;continue;
+    }
+    mv[bucket].invested+=amt;mv[bucket].invCount++;note(bucket,'inv',mode,amt);
+  }
+
+  // ── Per-bucket reconciliation ──
+  const rows=FUND_BUCKETS.map(b=>{
+    const accs=accounts.filter(a=>b.types.includes(a.type));
+    const actual=accs.reduce((s,a)=>s+(a.balance||0),0);
+    const m=mv[b.key];
+    const net=m.inflow-m.outflow-m.invested;
+    // An account contributes to the opening figure only once someone has set one.
+    const withOpening=accs.filter(a=>a.opening!==null&&a.opening!==undefined);
+    const openingSet=accs.length>0&&withOpening.length===accs.length;
+    const opening=withOpening.reduce((s,a)=>s+(a.opening||0),0);
+    // With no opening on file, the ledger still tells you what it must have been.
+    const impliedOpening=actual-net;
+    const expected=opening+net;
+    const diff=actual-expected;
+    return{...b,accounts:accs,actual,opening,openingSet,impliedOpening,net,expected,diff,
+      partialOpening:withOpening.length>0&&withOpening.length<accs.length,
+      accountsWithout:accs.filter(a=>a.opening===null||a.opening===undefined),...m};
+  });
+
+  const tracked=rows.filter(r=>r.accounts.length>0);
+  const totals={
+    actual:tracked.reduce((s,r)=>s+r.actual,0),
+    opening:tracked.reduce((s,r)=>s+r.opening,0),
+    inflow:tracked.reduce((s,r)=>s+r.inflow,0),
+    outflow:tracked.reduce((s,r)=>s+r.outflow,0),
+    invested:tracked.reduce((s,r)=>s+r.invested,0),
+    net:tracked.reduce((s,r)=>s+r.net,0),
+  };
+  // Only buckets with an opening on file can produce a meaningful difference.
+  const reconcilable=tracked.filter(r=>r.openingSet);
+  totals.reconcilable=reconcilable.length;
+  totals.tracked=tracked.length;
+  totals.allChecked=tracked.length>0&&reconcilable.length===tracked.length;
+  // A second set of totals over the checked buckets alone. The verdict is stated in
+  // these, so every term of `opening + in − out − invested = expected vs actual`
+  // covers the same funds and the sum actually holds.
+  const sum=(rs,k)=>rs.reduce((s,r)=>s+r[k],0);
+  const checked={
+    opening:sum(reconcilable,'opening'),inflow:sum(reconcilable,'inflow'),
+    outflow:sum(reconcilable,'outflow'),invested:sum(reconcilable,'invested'),
+    expected:sum(reconcilable,'expected'),actual:sum(reconcilable,'actual'),
+    diff:sum(reconcilable,'diff'),
+  };
+  totals.expected=checked.expected;
+  totals.diff=checked.diff;
+
+  // A rupee or two of rounding is not a discrepancy worth chasing.
+  const TOL=1;
+  const balanced=reconcilable.length>0&&Math.abs(totals.diff)<=TOL;
+  const fdBal=accounts.filter(a=>a.type==='fd').reduce((s,a)=>s+(a.balance||0),0);
+
+  return{rows,tracked,totals,checked,balanced,tolerance:TOL,
+    unclassified,unclassifiedIn,unclassifiedOut,
+    ccSpend,ccCount,fdBal,
+    hasOpenings:reconcilable.length>0};
+}
+const useReconciliation=(data,months)=>useMemo(()=>computeReconciliation(data,months),[data,months]);
+
+/* ══════════════════════════════════════
+   ACTION ENGINE: turns state into a short to-do list
+   Replaces five scattered "status" cards with one ranked list.
+══════════════════════════════════════ */
+function buildActions(data,fin,months){
+  const out=[];
+  const push=(sev,title,detail,cta,page)=>out.push({sev,title,detail,cta,page});
+
+  // 1. Credit card dues, soonest first, only what's actually actionable
+  (data.creditCards||[]).filter(c=>c.dueDate&&c.payable>0).forEach(c=>{
+    const d=daysDiff(c.dueDate);
+    if(d===null||d>14)return;
+    if(d<0)push(0,`${c.bank} card is ${Math.abs(d)} days overdue`,`${fmtINR(c.payable)} outstanding. Pay now to stop interest accruing.`,'Open Credit Cards','cc');
+    else push(d<=3?0:1,`${c.bank} card due ${d===0?'today':`in ${d} day${d===1?'s':''}`}`,`${fmtINR(c.payable)} due on ${fmtDate(c.dueDate)}.`,'Open Credit Cards','cc');
+  });
+
+  // 2. Categories over their pro-rated budget
+  (data.expenseCategories||[]).forEach(cat=>{
+    const lim=data.budgetLimits[cat];if(!lim)return;
+    const allowed=lim*fin.elapsedMonths;if(allowed<=0)return;
+    const spent=(fin.catMap[cat]||0);
+    const pct=spent/allowed*100;
+    if(pct>=100)push(1,`${cat} is over budget`,`${fmtINR(spent,true)} spent vs ${fmtINR(allowed,true)} allowed so far (${pct.toFixed(0)}%).`,'Review Budget','budget');
+    else if(pct>=85)push(2,`${cat} is at ${pct.toFixed(0)}% of budget`,`${fmtINR(allowed-spent,true)} left for this period.`,'Review Budget','budget');
+  });
+
+  // 3. Emergency fund: distinguish "not set up" from "underfunded"
+  const ef=data.emergencyFund||{accountIds:[],targetMonths:6};
+  if(!ef.accountIds||ef.accountIds.length===0){
+    push(2,'Emergency fund not set up','Link the accounts that hold your emergency savings so cover can be tracked.','Set it up','master');
+  }else{
+    const efBal=(data.accounts||[]).filter(a=>ef.accountIds.includes(a.id)).reduce((s,a)=>s+a.balance,0);
+    const need=fin.avgMonthlyExp>0?fin.avgMonthlyExp:0;
+    const covered=need>0?efBal/need:0;
+    if(need>0&&covered<3)push(1,`Emergency fund covers only ${covered.toFixed(1)} months`,`Aim for ${ef.targetMonths||6} months (${fmtINR(need*(ef.targetMonths||6),true)}).`,'View accounts','fund');
+  }
+
+  // 4. Spending outpacing income
+  if(fin.surplus<0)push(0,'You are spending more than you earn',`${fmtINR(Math.abs(fin.surplus),true)} deficit this period.`,'See breakdown','reports');
+  else if(fin.savingsRate<10&&fin.totalInc>0)push(2,`Savings rate is ${fin.savingsRate.toFixed(0)}%`,'Below the 20% guideline. See which categories to trim.','See breakdown','reports');
+
+  // 5. Debt burden
+  if(fin.emiRatio>35)push(1,`EMIs are ${fin.emiRatio.toFixed(0)}% of income`,'Above the 35% comfort threshold. Consider prepaying the costliest loan.','Open Debt Optimizer','debt');
+
+  // 6. High credit utilisation
+  if(fin.ccUtil>30)push(1,`Credit utilisation is ${fin.ccUtil.toFixed(0)}%`,'Keeping this under 30% protects your credit score.','Open Credit Cards','cc');
+
+  // 6b. Investments: the surplus is only real savings once it is put somewhere
+  const invOn=data.profile?.features?.investmentTracker!==false;
+  if(invOn){
+    if(fin.invPeriod>fin.surplus&&fin.surplus>=0&&fin.invPeriod>0)
+      push(1,'You are investing more than you earned this period',
+        `${fmtINR(fin.invPeriod,true)} invested against a ${fmtINR(fin.surplus,true)} surplus. The difference is coming out of reserves.`,
+        'Review contributions','invtracker');
+    else if(fin.surplus>0&&fin.invPeriod===0&&fin.savingsRate>=15)
+      push(2,`${fmtINR(fin.surplus,true)} surplus is sitting idle`,
+        'Nothing logged as invested this period. Money put to work moves from cash into net worth as an asset.',
+        'Open Investment Tracker','invtracker');
+  }
+
+  // 6c. Reconciliation: a balance your ledger cannot explain is worth knowing about
+  const rec=computeReconciliation(data,months);
+  if(rec.hasOpenings&&!rec.balanced){
+    const off=Math.abs(rec.totals.diff);
+    push(1,`Your funds are off by ${fmtINR(off,true)}`,
+      `Recorded transactions do not explain the balance you hold. Usually a missing entry or a credit card bill payment.`,
+      'Open Reconciliation','reconcile');
+  }else if(rec.unclassified.length>0){
+    push(2,`${rec.unclassified.length} transaction${rec.unclassified.length>1?'s':''} without a payment mode`,
+      'These cannot be traced to a bank, cash or wallet balance until a mode is set.',
+      'Open Reconciliation','reconcile');
+  }
+
+  // 7. Recurring transactions waiting
+  const dueRec=(data.recurring||[]).filter(r=>r.active&&r.nextDate&&r.nextDate<=new Date().toISOString().slice(0,10)).length;
+  if(dueRec>0)push(2,`${dueRec} recurring transaction${dueRec>1?'s':''} due`,'These post automatically. Review them if anything looks off.','Open Recurring','recurring');
+
+  // 8. Empty state: a genuinely new user should see a start, not alarms
+  if((data.transactions||[]).length===0)push(2,'No transactions yet','Add your first income or expense to unlock every metric here.','Add transaction','expense');
+
+  return out.sort((a,b)=>a.sev-b.sev);
+}
+
+/* ══════════════════════════════════════
+   DASHBOARD
+══════════════════════════════════════ */
+function PageDashboard({data,setPage}){
+  const {creditCards,loans,profile}=data;
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const f=useFin(data,months);
+  const actions=useMemo(()=>buildActions(data,f,months),[data,f,months]);
+  const [showAll,setShowAll]=useState(false);
+
+  // Tier-2 detail derived values
+  const topMerchants=useMemo(()=>Object.entries(f.merchantMap).sort((a,b)=>b[1]-a[1]).slice(0,5),[f.merchantMap]);
+  const doughnut=useMemo(()=>{
+    const all=Object.entries(f.catMap).sort((a,b)=>b[1]-a[1]);
+    const top=all.slice(0,8);
+    const others=all.slice(8).reduce((s,[,v])=>s+v,0);
+    if(others>0)top.push(['Others',others]);
+    return{cats:top,labels:top.map(([c])=>c),values:top.map(([,v])=>v),colors:top.map((_,i)=>CHART_COLORS[i%CHART_COLORS.length])};
+  },[f.catMap]);
+  const dues=useMemo(()=>creditCards.filter(c=>c.dueDate&&c.payable>0).sort((a,b)=>new Date(a.dueDate)-new Date(b.dueDate)),[creditCards]);
+  // Net worth month by month, modelled backward from today's figure using each
+  // month's retained cash and loan principal repaid. Investment value is held
+  // flat (no historical NAV), so this tracks the cash-driven build of net worth.
+  const nwTrend=useMemo(()=>{
+    const nowKey=monthKey(new Date());
+    const idxs=months.map((m,i)=>i).filter(i=>months[i].key<=nowKey);
+    if(idxs.length<2)return{labels:[],values:[]};
+    const pr=f.monthlyPrincipalRepaid||0;
+    const delta=i=>((f.mInc[i]||0)-(f.mExp[i]||0))+pr;
+    const values=[];let nw=f.netWorth;
+    for(let k=idxs.length-1;k>=0;k--){values[k]=Math.round(nw);nw-=delta(idxs[k]);}
+    return{labels:idxs.map(i=>months[i].label),values};
+  },[months,f.mInc,f.mExp,f.monthlyPrincipalRepaid,f.netWorth]);
+
+  const sevStyle=s=>s===0
+    ?{bg:'var(--rl)',border:'rgba(220,38,38,.3)',dot:'var(--r)',label:'Act now'}
+    :s===1?{bg:'var(--ol)',border:'rgba(217,119,6,.28)',dot:'var(--o)',label:'Watch'}
+    :{bg:'var(--bl)',border:'rgba(37,99,235,.22)',dot:'var(--b)',label:'Consider'};
+
+  const Delta=({m,invert})=>{
+    if(!m)return null;
+    const up=m.pct>=0;
+    const good=invert?!up:up; // for expenses, up is bad
+    return(
+      <span title={`${m.label} vs previous month`} style={{fontSize:9.5,fontWeight:700,color:good?'var(--gd)':'var(--r)',display:'inline-flex',alignItems:'center',gap:2}}>
+        {up?'▲':'▼'}{Math.abs(m.pct).toFixed(0)}% MoM
+      </span>
+    );
+  };
+
+  return(
+    <div className="page">
+      {/* ══ TIER 1 · HERO: headline first, then the arithmetic that produced it ══ */}
+      <div className="hero mb3">
+        <div style={{position:'relative',zIndex:1}}>
+          <div className="hero-label">Net Worth</div>
+          <div className="hero-amount" style={{color:f.netWorth>=0?'#6ee7b7':'#fca5a5'}}>{fmtINR(f.netWorth)}</div>
+          <div style={{fontSize:11,opacity:.55,marginTop:4,fontFamily:'var(--m)'}}>
+            {fmtINR(f.netWorth,true)} · {periodLabel(profile.periodStart,profile.periodEnd)}
+            {f.invCorpus>0&&<> · incl. {fmtINR(f.invCorpus,true)} investments</>}
+          </div>
+        </div>
+        {/* Breakup reads left-to-right as a sum, so the headline is self-explaining */}
+        <div className="hero-calc">
+          {[
+            {l:'Bank',v:f.bankBal,c:'#93c5fd',op:null},
+            {l:'Cash & Wallet',v:f.cashBal,c:'#86efac',op:'+'},
+            {l:'Fixed Deposit',v:f.fdBal,c:'#fcd34d',op:'+'},
+            {l:'Investments',v:f.invCorpus,c:'#c4b5fd',op:'+'},
+            {l:'Credit Cards',v:f.ccLiab,c:f.ccLiab>0?'#fca5a5':'#6ee7b7',op:'−'},
+            {l:'Loans',v:f.loanOS,c:f.loanOS>0?'#fca5a5':'#6ee7b7',op:'−'},
+            {l:'Future Outflows',v:f.provTotal,c:f.provTotal>0?'#fdba74':'#6ee7b7',op:'−'},
+          ].map(a=>(
+            <React.Fragment key={a.l}>
+              {a.op&&<span className="hero-op" aria-hidden="true">{a.op}</span>}
+              <div className="hero-term">
+                <div className="hero-term-l">{a.l}</div>
+                <div className="hero-term-v" style={{color:a.c}}>{fmtINR(a.v,true)}</div>
+              </div>
+            </React.Fragment>
+          ))}
+          <span className="hero-op" aria-hidden="true">=</span>
+          <div className="hero-term">
+            <div className="hero-term-l">Net Worth</div>
+            <div className="hero-term-v" style={{color:f.netWorth>=0?'#6ee7b7':'#fca5a5',fontWeight:800}}>{fmtINR(f.netWorth,true)}</div>
+          </div>
+        </div>
+      </div>
+
+      {/* ══ TIER 1 · Short-term liquidity: net worth's near-term sibling ══ */}
+      <div className="card mb3 stl-card">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="bank" s={14} c="var(--b)"/>Fund Balance (Excl. Long-Term Loans)</div>
+          <span className="tag tx" style={{fontSize:10}}>Liabilities due within 12 months</span>
+        </div>
+        <div className="stl-row">
+          <div className="stl-main">
+            <div className="stl-val" style={{color:f.fundBalExclLTL>=0?'var(--pos)':'var(--neg)'}}>{fmtINR(f.fundBalExclLTL)}</div>
+            <div className="stl-sub">
+              What your funds cover once only near-term obligations are settled.
+              {f.longTermLoanOS>0&&<> Long-term loan principal of <strong>{fmtINR(f.longTermLoanOS,true)}</strong> is excluded. It is not due yet.</>}
+              {f.invCorpus>0&&<> Investments of <strong>{fmtINR(f.invCorpus,true)}</strong> are excluded too. They count towards net worth, not towards spendable funds.</>}
+            </div>
+          </div>
+          <div className="stl-calc">
+            {[
+              {l:'Bank + Cash',v:f.liquid,op:null,c:'var(--n800)',
+                note:f.odBal>0?`incl. OD −${fmtINR(f.odBal,true)}`:''},
+              {l:'Fixed Deposit',v:f.fdBal,op:'+',c:'var(--n800)'},
+              {l:'Credit Cards',v:f.ccLiab,op:'−',c:'var(--neg)',note:'always short term'},
+              {l:'Loans < 12 mo',v:f.shortTermLoanOS,op:'−',c:'var(--neg)',
+                note:f.shortTermLoans.length?`${f.shortTermLoans.length} loan${f.shortTermLoans.length>1?'s':''}`:'none'},
+              {l:'Outflows < 12 mo',v:f.provShortTerm,op:'−',c:'var(--warn)'},
+            ].map(x=>(
+              <React.Fragment key={x.l}>
+                {x.op&&<span className="stl-op" aria-hidden="true">{x.op}</span>}
+                <div className="stl-term">
+                  <div className="stl-term-l">{x.l}</div>
+                  <div className="stl-term-v" style={{color:x.c}}>{fmtINR(x.v,true)}</div>
+                  {x.note&&<div className="stl-term-n">{x.note}</div>}
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+        {(f.longTermLoanOS>0||f.ltCurrentPortion>0)&&(
+          <div className="stl-foot">
+            <span><strong>{f.longTermLoans.length}</strong> long-term loan{f.longTermLoans.length===1?'':'s'} excluded · {fmtINR(f.longTermLoanOS,true)} outstanding</span>
+            <span>Of that, <strong>{fmtINR(f.ltCurrentPortion,true)}</strong> falls due as EMIs over the next 12 months</span>
+          </div>
+        )}
+      </div>
+
+      {/* ══ TIER 1 · KPIs with month-over-month movement ══ */}
+      <div className="g4 mb3">
+        {[
+          {l:'Period Income',v:f.totalInc,col:'g',icon:'inc',bg:'var(--gl)',
+            trend:`Avg ${fmtINR(Math.round(f.avgMonthlyInc),true)}/mo`,delta:<Delta m={f.momInc}/>},
+          {l:'Period Expense',v:f.totalExp,col:'r',icon:'exp',bg:'var(--rl)',
+            trend:`Avg ${fmtINR(Math.round(f.avgMonthlyExp),true)}/mo`,delta:<Delta m={f.momExp} invert/>},
+          {l:'Net Surplus',v:f.surplus,col:f.surplus>=0?'g':'r',icon:'pnl',bg:f.surplus>=0?'var(--gl)':'var(--rl)',
+            trend:`${f.savingsRate.toFixed(1)}% saved`},
+          {l:'Budget Used',v:null,pct:f.budgetPct,col:f.budgetPct>100?'r':f.budgetPct>85?'o':'b',icon:'budget',
+            bg:f.budgetPct>100?'var(--rl)':f.budgetPct>85?'var(--ol)':'var(--bl)',
+            trend:`${fmtINR(f.totalExp,true)} of ${fmtINR(f.budgetToDate,true)}`},
+        ].map((k,i)=>(
+          <div key={k.l} className={`kpi-card ${k.col}`} style={{animationDelay:`${i*0.05}s`}}>
+            <div className="kpi-ic-wrap">
+              <div className="kpi-ic" style={{background:k.bg}}><Ic n={k.icon} c={k.col==='g'?'var(--g)':k.col==='r'?'var(--r)':k.col==='b'?'var(--b)':'var(--o)'}/></div>
+              {k.delta}
+            </div>
+            <div className="cl">{k.l}</div>
+            <div className={`cv ${k.col}`} style={{fontSize:18}}>
+              {k.pct!==undefined?`${k.pct.toFixed(0)}%`:fmtINR(k.v,true)}
+            </div>
+            <div className="cm" style={{fontSize:10}}>{k.trend}</div>
+          </div>
+        ))}
+      </div>
+      {f.budgetMonthly>0&&(
+        <div style={{fontSize:10.5,color:'var(--n400)',marginTop:-8,marginBottom:14}}>
+          Budget is pro-rated to <strong style={{color:'var(--n600)'}}>{f.elapsedMonths} of {months.length} months</strong> elapsed
+          ({fmtINR(f.budgetMonthly,true)}/mo × {f.elapsedMonths}), so spend is compared like-for-like.
+        </div>
+      )}
+
+      {/* ══ TIER 1 · Cash waterfall: where the period's money actually went ══ */}
+      <div className="card mb3 stl-card">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Income to Balance Cash</div>
+          <span className="tag tx" style={{fontSize:10}}>{periodLabel(profile.periodStart,profile.periodEnd)}</span>
+        </div>
+        <div className="stl-row">
+          <div className="stl-main">
+            <div className="stl-val" style={{color:f.cashBalance>=0?'var(--pos)':'var(--neg)'}}>{fmtINR(f.cashBalance)}</div>
+            <div className="stl-sub">
+              <strong>Balance Cash</strong> is what the period left you after living costs and after the money you
+              committed to investments.
+              {f.invPeriod>0
+                ? <> The {fmtINR(f.invPeriod,true)} you invested is not gone: it sits in <strong>Net Worth</strong> as an
+                    asset worth {fmtINR(f.invCorpus,true)} today.</>
+                : <> Log contributions in the Investment Tracker and they will step in here automatically.</>}
+            </div>
+            {profile.features?.investmentTracker!==false&&(
+              <button className="btn btn-s btn-sm" style={{marginTop:10}} onClick={()=>setPage('invtracker')}>
+                <Ic n="plus" s={11}/>Investment Tracker
+              </button>
+            )}
+          </div>
+          <div className="stl-calc">
+            {[
+              {l:'Income',v:f.totalInc,op:null,c:'var(--gd)'},
+              {l:'Expense',v:f.totalExp,op:'−',c:'var(--neg)'},
+              {l:'Surplus',v:f.surplus,op:'=',c:f.surplus>=0?'var(--pos)':'var(--neg)',
+                note:`${f.savingsRate.toFixed(1)}% of income`},
+              {l:'Investments',v:f.invPeriod,op:'−',c:'var(--p)',
+                note:f.invPeriod>0?`${f.investRate.toFixed(1)}% of income`:'none logged'},
+              {l:'Balance Cash',v:f.cashBalance,op:'=',c:f.cashBalance>=0?'var(--pos)':'var(--neg)',bold:true},
+            ].map(x=>(
+              <React.Fragment key={x.l}>
+                {x.op&&<span className="stl-op" aria-hidden="true">{x.op}</span>}
+                <div className="stl-term">
+                  <div className="stl-term-l">{x.l}</div>
+                  <div className="stl-term-v" style={{color:x.c,fontWeight:x.bold?800:700}}>{fmtINR(x.v,true)}</div>
+                  {x.note&&<div className="stl-term-n">{x.note}</div>}
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+        <div className="stl-foot">
+          <span>Investments are a transfer, not a cost. They never appear in <strong>Period Expense</strong>.</span>
+          <span>Lifetime invested <strong>{fmtINR(f.invTotal,true)}</strong> · worth <strong>{fmtINR(f.invCorpus,true)}</strong> today
+            {f.invTotal>0&&<> · {f.invGain>=0?'gain':'loss'} {fmtINR(Math.abs(f.invGain),true)}</>}</span>
+        </div>
+      </div>
+
+      {/* ══ TIER 1 · NET WORTH OVER TIME ══ */}
+      {nwTrend.values.length>=2&&(
+        <div className="card mb3">
+          <div className="sh mb2">
+            <div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Net Worth Over Time</div>
+            <span className="tag tx" style={{fontSize:10}}>Modelled from monthly cash flow</span>
+          </div>
+          <CJSLine labels={nwTrend.labels} values={nwTrend.values} height={200} color={f.netWorth>=0?'#00b386':'#ef4444'}/>
+          <div style={{fontSize:10.5,color:'var(--n400)',marginTop:8}}>
+            Each month walks back from today's <strong style={{color:'var(--n600)'}}>{fmtINR(f.netWorth,true)}</strong> by the cash you kept and the loan principal you repaid. Investment value is held flat, since past prices are not stored.
+          </div>
+        </div>
+      )}
+
+      {/* ══ TIER 1 · WHAT NEEDS YOUR ATTENTION ══ */}
+      <div className="card mb3">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="bell" s={14} c={actions.length?'var(--o)':'var(--g)'}/>What needs your attention</div>
+          {actions.length>3&&(
+            <button className="btn btn-s btn-sm" style={{fontSize:11}} onClick={()=>setShowAll(v=>!v)}>
+              {showAll?'Show top 3':`Show all ${actions.length}`}
+            </button>
+          )}
+        </div>
+        {actions.length===0?(
+          <div style={{textAlign:'center',padding:'22px 0',color:'var(--n400)',fontSize:13}}>
+            <div style={{fontSize:26,marginBottom:6}}>✓</div>
+            Nothing needs action. Dues are clear, budgets are on track.
+          </div>
+        ):(
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>
+            {(showAll?actions:actions.slice(0,3)).map((a,i)=>{
+              const st=sevStyle(a.sev);
+              return(
+                <div key={i} style={{display:'flex',gap:12,alignItems:'flex-start',padding:'11px 13px',borderRadius:10,background:st.bg,border:`1.5px solid ${st.border}`}}>
+                  <span style={{width:9,height:9,borderRadius:'50%',background:st.dot,flexShrink:0,marginTop:5}}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:700,color:'var(--n800)',marginBottom:2}}>{a.title}</div>
+                    <div style={{fontSize:11.5,color:'var(--n500)',lineHeight:1.45}}>{a.detail}</div>
+                  </div>
+                  <button className="btn btn-s btn-sm" style={{fontSize:10.5,flexShrink:0,whiteSpace:'nowrap'}}
+                    onClick={()=>setPage(a.page)} aria-label={`${a.cta}: ${a.title}`}>{a.cta} →</button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ══ TIER 2 · Everything below is collapsed by default ══ */}
+      <details className="dsec">
+        <summary className="dsec-s"><span className="dsec-c"/>Trends &amp; cash flow<span className="dsec-h">Monthly chart · credit utilisation · budget status</span></summary>
+        <div className="dsec-b">
+          <div className="row mb3">
+            <div className="card col">
+              <div className="sh mb2">
+                <div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Monthly Income · Expense · Savings</div>
+                <span className="tag tx" style={{fontSize:10}}>{months.length} months</span>
+              </div>
+              <CJSBar months={months} incomes={f.mInc} expenses={f.mExp} height={220}/>
+            </div>
+            <div style={{width:260,flexShrink:0,display:'flex',flexDirection:'column',gap:10}}>
+              <div className="card" style={{flex:1}}>
+                <div className="sh mb2"><div className="sh-t"><Ic n="cc" s={13} c="var(--g)"/>CC Utilization</div></div>
+                <div style={{display:'flex',alignItems:'center',gap:12}}>
+                  <Donut pct={f.ccUtil} color={f.ccUtil>30?'var(--r)':f.ccUtil>15?'var(--o)':'var(--g)'} size={76} stroke={7} label="Used"/>
+                  <div style={{flex:1}}>
+                    <div className="sr"><span className="sr-l">Billed</span><span className="sr-v neg">{fmtINR(f.ccPay,true)}</span></div>
+                    <div className="sr"><span className="sr-l">Unbilled</span><span className="sr-v" style={{color:'var(--o)'}}>{fmtINR(f.ccProv,true)}</span></div>
+                    <div className="sr"><span className="sr-l">Limit</span><span className="sr-v">{fmtINR(f.totalLimit,true)}</span></div>
+                  </div>
+                </div>
+              </div>
+              <div className="card" style={{flex:1}}>
+                <div className="sh mb2"><div className="sh-t"><Ic n="budget" s={13} c="var(--g)"/>Budget Status</div></div>
+                <div style={{marginBottom:8}}>
+                  <div className="prog"><div className="pf" style={{width:`${Math.min(100,f.budgetPct)}%`,background:f.budgetPct>100?'var(--r)':f.budgetPct>85?'var(--o)':'var(--g)'}}/></div>
+                </div>
+                <div className="sr"><span className="sr-l">Spent</span><span className="sr-v neg">{fmtINR(f.totalExp,true)}</span></div>
+                <div className="sr"><span className="sr-l">Allowed to date</span><span className="sr-v">{fmtINR(f.budgetToDate,true)}</span></div>
+                <div className="sr"><span className="sr-l">{f.budgetToDate-f.totalExp>=0?'Remaining':'Overspent'}</span><span className={`sr-v ${f.budgetToDate-f.totalExp>=0?'pos':'neg'}`}>{fmtINR(Math.abs(f.budgetToDate-f.totalExp),true)}</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <details className="dsec">
+        <summary className="dsec-s"><span className="dsec-c"/>Where the money went<span className="dsec-h">Categories · merchants · payment modes</span></summary>
+        <div className="dsec-b">
+          <div className="g2 mb3">
+            <div className="card">
+              <div className="sh mb2">
+                <div className="sh-t"><Ic n="exp" s={14} c="var(--g)"/>Expense by Category</div>
+                <span className="tag tx" style={{fontSize:10}}>{periodLabel(profile.periodStart,profile.periodEnd)}</span>
+              </div>
+              {doughnut.values.length===0
+                ?<div style={{fontSize:12,color:'var(--n400)',padding:'20px 0',textAlign:'center'}}>No expenses recorded yet.</div>
+                :<div style={{display:'flex',gap:14,alignItems:'flex-start'}}>
+                  <div style={{width:170,flexShrink:0}}>
+                    <CJSDoughnut labels={doughnut.labels} values={doughnut.values} colors={doughnut.colors} height={170} title="Expenses"/>
+                  </div>
+                  <div style={{flex:1,overflowY:'auto',maxHeight:185}}>
+                    {doughnut.cats.map(([cat,amt],i)=>{
+                      const pct=f.totalExp>0?amt/f.totalExp*100:0;
+                      return(
+                        <div key={cat} style={{display:'flex',alignItems:'center',gap:7,marginBottom:7}}>
+                          <span style={{width:8,height:8,borderRadius:2,background:doughnut.colors[i],flexShrink:0,display:'inline-block'}}/>
+                          <span style={{flex:1,fontSize:11.5,color:'var(--n700)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{cat}</span>
+                          <span style={{fontFamily:'var(--m)',fontSize:11,fontWeight:700,flexShrink:0}}>{fmtINR(amt,true)}</span>
+                          <span style={{fontSize:10,color:'var(--n400)',width:34,textAlign:'right',flexShrink:0}}>{pct.toFixed(0)}%</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              }
+            </div>
+            <PmCard pmMap={f.pmMap} totalExp={f.totalExp}/>
+          </div>
+          <div className="card">
+            <div className="sh mb2">
+              <div className="sh-t"><Ic n="exp" s={14} c="var(--p)"/>Top Merchants</div>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <span className="tag tx" style={{fontSize:10}}>by spend</span>
+                <button className="btn btn-g btn-sm" onClick={()=>setPage('expense')} style={{fontSize:10,padding:'2px 8px'}} aria-label="View all expenses">View →</button>
+              </div>
+            </div>
+            {topMerchants.length===0
+              ?<div style={{fontSize:12,color:'var(--n400)',padding:'8px 0'}}>No merchant data yet. Add a Merchant/Vendor when logging expenses.</div>
+              :topMerchants.map(([m,amt],i)=>{
+                const pct=f.totalExp>0?amt/f.totalExp*100:0;
+                const colors=['var(--p)','var(--b)','var(--t)','var(--o)','var(--g)'];
+                const cnt=f.merchantCnt[m]||1;
+                return(
+                  <div key={m} style={{marginBottom:10}}>
+                    <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
+                      <span style={{fontSize:12.5,color:'var(--n700)',display:'flex',alignItems:'center',gap:7,fontWeight:600}}>
+                        <span style={{width:8,height:8,borderRadius:2,background:colors[i],display:'inline-block',flexShrink:0}}/>{m}
+                      </span>
+                      <span style={{fontFamily:'var(--m)',fontSize:12,fontWeight:700}}>{fmtINR(amt,true)}</span>
+                    </div>
+                    <div className="prog"><div className="pf" style={{width:`${pct}%`,background:colors[i]}}/></div>
+                    <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'var(--n400)',marginTop:3}}>
+                      <span>{cnt} txn{cnt!==1?'s':''} · avg {fmtINR(amt/cnt,true)}</span>
+                      <span>{pct.toFixed(1)}% of expenses</span>
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      </details>
+
+      <details className="dsec">
+        <summary className="dsec-s"><span className="dsec-c"/>Safety net &amp; goals<span className="dsec-h">Emergency fund · savings goals</span></summary>
+        <div className="dsec-b">
+          <div className="g2">
+            <EfCard data={data} accounts={data.accounts} avgMonthlyExp={f.avgMonthlyExp} setPage={setPage}/>
+            <div className="card">
+              <div className="sh mb2">
+                <div className="sh-t"><Ic n="budget" s={14} c="var(--g)"/>Savings Goals</div>
+                <button className="btn btn-g btn-sm" onClick={()=>setPage('goals')} style={{marginLeft:'auto',fontSize:11}} aria-label="View all savings goals">View All →</button>
+              </div>
+              {(data.goals||[]).length===0
+                ?<div style={{fontSize:12,color:'var(--n400)',padding:'8px 0'}}>No goals set. Go to Savings Goals to create your first target.</div>
+                :(data.goals||[]).slice(0,3).map(g=>{
+                  const pct=g.targetAmount>0?Math.min(100,g.currentAmount/g.targetAmount*100):0;
+                  const monthsLeft=g.targetDate?Math.max(1,(new Date(g.targetDate)-new Date())/86400000/30):1;
+                  const needed=Math.max(0,(g.targetAmount-g.currentAmount)/monthsLeft);
+                  return(
+                    <div key={g.id} style={{marginBottom:14}}>
+                      <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
+                        <span style={{fontSize:12.5,fontWeight:700,color:'var(--n800)'}}>{g.name}</span>
+                        <span style={{fontFamily:'var(--m)',fontSize:11,color:'var(--n500)'}}>{pct.toFixed(0)}%</span>
+                      </div>
+                      <div className="prog" style={{height:6,marginBottom:4}}><div className="pf" style={{width:`${pct}%`,background:g.color||'var(--g)'}}/></div>
+                      <div style={{display:'flex',justifyContent:'space-between',fontSize:10.5,color:'var(--n400)'}}>
+                        <span>{fmtINR(g.currentAmount,true)} of {fmtINR(g.targetAmount,true)}</span>
+                        {g.targetDate&&<span style={{color:'var(--o)',fontWeight:600}}>{CUR.sym}{Math.round(needed).toLocaleString(CUR.locale)}/mo needed</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <details className="dsec">
+        <summary className="dsec-s"><span className="dsec-c"/>Debts<span className="dsec-h">{dues.length} card due{dues.length===1?'':'s'} · {loans.length} loan{loans.length===1?'':'s'}</span></summary>
+        <div className="dsec-b">
+          <div className="g2 mb3">
+            <div className="card">
+              <div className="sh mb3">
+                <div className="sh-t"><Ic n="cal" s={14} c="var(--g)"/>Upcoming Credit Card Dues</div>
+                <button className="btn btn-s btn-sm" onClick={()=>setPage('cc')} style={{fontSize:11}} aria-label="View all credit cards">View All</button>
+              </div>
+              {dues.length===0?<div style={{textAlign:'center',padding:'20px 0',color:'var(--n400)',fontSize:12.5}}>No upcoming dues. You're clear! ✓</div>:(
+                <div style={{display:'flex',flexDirection:'column',gap:8}}>
+                  {dues.slice(0,4).map(cc=>{
+                    const d=daysDiff(cc.dueDate);
+                    const urgent=d!==null&&d<=3,warn=d!==null&&d<=7;
+                    const bg=urgent?'linear-gradient(135deg,#7f1d1d,#dc2626)':warn?'linear-gradient(135deg,#78350f,#d97706)':'linear-gradient(135deg,#1e3a5f,#2563eb)';
+                    return(
+                      <div key={cc.id} className="due-card" style={{background:bg}}>
+                        <div className="due-urgency">
+                          <div>
+                            <div className="due-bank">{cc.bank}</div>
+                            <div className="due-card-type">{cc.type}</div>
+                          </div>
+                          <div className="due-days-badge" style={{background:urgent?'rgba(0,0,0,.3)':warn?'rgba(0,0,0,.25)':'rgba(255,255,255,.15)',color:'#fff',border:'1px solid rgba(255,255,255,.2)'}}>
+                            {d===0?'Due Today':d<0?`${Math.abs(d)}d Overdue`:`${d} days left`}
+                          </div>
+                        </div>
+                        <div className="due-amount-row">
+                          <div>
+                            <div style={{fontSize:9,opacity:.65,textTransform:'uppercase',letterSpacing:.5,color:'#fff',marginBottom:2}}>Amount Due</div>
+                            <div className="due-amount" style={{color:'#fff'}}>{fmtINR(cc.payable)}</div>
+                          </div>
+                          <div className="due-date-block">
+                            <div className="due-date-label" style={{color:'rgba(255,255,255,.65)'}}>Due On</div>
+                            <div className="due-date-val" style={{color:'#fcd34d'}}>{fmtDate(cc.dueDate)}</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="card">
+              <div className="sh mb2">
+                <div className="sh-t"><Ic n="loan" s={14} c="var(--g)"/>Loan Snapshot</div>
+                <span className="tag tr">Total O/S: {fmtINR(f.loanOS,true)}</span>
+              </div>
+              {loans.length===0?<div style={{textAlign:'center',padding:'20px 0',color:'var(--n400)',fontSize:12.5}}>No loans tracked.</div>:(
+                <div className="tw">
+                  <table>
+                    <thead><tr><th>Bank</th><th className="num">Outstanding</th><th className="num">EMI/Month</th><th>ROI</th><th>Repaid</th></tr></thead>
+                    <tbody>
+                      {loans.map(l=>{
+                        const pct=l.original>0?(l.original-l.outstanding)/l.original*100:0;
+                        return(
+                          <tr key={l.id}>
+                            <td style={{fontWeight:700}}>{l.bank}</td>
+                            <td className="num neg">{fmtINR(l.outstanding,true)}</td>
+                            <td className="num">{fmtINR(l.emi,true)}</td>
+                            <td><span className="tag to">{l.roi}%</span></td>
+                            <td style={{width:110}}>
+                              <div style={{display:'flex',alignItems:'center',gap:7}}>
+                                <div className="prog" style={{flex:1,height:5}}><div className="pf" style={{width:`${pct}%`,background:'var(--g)'}}/></div>
+                                <span style={{fontSize:10.5,color:'var(--n400)',width:32,textAlign:'right'}}>{pct.toFixed(0)}%</span>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </details>
+
+      {/* Forecast and CFO analytics live on their own pages, so there are no duplicate panels here. */}
+      <div style={{display:'flex',gap:10,flexWrap:'wrap',marginTop:16}}>
+        <button className="btn btn-s btn-sm" onClick={()=>setPage('cfo')}>Open CFO Dashboard →</button>
+        <button className="btn btn-s btn-sm" onClick={()=>setPage('forecast')}>Open Financial Forecast →</button>
+        <button className="btn btn-s btn-sm" onClick={()=>setPage('ai')}>Ask AI about my finances →</button>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   FUND BALANCE (fully editable)
+══════════════════════════════════════ */
+function PageFund({data,setData,toast}){
+  const {accounts,budgetLimits,transactions,profile}=data;
+  const [modal,setModal]=useState(null);
+  const ef={name:'',type:'bank',accNo:'XXXX-0000',balance:'',opening:'',color:'#1a4a6e'};
+  const [form,setForm]=useState(ef);
+  const fundFileRef=useRef();
+  const handleFundCSV=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      const raw=ev.target.result.replace(/\r/g,'');
+      const lines=raw.split('\n').filter(l=>l.trim());
+      if(lines.length<2){toast('CSV empty','r');return;}
+      const hdr=parseCSVLine(lines[0]).map(h=>h.replace(/"/g,'').trim().toLowerCase().replace(/[\s_\-]/g,''));
+      const ca=(...aliases)=>(cols)=>{for(const a of aliases){const i=hdr.indexOf(a.toLowerCase().replace(/[\s_\-]/g,''));if(i>=0&&cols[i])return cols[i];}return'';};
+      const getName=ca('name','accountname','bankname','account');
+      const getType=ca('type','accounttype','category');
+      const getAccNo=ca('accno','accountnumber','acno','number','accountno');
+      const getBal=ca('balance','amount','bal','closingbalance');
+      const getOpen=ca('opening','openingbalance','openbal','obal');
+      const getColor=ca('color','colour');
+      const accs=lines.slice(1).map(line=>{
+        if(!line.trim())return null;
+        const cols=parseCSVLine(line);
+        const name=getName(cols);if(!name)return null;
+        const num=v=>parseFloat(String(v).replace(/[,\s₹$€£¥]/g,''));
+        const openRaw=getOpen(cols);
+        return{id:uid(),name,type:getType(cols)||'bank',accNo:getAccNo(cols)||'XXXX-0000',
+          balance:num(getBal(cols))||0,opening:openRaw?(num(openRaw)||0):null,color:getColor(cols)||'#1a4a6e'};
+      }).filter(Boolean);
+      setData(d=>({...d,accounts:[...d.accounts,...accs]}));
+      toast(`Imported ${accs.length} accounts`,'g');
+    };
+    r.readAsText(f);e.target.value='';
+  };
+  const downloadFundTemplate=()=>{
+    const b=new Blob(['name,type,accNo,balance,opening,color\nHDFC Bank Savings,bank,XXXX-1234,150000,120000,#003366\nCash In Hand,cash,CASH-001,5000,4000,#065f46\nPaytm Wallet,wallet,PAYTM-001,2500,1000,#002970\nSBI FD,fd,FD-001,200000,200000,#007A62\n'],{type:'text/csv'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='finmanager-accounts-template.csv';a.click();
+  };
+
+  const banks=accounts.filter(a=>a.type==='bank');
+  const cashes=accounts.filter(a=>a.type==='cash');
+  const wallets=accounts.filter(a=>a.type==='wallet');
+  const fds=accounts.filter(a=>a.type==='fd');
+  const bT=banks.reduce((s,a)=>s+a.balance,0);
+  const cT=cashes.reduce((s,a)=>s+a.balance,0);
+  const wT=wallets.reduce((s,a)=>s+a.balance,0);
+  const fT=fds.reduce((s,a)=>s+a.balance,0);
+  const liq=bT+cT+wT;
+
+  const monthlyBudget=Object.values(budgetLimits).reduce((s,v)=>s+v,0);
+  const today=new Date();
+  const dom=today.getDate(),dim=new Date(today.getFullYear(),today.getMonth()+1,0).getDate();
+  const curMK=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}`;
+  const curExp=transactions.filter(t=>t.month===curMK&&t.type==='expense').reduce((s,t)=>s+t.amount,0);
+  const unspent=monthlyBudget-curExp;
+  const dLeft=dim-dom+1;
+
+  const openAdd=t=>{setForm({...ef,type:t});setModal('add');};
+  const openEdit=a=>{setForm({name:a.name,type:a.type,accNo:a.accNo,balance:String(a.balance),
+    opening:a.opening===null||a.opening===undefined?'':String(a.opening),color:a.color||'#1a4a6e'});setModal({eid:a.id});};
+  const close=()=>{setModal(null);setForm(ef);};
+
+  const save=()=>{
+    if(!form.name)return;
+    const entry={name:form.name,type:form.type,accNo:form.accNo,balance:parseFloat(form.balance)||0,
+      opening:form.opening===''?null:parseFloat(form.opening)||0,color:form.color};
+    if(modal==='add'){setData(d=>({...d,accounts:[...d.accounts,{id:uid(),...entry}]}));toast('Account added','g');}
+    else{setData(d=>({...d,accounts:d.accounts.map(a=>a.id===modal.eid?{...a,...entry}:a)}));toast('Account updated','g');}
+    close();
+  };
+  const undoDel=makeUndoDelete(data,setData,toast);
+  const del=id=>undoDel('Account removed',d=>({...d,accounts:d.accounts.filter(a=>a.id!==id)}));
+
+  const AccRow=({a})=>{
+    const ini=a.name.split(/[\s–\-]/).filter(Boolean).map(w=>w[0]).slice(0,2).join('').toUpperCase();
+    return(
+      <div className="acc-row">
+        <div className="acc-ic" style={{background:(a.color||'#1a4a6e')+'22',color:a.color||'#1a4a6e'}}>{ini}</div>
+        <div>
+          <div className="acc-name">{a.name}</div>
+          <div className="acc-no">{a.accNo}</div>
+        </div>
+        <div className="acc-bal">
+          <div className={`acc-num ${a.balance<0?'neg':'pos'}`}>{fmtINR(a.balance)}</div>
+        </div>
+        <div style={{display:'flex',gap:4,marginLeft:10}}>
+          <button className="bic" onClick={()=>openEdit(a)}><Ic n="edit" s={11}/></button>
+          <button className="bic red" onClick={()=>del(a.id)}><Ic n="del" s={11}/></button>
+        </div>
+      </div>
+    );
+  };
+
+  const GrpCard=({title,items,total,addType,icon,color})=>(
+    <div className="card">
+      <div className="sh">
+        <div className="sh-t"><Ic n={icon} s={14} c={color}/>{title}</div>
+        <div style={{display:'flex',gap:7,alignItems:'center'}}>
+          <span style={{fontFamily:'var(--m)',fontSize:13,fontWeight:700,color}}>{fmtINR(total)}</span>
+          <button className="bic" onClick={()=>openAdd(addType)} title="Add Account"><Ic n="plus" s={11}/></button>
+        </div>
+      </div>
+      {items.map(a=><AccRow key={a.id} a={a}/>)}
+      {items.length===0&&<div style={{textAlign:'center',padding:'12px 0',fontSize:12,color:'var(--n400)'}}>No accounts. Click + to add.</div>}
+    </div>
+  );
+
+  const AccForm=(
+    <>
+      <div className="f2 mb2">
+        <div className="fg"><label>Account Name</label><input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. HDFC Bank"/></div>
+        <div className="fg"><label>Type</label>
+          <select value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}>
+            <option value="bank">Bank Account</option><option value="cash">Cash In Hand</option>
+            <option value="wallet">Digital Wallet</option><option value="fd">Fixed Deposit</option>
+          </select>
+        </div>
+      </div>
+      <div className="f2 mb2">
+        <div className="fg"><label>Account / Ref No. (Dummy)</label><input value={form.accNo} onChange={e=>setForm(f=>({...f,accNo:e.target.value}))}/></div>
+        <div className="fg"><label>Balance ({CUR.sym}) – negative for OD</label><input type="number" value={form.balance} onChange={e=>setForm(f=>({...f,balance:e.target.value}))} placeholder="0"/></div>
+      </div>
+      <div className="fg mb2">
+        <label>Opening Balance ({CUR.sym}) – optional</label>
+        <input type="number" value={form.opening} onChange={e=>setForm(f=>({...f,opening:e.target.value}))} placeholder="Leave blank to infer it"/>
+        <div style={{fontSize:10.5,color:'var(--n400)',marginTop:4}}>
+          What this account held on the first day of your reporting period. Reconciliation uses it to check
+          your ledger against this balance. Leave it blank and the page will work out what it must have been.
+        </div>
+      </div>
+      <div className="fg"><label>Brand Color (for icon)</label><input type="color" value={form.color} onChange={e=>setForm(f=>({...f,color:e.target.value}))} style={{height:36,padding:'3px 6px'}}/></div>
+    </>
+  );
+
+  return(
+    <div className="page">
+      <div className="ph">
+        <div><div className="ptitle">Bank Balance Sheet</div><div className="psub">All accounts · Daily unspent tracker · Fully editable</div></div>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-s btn-sm" onClick={downloadFundTemplate}><Ic n="dl" s={12}/>Template</button>
+          <button className="btn btn-s btn-sm" onClick={()=>fundFileRef.current.click()}><Ic n="up" s={12}/>CSV Import</button>
+        </div>
+      </div>
+      <input type="file" ref={fundFileRef} accept=".csv" style={{display:'none'}} onChange={handleFundCSV}/>
+
+      <div className="g4 mb3">
+        <div className="card"><div className="ci" style={{background:'var(--gl)'}}><Ic n="bank" c="var(--g)"/></div><div className="cl">Bank Total</div><div className={`cv ${bT<0?'r':'g'}`}>{fmtINR(bT)}</div><div className="cm">{banks.filter(a=>a.balance>0).length} active</div></div>
+        <div className="card"><div className="ci" style={{background:'var(--bl)'}}><Ic n="wallet" c="var(--b)"/></div><div className="cl">Cash + Wallet</div><div className="cv b">{fmtINR(cT+wT)}</div><div className="cm">In-hand</div></div>
+        <div className="card"><div className="ci" style={{background:'var(--pl)'}}><Ic n="shield" c="var(--p)"/></div><div className="cl">Fixed Deposits</div><div className="cv p">{fmtINR(fT,true)}</div><div className="cm">Locked savings</div></div>
+        <div className="card"><div className="ci" style={{background:'var(--gl)'}}><Ic n="fund" c="var(--g)"/></div><div className="cl">Liquid Total</div><div className="cv g">{fmtINR(liq)}</div><div className="cm">Bank + Cash + Wallet</div></div>
+      </div>
+
+      {/* Unspent Trackers */}
+      <div className="g3 mb3">
+        <div className="card" style={{background:'linear-gradient(135deg,var(--gd),var(--g))',border:'none',color:'#fff'}}>
+          <div style={{fontSize:10,opacity:.8,textTransform:'uppercase',letterSpacing:.6,marginBottom:3}}>Monthly Budget</div>
+          <div style={{fontFamily:'var(--m)',fontSize:21,fontWeight:800}}>{fmtINR(monthlyBudget)}</div>
+          <div style={{fontSize:10.5,opacity:.7,marginTop:3}}>{Object.keys(budgetLimits).length} categories configured</div>
+        </div>
+        <div className="card">
+          <div className="cl">Monthly Unspent</div>
+          <div className={`cv ${unspent>=0?'g':'r'}`}>{fmtINR(Math.abs(unspent))}</div>
+          <div className="cm">{unspent>=0?'Under budget':'Over budget'} · Spent: {fmtINR(curExp,true)}</div>
+          <div className="prog mt2" style={{height:6}}>
+            <div className="pf" style={{width:`${Math.min(100,monthlyBudget>0?curExp/monthlyBudget*100:0)}%`,background:unspent<0?'var(--r)':'var(--g)'}}/>
+          </div>
+          <div style={{fontSize:10.5,color:'var(--n400)',marginTop:3}}>{monthlyBudget>0?(curExp/monthlyBudget*100).toFixed(1):0}% of budget used</div>
+        </div>
+        <div className="card">
+          <div className="cl">Per Day Unspent</div>
+          <div className={`cv ${unspent>=0?'g':'r'}`}>{fmtINR(Math.abs(Math.round(dLeft>0?unspent/dLeft:0)))}</div>
+          <div className="cm">{dLeft} days remaining · {CUR.sym}{Math.round(monthlyBudget/dim).toLocaleString(CUR.locale)}/day budget</div>
+        </div>
+      </div>
+
+      <div className="g2">
+        <GrpCard title="Bank Accounts" items={banks} total={bT} addType="bank" icon="bank" color="var(--b)"/>
+        <div>
+          <div style={{marginBottom:12}}><GrpCard title="Cash In Hand" items={cashes} total={cT} addType="cash" icon="wallet" color="var(--g)"/></div>
+          <div style={{marginBottom:12}}><GrpCard title="Digital Wallets" items={wallets} total={wT} addType="wallet" icon="wallet" color="var(--o)"/></div>
+          <GrpCard title="Fixed Deposits" items={fds} total={fT} addType="fd" icon="shield" color="var(--p)"/>
+        </div>
+      </div>
+
+      {modal&&<Modal title={modal==='add'?'Add Account':'Edit Account'} onClose={close}
+        foot={<><button className="btn btn-s btn-sm" onClick={close}>Cancel</button><button className="btn btn-p btn-sm" onClick={save}><Ic n={modal==='add'?'plus':'ok'} s={12} c="#fff"/>{modal==='add'?'Add':'Save'}</button></>}>
+        {AccForm}
+      </Modal>}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   RECONCILIATION
+   Book balance vs the balance you actually hold, per fund type.
+══════════════════════════════════════ */
+function PageReconcile({data,setData,toast,setPage}){
+  const {profile,accounts}=data;
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const r=useReconciliation(data,months);
+  const [showModes,setShowModes]=useState(false);
+  // ── Record a self-transfer between two of your own funds ──
+  const BUCKET_MODE={bank:'NEFT/Bank Transfer',cash:'Cash',wallet:'Wallet'};
+  const tef={from:'bank',to:'cash',amount:'',date:new Date().toISOString().slice(0,10),notes:''};
+  const [xfer,setXfer]=useState(null);
+  const saveXfer=()=>{
+    if(!xfer.amount||+xfer.amount<=0){toast('Enter an amount','r');return;}
+    if(xfer.from===xfer.to){toast('Pick two different funds','r');return;}
+    const tx={id:uid(),type:'transfer',amount:+xfer.amount,date:xfer.date,month:xfer.date.slice(0,7),
+      category:'Self-transfer',desc:xfer.notes||`Transfer ${xfer.from} → ${xfer.to}`,
+      paymentMode:BUCKET_MODE[xfer.from],transferTo:BUCKET_MODE[xfer.to],merchant:''};
+    setData(d=>({...d,transactions:[...d.transactions,tx]}));
+    toast('Transfer recorded','g');setXfer(null);
+  };
+
+  const setOpening=(id,val)=>setData(d=>({...d,
+    accounts:d.accounts.map(a=>a.id===id?{...a,opening:val===''||val===null?null:+val}:a)}));
+
+  // Adopting the implied opening makes a bucket balance by construction. It is
+  // the right move only when the ledger is complete and the balance is trusted.
+  const adoptImplied=row=>{
+    if(!row.accounts.length)return;
+    // One account: it takes the whole figure. Several: only meaningful if the
+    // rest already have openings, so the remainder lands on the odd one out.
+    const missing=row.accountsWithout;
+    if(missing.length!==1){
+      toast(missing.length===0?'Every account here already has an opening balance':'Set openings on all but one account first','r');
+      return;
+    }
+    const known=row.accounts.filter(a=>a.opening!==null&&a.opening!==undefined)
+      .reduce((s,a)=>s+(a.opening||0),0);
+    setOpening(missing[0].id,row.impliedOpening-known);
+    toast(`Opening balance set on ${missing[0].name}`,'g');
+  };
+
+  const Diff=({v})=>{
+    const ok=Math.abs(v)<=r.tolerance;
+    return<span className={`tag ${ok?'tg':'tr'}`}>{ok?'✓ Reconciled':`${v>0?'+':'−'}${fmtINR(Math.abs(v),true)}`}</span>;
+  };
+
+  const noAccounts=r.tracked.length===0;
+
+  return(
+    <div className="page">
+      <div className="ph mb3">
+        <div>
+          <div className="ptitle">Reconciliation</div>
+          <div className="psub">
+            Does what you recorded moving agree with what you say you hold? · {periodLabel(profile.periodStart,profile.periodEnd)}
+          </div>
+        </div>
+        <div style={{display:'flex',gap:6}}>
+          <button className="btn btn-s btn-sm" onClick={()=>setXfer(tef)}><Ic n="refresh" s={12}/>Record transfer</button>
+          <button className="btn btn-s btn-sm" onClick={()=>setPage('fund')}><Ic n="bank" s={12}/>Edit accounts</button>
+        </div>
+      </div>
+      {xfer&&<Modal title="Record a self-transfer" onClose={()=>setXfer(null)}
+        foot={<><button className="btn btn-s btn-sm" onClick={()=>setXfer(null)}>Cancel</button><button className="btn btn-p btn-sm" onClick={saveXfer}><Ic n="ok" s={12} c="#fff"/>Save</button></>}>
+        <div className="alert ai mb2"><Ic n="prov" s={13}/><span>Moving money between your own funds nets to zero overall, but each fund needs to see its side so reconciliation balances.</span></div>
+        <div className="f2 mb2">
+          <div className="fg"><label>From</label><select value={xfer.from} onChange={e=>setXfer(x=>({...x,from:e.target.value}))}>{FUND_BUCKETS.map(b=><option key={b.key} value={b.key}>{b.label}</option>)}</select></div>
+          <div className="fg"><label>To</label><select value={xfer.to} onChange={e=>setXfer(x=>({...x,to:e.target.value}))}>{FUND_BUCKETS.map(b=><option key={b.key} value={b.key}>{b.label}</option>)}</select></div>
+        </div>
+        <div className="f2 mb2">
+          <div className="fg"><label>Amount ({CUR.sym})</label><input type="number" placeholder="0" value={xfer.amount} onChange={e=>setXfer(x=>({...x,amount:e.target.value}))}/></div>
+          <div className="fg"><label>Date</label><input type="date" value={xfer.date} onChange={e=>setXfer(x=>({...x,date:e.target.value}))}/></div>
+        </div>
+        <div className="fg"><label>Note (optional)</label><input value={xfer.notes} onChange={e=>setXfer(x=>({...x,notes:e.target.value}))} placeholder="e.g. ATM withdrawal"/></div>
+      </Modal>}
+
+      {noAccounts?(
+        <div className="card" style={{textAlign:'center',padding:'40px 20px'}}>
+          <div style={{fontSize:36,marginBottom:10}}>🏦</div>
+          <div style={{fontSize:14,fontWeight:700,color:'var(--n600)',marginBottom:6}}>No bank, cash or wallet accounts yet</div>
+          <div style={{fontSize:12,color:'var(--n400)',marginBottom:16}}>
+            Add the accounts you actually hold and their balances, then come back here to check them
+            against your recorded transactions.
+          </div>
+          <button className="btn btn-p" style={{margin:'0 auto'}} onClick={()=>setPage('fund')}>→ Go to Bank Balance</button>
+        </div>
+      ):(
+      <>
+      {/* ── Verdict ── */}
+      <div className="card mb3 stl-card">
+        <div className="sh mb2">
+          <div className="sh-t">
+            <Ic n="shield" s={14} c={!r.hasOpenings?'var(--o)':r.balanced?'var(--g)':'var(--r)'}/>
+            {!r.hasOpenings?'Not yet reconcilable'
+              :r.balanced?(r.totals.allChecked?'Your books agree':'The funds you have checked agree')
+              :'Your books do not agree'}
+          </div>
+          <span className="tag tx" style={{fontSize:10}}>{r.totals.reconcilable} of {r.totals.tracked} fund types checked</span>
+        </div>
+        <div className="stl-row">
+          <div className="stl-main">
+            <div className="stl-val" style={{color:!r.hasOpenings?'var(--warn)':r.balanced?'var(--pos)':'var(--neg)'}}>
+              {!r.hasOpenings?'–':r.balanced?fmtINR(0):fmtINR(Math.abs(r.totals.diff))}
+            </div>
+            <div className="stl-sub">
+              {!r.hasOpenings
+                ? <>Set an <strong>opening balance</strong> on your accounts below and this becomes a real check.
+                    Until then the table shows what your opening balance <em>must have been</em> for the ledger
+                    to land on today's figure.</>
+                : r.balanced
+                ? (r.totals.allChecked
+                    ? <>Every recorded movement accounts for the balance you hold. Nothing is missing from your ledger.</>
+                    : <>The {r.totals.reconcilable} fund type{r.totals.reconcilable===1?'':'s'} you have given an opening
+                        balance reconcile exactly. Set openings on the remaining
+                        {' '}{r.tracked.filter(x=>!x.openingSet).map(x=>x.label).join(' and ')} to check
+                        {' '}{fmtINR(r.totals.actual-r.checked.actual,true)} more.</>)
+                : <>{r.totals.diff>0
+                    ? <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} more</strong> than your recorded transactions explain. Money came in that you have not logged.</>
+                    : <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} less</strong> than your recorded transactions explain. Money went out that you have not logged.</>}
+                  </>}
+            </div>
+          </div>
+          <div className="stl-calc">
+            {(()=>{
+              // Every term below covers the same funds, so the arithmetic on screen holds.
+              const v=r.hasOpenings?r.checked:r.totals;
+              const partial=r.hasOpenings&&!r.totals.allChecked;
+              return[
+              {l:'Opening',v:v.opening,op:null,c:'var(--n800)',note:r.hasOpenings?'as entered':'not set'},
+              {l:'Money In',v:v.inflow,op:'+',c:'var(--pos)'},
+              {l:'Money Out',v:v.outflow,op:'−',c:'var(--neg)'},
+              {l:'Invested',v:v.invested,op:'−',c:'var(--p)'},
+              {l:'Expected',v:v.expected,op:'=',c:'var(--n800)',bold:true,dash:!r.hasOpenings},
+              {l:'Actual Held',v:v.actual,op:'vs',c:'var(--b)',bold:true,note:partial?'checked funds only':''},
+            ];})().map(x=>(
+              <React.Fragment key={x.l}>
+                {x.op&&<span className="stl-op" aria-hidden="true">{x.op}</span>}
+                <div className="stl-term">
+                  <div className="stl-term-l">{x.l}</div>
+                  <div className="stl-term-v" style={{color:x.c,fontWeight:x.bold?800:700}}>{x.dash?'–':fmtINR(x.v,true)}</div>
+                  {x.note&&<div className="stl-term-n">{x.note}</div>}
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+        <div className="stl-foot">
+          <span>Fixed deposits ({fmtINR(r.fdBal,true)}) are excluded. They move by maturity, not by daily spending.</span>
+          <span>Differences under {fmtINR(r.tolerance)} are treated as rounding.</span>
+        </div>
+      </div>
+
+      {/* ── Per fund type ── */}
+      <div className="card mb3">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="fund" s={14} c="var(--b)"/>By fund type</div>
+          <button className="btn btn-s btn-sm" style={{fontSize:11}} onClick={()=>setShowModes(v=>!v)}>
+            {showModes?'Hide':'Show'} payment modes
+          </button>
+        </div>
+        <div className="tw">
+          <table>
+            <thead><tr>
+              <th>Fund</th><th className="num">Opening</th><th className="num">In</th><th className="num">Out</th>
+              <th className="num">Invested</th><th className="num">Expected</th><th className="num">Actual</th><th>Status</th>
+            </tr></thead>
+            <tbody>
+              {r.tracked.map(row=>(
+                <React.Fragment key={row.key}>
+                  <tr>
+                    <td style={{fontWeight:700}}>{row.label}
+                      <div style={{fontSize:10,color:'var(--n400)',fontWeight:400}}>
+                        {row.accounts.length} account{row.accounts.length===1?'':'s'} · {row.inCount+row.outCount+row.invCount} entr{(row.inCount+row.outCount+row.invCount)===1?'y':'ies'}
+                      </div>
+                    </td>
+                    <td className="num">
+                      {row.openingSet?fmtINR(row.opening,true)
+                        :<span style={{color:'var(--warn)',fontStyle:'italic'}}>{fmtINR(row.impliedOpening,true)} implied</span>}
+                    </td>
+                    <td className="num pos">{row.inflow?fmtINR(row.inflow,true):'–'}</td>
+                    <td className="num neg">{row.outflow?fmtINR(row.outflow,true):'–'}</td>
+                    <td className="num" style={{color:'var(--p)'}}>{row.invested?fmtINR(row.invested,true):'–'}</td>
+                    <td className="num bold">{row.openingSet?fmtINR(row.expected,true):'–'}</td>
+                    <td className="num bold" style={{color:'var(--b)'}}>{fmtINR(row.actual,true)}</td>
+                    <td>{row.openingSet
+                      ?<Diff v={row.diff}/>
+                      :<button className="btn btn-s btn-sm" style={{fontSize:10.5}} onClick={()=>adoptImplied(row)}>Use implied</button>}</td>
+                  </tr>
+                  {showModes&&Object.entries(row.byMode).map(([mode,v])=>(
+                    <tr key={row.key+mode} style={{background:'var(--n50)'}}>
+                      <td style={{paddingLeft:24,fontSize:11.5,color:'var(--n500)'}}>↳ {mode}</td>
+                      <td/>
+                      <td className="num" style={{fontSize:11.5}}>{v.in?fmtINR(v.in,true):'–'}</td>
+                      <td className="num" style={{fontSize:11.5}}>{v.out?fmtINR(v.out,true):'–'}</td>
+                      <td className="num" style={{fontSize:11.5}}>{v.inv?fmtINR(v.inv,true):'–'}</td>
+                      <td/><td/><td/>
+                    </tr>
+                  ))}
+                </React.Fragment>
+              ))}
+            </tbody>
+            <tfoot><tr className="tft">
+              <td style={{fontWeight:700}}>Total</td>
+              <td className="num bold">{r.hasOpenings?fmtINR(r.totals.opening,true):'–'}</td>
+              <td className="num bold pos">{fmtINR(r.totals.inflow,true)}</td>
+              <td className="num bold neg">{fmtINR(r.totals.outflow,true)}</td>
+              <td className="num bold" style={{color:'var(--p)'}}>{fmtINR(r.totals.invested,true)}</td>
+              <td className="num bold">{r.hasOpenings?fmtINR(r.totals.expected,true):'–'}</td>
+              <td className="num bold" style={{color:'var(--b)'}}>{fmtINR(r.totals.actual,true)}</td>
+              <td>{!r.hasOpenings?null
+                :r.totals.allChecked?<Diff v={r.totals.diff}/>
+                :<span className="tag tx">{r.totals.reconcilable} of {r.totals.tracked} checked</span>}</td>
+            </tr></tfoot>
+          </table>
+        </div>
+      </div>
+
+      {/* ── Opening balances ── */}
+      <div className="card mb3">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="edit" s={14} c="var(--g)"/>Opening balances</div>
+          <span className="tag tx" style={{fontSize:10}}>As at {months.length?months[0].label:'period start'}</span>
+        </div>
+        <div className="alert ai mb2"><Ic n="prov" s={13}/>
+          <span>What each account held on the first day of the period. Take it from your statement. This is
+          the anchor the whole check hangs on. Leave one blank and the table shows the figure it would need
+          to be for your ledger to balance.</span>
+        </div>
+        {r.tracked.map(row=>(
+          <div key={row.key} style={{marginBottom:14}}>
+            <div style={{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:.5,color:'var(--n500)',marginBottom:6}}>{row.label}</div>
+            {row.accounts.map(a=>(
+              <div key={a.id} className="sr">
+                <span className="sr-l">
+                  {a.name} <span style={{color:'var(--n400)',fontSize:11}}>· {a.accNo}</span>
+                  <div style={{fontSize:10.5,color:'var(--n400)'}}>Holds {fmtINR(a.balance,true)} today</div>
+                </span>
+                <span style={{display:'flex',alignItems:'center',gap:8}}>
+                  <input type="number" value={a.opening===null||a.opening===undefined?'':a.opening}
+                    onChange={e=>setOpening(a.id,e.target.value)}
+                    placeholder="not set"
+                    aria-label={`Opening balance for ${a.name}`}
+                    style={{width:130,textAlign:'right',fontFamily:'var(--m)',fontSize:12.5,padding:'6px 9px'}}/>
+                  {(a.opening!==null&&a.opening!==undefined)&&
+                    <button className="bic" title="Clear opening balance" aria-label={`Clear opening balance for ${a.name}`}
+                      onClick={()=>setOpening(a.id,'')}><Ic n="x" s={11}/></button>}
+                </span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      {/* ── What is not being checked ── */}
+      <div className="g2 mb3">
+        <div className="card">
+          <div className="sh mb2">
+            <div className="sh-t"><Ic n="bell" s={14} c={r.unclassified.length?'var(--o)':'var(--g)'}/>Entries that cannot be placed</div>
+            {r.unclassified.length>0&&<span className="tag tr">{r.unclassified.length}</span>}
+          </div>
+          {r.unclassified.length===0?(
+            <div style={{fontSize:12,color:'var(--n400)',padding:'10px 0'}}>
+              Every transaction in the period names a payment mode this page understands. Nothing is falling
+              through the cracks.
+            </div>
+          ):(
+            <>
+              <div style={{fontSize:11.5,color:'var(--n500)',marginBottom:8}}>
+                These carry no usable payment mode, so they cannot be assigned to a fund, the single most
+                common reason a reconciliation fails. Worth {fmtINR(r.unclassifiedIn+r.unclassifiedOut,true)} in total.
+              </div>
+              <div className="tw" style={{maxHeight:230,overflowY:'auto'}}>
+                <table>
+                  <thead><tr><th>Date</th><th>Description</th><th className="num">Amount</th><th>Why</th></tr></thead>
+                  <tbody>
+                    {r.unclassified.slice(0,25).map((t,i)=>(
+                      <tr key={t.id||i}>
+                        <td style={{whiteSpace:'nowrap'}}>{fmtDate(t.date)}</td>
+                        <td style={{fontSize:11.5}}>{t.desc||t.category||'–'}</td>
+                        <td className={`num ${t.type==='income'?'pos':'neg'}`}>{fmtINR(t.amount,true)}</td>
+                        <td style={{fontSize:11,color:'var(--n500)'}}>{t.why}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {r.unclassified.length>25&&<div style={{fontSize:11,color:'var(--n400)',marginTop:6}}>+{r.unclassified.length-25} more</div>}
+              <button className="btn btn-s btn-sm" style={{marginTop:10}} onClick={()=>setPage('expense')}>
+                <Ic n="edit" s={11}/>Fix in Transactions
+              </button>
+            </>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="sh mb2"><div className="sh-t"><Ic n="prov" s={14} c="var(--n500)"/>Deliberately not counted</div></div>
+          <div className="sr">
+            <span className="sr-l">Spending on credit cards
+              <div style={{fontSize:10.5,color:'var(--n400)'}}>{r.ccCount} entr{r.ccCount===1?'y':'ies'}. A card spend creates a liability, it does not move your cash</div>
+            </span>
+            <span className="sr-v">{fmtINR(r.ccSpend,true)}</span>
+          </div>
+          <div className="sr">
+            <span className="sr-l">Fixed deposits
+              <div style={{fontSize:10.5,color:'var(--n400)'}}>Move by maturity and transfer, not by daily spending</div>
+            </span>
+            <span className="sr-v">{fmtINR(r.fdBal,true)}</span>
+          </div>
+          <div style={{marginTop:12,padding:'10px 12px',background:'var(--ol)',borderRadius:8,border:'1px solid rgba(217,119,6,.2)'}}>
+            <div style={{fontSize:11.5,fontWeight:700,color:'var(--o)',marginBottom:5}}>Known gaps</div>
+            <div style={{fontSize:11,color:'var(--n600)',lineHeight:1.55}}>
+              <strong>Credit card bill payments</strong> are not recorded as transactions, so they will show up
+              as a difference. If your bank bucket is short by roughly what you paid off your cards this period,
+              that is almost certainly the reason. <strong>Transfers between your own funds</strong> are now
+              covered: use <strong>Record transfer</strong> above and both sides balance.
+            </div>
+          </div>
+        </div>
+      </div>
+      </>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   TRANSACTIONS
+══════════════════════════════════════ */
+function PageTx({data,setData,toast,type}){
+  const {transactions,expenseCategories,incomeCategories,profile}=data;
+  const cats=type==='expense'?expenseCategories:incomeCategories;
+  const isInc=type==='income';
+  const color=isInc?'var(--gd)':'var(--r)';
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const [selM,setSelM]=useState('all');
+  const [selPM,setSelPM]=useState('all');
+  const [selMerchant,setSelMerchant]=useState('all');
+  const [showAllMerchants,setShowAllMerchants]=useState(false);
+  const ef={date:new Date().toISOString().slice(0,10),category:'',desc:'',amount:'',paymentMode:'',merchant:''};
+  const [form,setForm]=useState(ef);
+  const [eid,setEid]=useState(null);
+  const [autoCat,setAutoCat]=useState('');
+  const [autoMode,setAutoMode]=useState('');
+  const [sel,setSel]=useState(new Set());
+  const fileRef=useRef();
+
+  const filtered=useMemo(()=>[...transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&(selPM==='all'||t.paymentMode===selPM)&&(selMerchant==='all'||t.merchant===selMerchant))].sort((a,b)=>new Date(b.date)-new Date(a.date)),[transactions,type,selM,selPM,selMerchant]);
+  const pmOptions=useMemo(()=>[...new Set(transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&t.paymentMode).map(t=>t.paymentMode))].sort(),[transactions,type,selM]);
+  const merchantOptions=useMemo(()=>[...new Set(transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&(selPM==='all'||t.paymentMode===selPM)&&t.merchant).map(t=>t.merchant))].sort(),[transactions,type,selM,selPM]);
+  const total=filtered.reduce((s,t)=>s+t.amount,0);
+  const allSel=filtered.length>0&&sel.size===filtered.length;
+
+  const save=()=>{
+    if(!form.date||!form.category||!form.amount||isNaN(+form.amount))return;
+    const month=form.date.slice(0,7);
+    if(eid){
+      setData(d=>({...d,transactions:d.transactions.map(t=>t.id===eid?{...t,...form,amount:+form.amount,month}:t)}));
+      toast('Updated','g');
+    }else{
+      setData(d=>({...d,transactions:[...d.transactions,{id:uid(),date:form.date,type,category:form.category,desc:form.desc,amount:+form.amount,month,paymentMode:form.paymentMode||'',merchant:form.merchant||''}]}));
+      toast('Added','g');
+    }
+    setForm(ef);setEid(null);setAutoCat('');
+  };
+  const startEdit=t=>{setEid(t.id);setForm({date:t.date,category:t.category,desc:t.desc,amount:String(t.amount),paymentMode:t.paymentMode||'',merchant:t.merchant||''});setAutoCat('');};
+  // Typing a merchant fills category and payment mode from this user's own history.
+  // Only fills blanks, or replaces a value we auto-filled. A manual pick always wins.
+  const onMerchantChange=v=>{
+    setForm(f=>{
+      const next={...f,merchant:v};
+      const c=inferCategory(transactions,v,type);
+      if(c&&(!f.category||f.category===autoCat)){next.category=c;setAutoCat(c);}
+      else if(!c&&f.category&&f.category===autoCat){next.category='';setAutoCat('');}
+      const pm=inferPaymentMode(transactions,v,type);
+      if(pm&&(!f.paymentMode||f.paymentMode===autoMode)){next.paymentMode=pm;setAutoMode(pm);}
+      else if(!pm&&f.paymentMode&&f.paymentMode===autoMode){next.paymentMode='';setAutoMode('');}
+      return next;
+    });
+  };
+  // Clone a row, dated today, and drop straight into edit mode on the copy so the
+  // date/amount can be tweaked without re-typing category, merchant and mode.
+  const duplicate=t=>{
+    const today=new Date().toISOString().slice(0,10);
+    const copy={...t,id:uid(),date:today,month:today.slice(0,7)};
+    delete copy.fromRecurring;
+    setData(d=>({...d,transactions:[...d.transactions,copy]}));
+    setEid(copy.id);
+    setForm({date:copy.date,category:copy.category,desc:copy.desc,amount:String(copy.amount),paymentMode:copy.paymentMode||'',merchant:copy.merchant||''});
+    if(selM!=='all'&&selM!==copy.month)setSelM('all'); // make sure the copy is visible
+    toast('Duplicated to today. Adjust and Update','g');
+    window.scrollTo({top:0,behavior:'smooth'});
+  };
+  const cancel=()=>{setEid(null);setForm(ef);};
+  const undoDel=makeUndoDelete(data,setData,toast);
+  const del=id=>undoDel('Entry deleted',d=>({...d,transactions:d.transactions.filter(t=>t.id!==id)}));
+  // Bulk clone. The common case is "last month's fixed costs happened again".
+  // Keeps each entry's day-of-month, moved into the current month.
+  const bulkDuplicate=()=>{
+    if(!sel.size)return;
+    const now=new Date();
+    const tgtMonth=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const lastDay=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
+    const copies=filtered.filter(t=>sel.has(t.id)).map(t=>{
+      const day=Math.min(parseInt(t.date.slice(8,10),10)||1,lastDay);
+      const date=`${tgtMonth}-${String(day).padStart(2,'0')}`;
+      const c={...t,id:uid(),date,month:tgtMonth};
+      delete c.fromRecurring;
+      return c;
+    });
+    if(!window.confirm(`Copy ${copies.length} entr${copies.length===1?'y':'ies'} into ${fmtMonth(tgtMonth)}?`))return;
+    setData(d=>({...d,transactions:[...d.transactions,...copies]}));
+    setSel(new Set());setSelM('all');
+    toast(`Duplicated ${copies.length} entries into ${fmtMonth(tgtMonth)}`,'g');
+  };
+  const bulkDel=()=>{if(!sel.size)return;const n=sel.size;undoDel(`Deleted ${n} entr${n===1?'y':'ies'}`,d=>({...d,transactions:d.transactions.filter(t=>!sel.has(t.id))}));setSel(new Set());};
+  const toggleAll=()=>setSel(allSel?new Set():new Set(filtered.map(t=>t.id)));
+  const toggleOne=id=>setSel(s=>{const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n;});
+
+  const exportCSV=()=>{
+    const hdr='date,type,category,description,amount,paymentMode,merchant';
+    const rows=filtered.map(t=>`${t.date},${t.type},${t.category},"${t.desc||''}",${t.amount},${t.paymentMode||''},"${t.merchant||''}"`);
+    const blob=new Blob([hdr+'\n'+rows.join('\n')],{type:'text/csv'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`finmanager-${type}-${selM}.csv`;a.click();
+    toast('CSV exported','g');
+  };
+  const downloadTemplate=()=>{
+    const blob=new Blob(['date,type,category,description,merchant,paymentMode,amount\n01/04/2026,expense,House Rent,April Rent,,NEFT/Bank Transfer,20500\n01/04/2026,income,Salary / Consultancy,April Salary,,NEFT/Bank Transfer,83550\n05/04/2026,expense,Groceries & Food,Monthly groceries,DMart,UPI,4500\n10/04/2026,expense,Entertainment,OTT subscription,Netflix,Credit Card,649\n'],{type:'text/csv'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='miyeecfo-transactions-template.csv';a.click();
+  };
+  const handleCSV=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      const raw=ev.target.result.replace(/\r/g,'');
+      const lines=raw.split('\n').filter(l=>l.trim());
+      if(lines.length<2){toast('CSV empty or no data rows','r');return;}
+      const hdrRaw=parseCSVLine(lines[0]);
+      const hdr=hdrRaw.map(h=>h.replace(/"/g,'').trim().toLowerCase().replace(/[\s_\-]/g,''));
+      const ca=(...aliases)=>(cols)=>{for(const a of aliases){const i=hdr.indexOf(a.toLowerCase().replace(/[\s_\-]/g,''));if(i>=0&&cols[i]!==undefined&&cols[i]!=='')return cols[i];}return'';};
+      const getDate=ca('date','transactiondate','txndate','valuedate','postingdate','dt');
+      const getAmt=ca('amount','amt','value','debit','credit','dr','cr','inr','debitamount','creditamount');
+      const getType=ca('type','transactiontype','txntype','flow','drcr');
+      const getCat=ca('category','cat','head','expensehead','expensecategory','categoryname');
+      const getDesc=ca('description','desc','narration','particulars','details','remarks','note','memo','narrative');
+      const getPM=ca('paymentmode','paymentmethod','mode','channel','modeofpayment','paymode','payment');
+      const getMerchant=ca('merchant','vendor','shop','store','merchantname','payee','party');
+      let skipped=0;
+      const txs=lines.slice(1).map(line=>{
+        if(!line.trim())return null;
+        const cols=parseCSVLine(line);
+        const date=normalizeDate(getDate(cols));
+        if(!date||date.length<8){skipped++;return null;}
+        const rawAmt=getAmt(cols).replace(/[,\s₹$€£¥]/g,'');
+        const amount=parseFloat(rawAmt);
+        if(isNaN(amount)||amount===0){skipped++;return null;}
+        const rawType=getType(cols).toLowerCase();
+        const txType=rawType.includes('inc')||rawType==='cr'||rawType==='credit'?'income':'expense';
+        const cat=getCat(cols)||(txType==='income'?'Other Income':'Other Expense');
+        return{id:uid(),date,type:txType,category:cat,desc:getDesc(cols),amount,month:date.slice(0,7),paymentMode:getPM(cols),merchant:getMerchant(cols)};
+      }).filter(Boolean);
+      setData(d=>({...d,transactions:[...d.transactions,...txs]}));
+      toast(`Imported ${txs.length}${skipped?` · ${skipped} skipped`:''}`,'g');
+    };
+    r.readAsText(f);e.target.value='';
+  };
+
+  // Payment mode breakdown
+  const pmMap={};filtered.forEach(t=>{const pm=t.paymentMode||'Unknown';pmMap[pm]=(pmMap[pm]||0)+t.amount;});
+  const topPM=Object.entries(pmMap).sort((a,b)=>b[1]-a[1]).slice(0,3);
+  // Merchant analytics for current filtered view
+  const merchantAnalytics=useMemo(()=>{
+    const map={};
+    filtered.filter(t=>t.merchant).forEach(t=>{
+      if(!map[t.merchant])map[t.merchant]={amt:0,cnt:0};
+      map[t.merchant].amt+=t.amount;map[t.merchant].cnt++;
+    });
+    return Object.entries(map).sort((a,b)=>b[1].amt-a[1].amt).slice(0,6);
+  },[filtered]);
+
+  return(
+    <div className="page">
+      <div className="ph">
+        <div><div className="ptitle">{isInc?'Income Tracker':'Expense Tracker'}</div><div className="psub">Daily {isInc?'income':'expense'} log</div></div>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-s btn-sm" onClick={downloadTemplate}><Ic n="dl" s={12}/>Template</button>
+          <button className="btn btn-s btn-sm" onClick={()=>fileRef.current.click()}><Ic n="up" s={12}/>CSV Import</button>
+          <button className="btn btn-s btn-sm" onClick={exportCSV}><Ic n="dl" s={12}/>Export CSV</button>
+        </div>
+      </div>
+      <input type="file" ref={fileRef} accept=".csv" style={{display:'none'}} onChange={handleCSV}/>
+      <div className="g3 mb3">
+        <div className="card"><div className="cl">Filtered Total</div><div className="cv" style={{color,fontSize:18}}>{fmtINR(total)}</div><div className="cm">{filtered.length} entries · {months.length} months</div></div>
+        {topPM.map(([pm,v])=>(
+          <div className="card" key={pm}><div className="cl">{pm||'Unknown'}</div><div className="cv" style={{color,fontSize:17}}>{fmtINR(v,true)}</div><div className="cm">{total>0?(v/total*100).toFixed(1):0}% by mode</div></div>
+        ))}
+        {topPM.length===0&&Object.entries(filtered.reduce((m,t)=>{m[t.category]=(m[t.category]||0)+t.amount;return m;},{})).sort((a,b)=>b[1]-a[1]).slice(0,2).map(([c,v])=>(
+          <div className="card" key={c}><div className="cl">{c}</div><div className="cv" style={{color,fontSize:17}}>{fmtINR(v,true)}</div><div className="cm">{total>0?(v/total*100).toFixed(1):0}% of total</div></div>
+        ))}
+      </div>
+      {/* Merchant Analytics */}
+      {merchantAnalytics.length>0&&(
+        <div className="card mb3">
+          <div className="sh mb2">
+            <div className="sh-t"><Ic n="exp" s={14} c="var(--p)"/>Merchant Analytics</div>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              {selMerchant!=='all'&&<span className="tag tp" style={{fontSize:10}}>Filtered: {selMerchant}</span>}
+              <span className="tag tx" style={{fontSize:10}}>{merchantAnalytics.length} merchants · current view</span>
+            </div>
+          </div>
+          <div className="g3">
+            {merchantAnalytics.map(([m,{amt,cnt}],i)=>{
+              const clrs=['var(--p)','var(--b)','var(--t)','var(--o)','var(--g)','var(--r)'];
+              const pct=total>0?amt/total*100:0;
+              const active=selMerchant===m;
+              return(
+                <div key={m} style={{cursor:'pointer',padding:'10px 12px',borderRadius:8,border:`1.5px solid ${active?clrs[i%6]:'var(--n150)'}`,background:active?'var(--gl)':'var(--bg)',transition:'all 0.15s'}}
+                  onClick={()=>setSelMerchant(active?'all':m)}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:5}}>
+                    <span style={{fontSize:12.5,fontWeight:700,color:clrs[i%6],display:'flex',alignItems:'center',gap:5}}>
+                      <span style={{width:8,height:8,borderRadius:2,background:clrs[i%6],flexShrink:0,display:'inline-block'}}/>
+                      {m}
+                    </span>
+                    <span style={{fontFamily:'var(--m)',fontSize:12.5,fontWeight:700}}>{fmtINR(amt,true)}</span>
+                  </div>
+                  <div className="prog" style={{height:5,marginBottom:5}}><div className="pf" style={{width:`${pct}%`,background:clrs[i%6]}}/></div>
+                  <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'var(--n400)'}}>
+                    <span>{cnt} txn{cnt!==1?'s':''}</span>
+                    <span>{pct.toFixed(1)}% of total</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {/* Form */}
+      <div className="card mb3">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n={eid?'edit':'plus'} s={14} c="var(--g)"/>{eid?'Edit Entry':'Add New Entry'}</div>
+          {eid&&<button className="btn btn-g btn-sm" onClick={cancel}>Cancel</button>}
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 2fr 1fr 1fr 1fr auto',gap:10,alignItems:'end'}}>
+          <div className="fg"><label>Date</label><input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
+          <div className="fg"><label>Category {autoCat&&form.category===autoCat&&<span style={{fontWeight:700,textTransform:'none',color:'var(--g)'}}>· auto</span>}</label>
+            <select value={form.category} onChange={e=>{const v=e.target.value;setForm(f=>({...f,category:v}));setAutoCat('');}}
+              style={autoCat&&form.category===autoCat?{borderColor:'var(--g)'}:{}}>
+              <option value="">– Select –</option>
+              {cats.map(c=><option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div className="fg"><label>Description / Narration</label><input type="text" placeholder="Details…" value={form.desc} onChange={e=>setForm(f=>({...f,desc:e.target.value}))}/></div>
+          <div className="fg"><label>Merchant / Vendor <span style={{fontWeight:400,textTransform:'none',color:'var(--n400)'}}>fills category</span></label>
+            <input list={`merchant-list-${type}`} placeholder="e.g. Swiggy, DMart…" value={form.merchant||''} onChange={e=>onMerchantChange(e.target.value)}/>
+            <datalist id={`merchant-list-${type}`}>{[...new Set(transactions.filter(t=>t.type===type&&t.merchant).map(t=>t.merchant))].map(m=><option key={m} value={m}/>)}</datalist>
+          </div>
+          <div className="fg"><label>Payment Mode</label>
+            <select value={form.paymentMode} onChange={e=>setForm(f=>({...f,paymentMode:e.target.value}))}>
+              <option value="">– Mode –</option>
+              {PAYMENT_MODES.map(m=><option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div className="fg"><label>Amount ({CUR.sym})</label>
+            <input type="number" placeholder="0.00" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))}/>
+          </div>
+          <button className="btn btn-p" onClick={save} style={{marginBottom:1}}><Ic n={eid?'ok':'plus'} s={13} c="#fff"/></button>
+        </div>
+      </div>
+      {/* Bulk actions bar */}
+      {sel.size>0&&(
+        <div className="bulk-bar">
+          <Ic n="del" s={13} c="var(--gd)"/>
+          {sel.size} selected
+          <button className="btn btn-s btn-sm" onClick={bulkDuplicate}>⧉ Duplicate to This Month</button>
+          <button className="btn btn-d btn-sm" onClick={bulkDel}><Ic n="del" s={12}/>Delete Selected</button>
+          <button className="btn btn-g btn-sm" onClick={()=>setSel(new Set())}>Clear</button>
+        </div>
+      )}
+      {/* Month filter */}
+      <div className="mbar">
+        <button type="button" className={`mchip ${selM==='all'?'on':''}`} onClick={()=>{setSelM('all');setSelPM('all');setSelMerchant('all');}}>All Months</button>
+        {months.map(m=><button type="button" key={m.key} className={`mchip ${selM===m.key?'on':''}`} onClick={()=>{setSelM(m.key);setSelPM('all');setSelMerchant('all');}}>{m.label}</button>)}
+      </div>
+      {/* Payment mode filter */}
+      {pmOptions.length>0&&<div className="mbar" style={{marginBottom:8}}>
+        <button type="button" className={`mchip ${selPM==='all'?'on':''}`} onClick={()=>{setSelPM('all');setSelMerchant('all');}} style={{fontSize:11}}>All Modes</button>
+        {pmOptions.map(pm=><button type="button" key={pm} className={`mchip ${selPM===pm?'on':''}`} onClick={()=>{setSelPM(pm);setSelMerchant('all');}} style={{fontSize:11}}><span className={`pm-badge ${pmClass(pm)}`} style={{pointerEvents:'none'}}>{pm}</span></button>)}
+      </div>}
+      {/* Merchant filter */}
+      {merchantOptions.length>0&&(()=>{
+        const clrs=['var(--p)','var(--b)','var(--t)','var(--o)','var(--g)','var(--r)'];
+        const LIMIT=5;
+        const extra=merchantOptions.length-LIMIT;
+        const visible=showAllMerchants?merchantOptions:merchantOptions.slice(0,LIMIT);
+        // If active merchant is beyond limit, always include it
+        const showSet=new Set(visible);
+        if(selMerchant!=='all'&&!showSet.has(selMerchant))showSet.add(selMerchant);
+        const displayed=[...showSet].sort((a,b)=>merchantOptions.indexOf(a)-merchantOptions.indexOf(b));
+        return(
+          <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:10,overflowX:'unset'}}>
+            <button type="button" className={`mchip ${selMerchant==='all'?'on':''}`} onClick={()=>setSelMerchant('all')} style={{fontSize:11}}>🏪 All Merchants</button>
+            {displayed.map(m=>{
+              const ci=merchantOptions.indexOf(m);
+              return(<button type="button" key={m} className={`mchip ${selMerchant===m?'on':''}`} onClick={()=>setSelMerchant(selMerchant===m?'all':m)} style={{fontSize:11,display:'flex',alignItems:'center',gap:4}}><span style={{width:7,height:7,borderRadius:2,background:clrs[ci%6],display:'inline-block',flexShrink:0}}/>{m}</button>);
+            })}
+            {!showAllMerchants&&extra>0&&<div className="mchip" onClick={()=>setShowAllMerchants(true)} style={{fontSize:11,fontWeight:700,color:'var(--p)',borderColor:'var(--p)'}}>+{extra} more</div>}
+            {showAllMerchants&&extra>0&&<div className="mchip" onClick={()=>setShowAllMerchants(false)} style={{fontSize:11,fontWeight:700,color:'var(--n500)',borderColor:'var(--n300)'}}>Show less ↑</div>}
+          </div>
+        );
+      })()}
+      <div className="tw">
+        <table>
+          <thead><tr>
+            <th style={{width:34}}><input type="checkbox" checked={allSel} onChange={toggleAll}/></th>
+            <th>Date</th><th>Month</th><th>Category</th><th>Description</th><th>Merchant</th><th>Mode</th><th className="num">Amount ({CUR.sym})</th><th>Actions</th>
+          </tr></thead>
+          <tbody>
+            {filtered.length===0&&<tr><td colSpan={8}><div style={{textAlign:'center',padding:'28px',color:'var(--n400)',fontSize:12.5}}>No entries found.</div></td></tr>}
+            {filtered.map(t=>(
+              <tr key={t.id} className={`cb-row ${sel.has(t.id)?'sel':''}`} style={{background:eid===t.id?'var(--gl)':''}}>
+                <td><input type="checkbox" checked={sel.has(t.id)} onChange={()=>toggleOne(t.id)}/></td>
+                <td style={{fontFamily:'var(--m)',fontSize:12}}>{fmtDate(t.date)}</td>
+                <td><span className="tag tx" style={{cursor:'pointer'}} onClick={()=>setSelM(t.month)} title="Filter by this month">{fmtMonth(t.month)}</span></td>
+                <td style={{fontSize:12.5}}>{t.category}</td>
+                <td style={{fontSize:12,color:'var(--n500)'}}>{t.desc}</td>
+                <td style={{fontSize:11.5}}>{t.merchant?<span style={{background:'var(--gl)',borderRadius:4,padding:'2px 7px',color:'var(--p)',fontWeight:600,cursor:'pointer'}} onClick={()=>setSelMerchant(selMerchant===t.merchant?'all':t.merchant)} title="Filter by this merchant">{t.merchant}</span>:<span style={{color:'var(--n400)'}}>–</span>}</td>
+                <td>{t.paymentMode?<span className={`pm-badge ${pmClass(t.paymentMode)}`} style={{cursor:'pointer'}} onClick={()=>{setSelPM(t.paymentMode);setSelMerchant('all');}} title="Filter by this mode">{t.paymentMode}</span>:'–'}</td>
+                <td className={`num ${isInc?'pos':'neg'}`}>{fmtINR(t.amount)}</td>
+                <td><div style={{display:'flex',gap:4}}>
+                  <button className="bic" onClick={()=>startEdit(t)} aria-label="Edit entry" title="Edit"><Ic n="edit" s={11}/></button>
+                  <button className="bic" onClick={()=>duplicate(t)} aria-label="Duplicate entry" title="Duplicate to today" style={{fontSize:12,fontWeight:700,lineHeight:1}}>⧉</button>
+                  <button className="bic red" onClick={()=>del(t.id)} aria-label="Delete entry" title="Delete"><Ic n="del" s={11}/></button>
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+          {filtered.length>0&&<tfoot><tr className="tft"><td colSpan={5} style={{fontWeight:700}}>Total ({filtered.length} entries)</td><td/><td className={`num ${isInc?'pos':'neg'}`}>{fmtINR(total)}</td><td/></tr></tfoot>}
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   BUDGET
+══════════════════════════════════════ */
+function PageBudget({data,setData,toast}){
+  const {transactions,budgetLimits,expenseCategories,profile}=data;
+  const [mode,setMode]=useState('monthly');
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const _curMK=`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+  const [selM,setSelM]=useState(months.find(m=>m.key===_curMK)?.key||months[months.length-1]?.key||months[0]?.key||'');
+
+  // Actuals only ever cover elapsed months, so the "Full Period" allowance must be
+  // pro-rated to the same window, otherwise every category looks comfortably under budget
+  // simply because the year hasn't finished yet.
+  const _nowMK=`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+  const elapsedMonths=Math.min(months.length,Math.max(1,months.filter(m=>m.key<=_nowMK).length));
+  const getActual=cat=>transactions.filter(t=>t.type==='expense'&&t.category===cat&&(mode==='monthly'?t.month===selM:months.some(m=>m.key===t.month))).reduce((s,t)=>s+t.amount,0);
+  const getBudget=cat=>mode==='monthly'?(budgetLimits[cat]||0):(budgetLimits[cat]||0)*elapsedMonths;
+  const rows=expenseCategories.map(cat=>{const actual=getActual(cat),budget=getBudget(cat),variance=budget-actual,pct=budget>0?(actual/budget)*100:actual>0?999:0;return{cat,actual,budget,variance,pct};}).filter(r=>r.actual>0||r.budget>0);
+  const tA=rows.reduce((s,r)=>s+r.actual,0),tB=rows.reduce((s,r)=>s+r.budget,0),tV=tB-tA;
+
+  return(
+    <div className="page">
+      <div className="ph">
+        <div><div className="ptitle">Budget vs Actual</div><div className="psub">Period: {periodLabel(profile.periodStart,profile.periodEnd)}</div></div>
+        <div className="tgl"><button className={`tgo ${mode==='monthly'?'on':''}`} onClick={()=>setMode('monthly')}>Monthly</button><button className={`tgo ${mode==='annual'?'on':''}`} onClick={()=>setMode('annual')}>Period to Date</button></div>
+      </div>
+      {mode==='monthly'&&<div className="mbar">{months.map(m=><button type="button" key={m.key} className={`mchip ${selM===m.key?'on':''}`} onClick={()=>setSelM(m.key)}>{m.label}</button>)}</div>}
+      <div className="g3 mb3">
+        <div className="card"><div className="cl">{mode==='monthly'?'Monthly':'Allowed to Date'} Budget</div><div className="cv b">{fmtINR(tB)}</div><div className="cm">{mode==='annual'?`${elapsedMonths} of ${months.length} months elapsed × monthly limit`:'Configured'}</div></div>
+        <div className="card"><div className="cl">Actual Spent</div><div className="cv r">{fmtINR(tA)}</div></div>
+        <div className="card"><div className="cl">Unspent / Overspent</div><div className={`cv ${tV>=0?'g':'r'}`}>{tV>=0?'+':''}{fmtINR(tV)}</div><div className="cm">{tV>=0?'Under budget ✓':'Over budget ⚠'}</div></div>
+      </div>
+      <div className="tw">
+        <table>
+          <thead><tr><th>Category</th><th className="num">Budget ({CUR.sym})</th><th className="num">Actual ({CUR.sym})</th><th className="num">Variance ({CUR.sym})</th><th>Utilization</th><th>Status</th></tr></thead>
+          <tbody>
+            {rows.map(r=>(
+              <tr key={r.cat}>
+                <td style={{fontWeight:700,fontSize:12.5}}>{r.cat}</td>
+                <td className="num">{r.budget.toLocaleString(CUR.locale)}</td>
+                <td className="num">{r.actual.toLocaleString(CUR.locale)}</td>
+                <td className={`num ${r.variance>=0?'pos':'neg'}`}>{r.variance>=0?'+':''}{r.variance.toLocaleString(CUR.locale)}</td>
+                <td style={{width:150}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6}}>
+                    <div className="prog" style={{flex:1,height:6}}><div className="pf" style={{width:`${Math.min(100,r.pct)}%`,background:r.pct>100?'var(--r)':r.pct>85?'var(--o)':'var(--g)'}}/></div>
+                    <span style={{fontSize:10,color:'var(--n400)',width:34,textAlign:'right'}}>{r.pct>999?'∞':r.pct.toFixed(0)}%</span>
+                  </div>
+                </td>
+                <td>{r.pct>100?<span className="tag tr">Over</span>:r.pct>85?<span className="tag to">Near</span>:r.budget===0?<span className="tag tx">No Limit</span>:<span className="tag tg">OK</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot><tr className="tft"><td style={{fontWeight:700}}>Total</td><td className="num bold">{tB.toLocaleString(CUR.locale)}</td><td className="num bold">{tA.toLocaleString(CUR.locale)}</td><td className={`num bold ${tV>=0?'pos':'neg'}`}>{tV>=0?'+':''}{tV.toLocaleString(CUR.locale)}</td><td/><td/></tr></tfoot>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   PnL
+══════════════════════════════════════ */
+function PagePnL({data}){
+  const {transactions,profile}=data;
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const [selM,setSelM]=useState('all');
+  // Investments sit below the surplus line: a transfer out of cash, not a cost.
+  const itxs=data.investmentTxs||[];
+  const imonth=t=>t.month||(t.date||'').slice(0,7);
+  const getD=key=>{
+    const txs=transactions.filter(t=>key==='all'?months.some(m=>m.key===t.month):t.month===key);
+    const income=txs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
+    const expense=txs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
+    const invested=itxs.filter(t=>key==='all'?months.some(m=>m.key===imonth(t)):imonth(t)===key)
+      .reduce((s,t)=>s+(t.amount||0),0);
+    const surplus=income-expense;
+    return{income,expense,surplus,invested,cash:surplus-invested};
+  };
+  const summary=months.map(m=>({...m,...getD(m.key)}));
+  const totals=getD('all');const cur=selM==='all'?totals:getD(selM);
+  const incCats={};transactions.filter(t=>t.type==='income'&&(selM==='all'?months.some(m=>m.key===t.month):t.month===selM)).forEach(t=>{incCats[t.category]=(incCats[t.category]||0)+t.amount;});
+  const expCats={};transactions.filter(t=>t.type==='expense'&&(selM==='all'?months.some(m=>m.key===t.month):t.month===selM)).forEach(t=>{expCats[t.category]=(expCats[t.category]||0)+t.amount;});
+  return(
+    <div className="page">
+      <div className="ph"><div><div className="ptitle">P &amp; L Statement</div><div className="psub">Period: {periodLabel(profile.periodStart,profile.periodEnd)}</div></div></div>
+      <div className="mbar"><button type="button" className={`mchip ${selM==='all'?'on':''}`} onClick={()=>setSelM('all')}>Full Period</button>{months.map(m=><button type="button" key={m.key} className={`mchip ${selM===m.key?'on':''}`} onClick={()=>setSelM(m.key)}>{m.label}</button>)}</div>
+      <div className="g3 mb3">
+        {[
+          {l:'Total Income',v:cur.income,col:'g',icon:'inc'},
+          {l:'Less · Total Expense',v:cur.expense,col:'r',icon:'exp'},
+          {l:'Balance · Surplus',v:cur.surplus,col:cur.surplus>=0?'g':'r',icon:'pnl',sub:`${cur.income>0?(cur.surplus/cur.income*100).toFixed(2):0}% of income`},
+          {l:'Less · Investments',v:cur.invested,col:'b',icon:'up',sub:cur.invested>0?`${cur.income>0?(cur.invested/cur.income*100).toFixed(2):0}% of income · added to net worth`:'Nothing logged this period'},
+          {l:'Balance Cash',v:cur.cash,col:cur.cash>=0?'g':'r',icon:'bank',sub:'Left over after living costs and investing'},
+          {l:'Savings Rate',v:null,col:cur.surplus>=0?'g':'r',icon:'budget',pct:cur.income>0?(cur.surplus/cur.income*100).toFixed(1):0},
+        ].map(k=>(
+          <div className={`kpi-card ${k.col}`} key={k.l}>
+            <div className="kpi-ic-wrap"><div className="kpi-ic" style={{background:k.col==='g'?'var(--gl)':k.col==='b'?'var(--bl)':'var(--rl)'}}><Ic n={k.icon} c={k.col==='g'?'var(--g)':k.col==='b'?'var(--b)':'var(--r)'}/></div></div>
+            <div className="cl">{k.l}</div>
+            {k.pct!==undefined?<div className={`cv ${k.col}`} style={{fontSize:20}}>{k.pct}%</div>:<div className={`cv ${k.col}`} style={{fontSize:17}}>{fmtINR(k.v)}</div>}
+            {k.sub&&<div className="cm">{k.sub}</div>}
+          </div>
+        ))}
+      </div>
+      <div className="alert ai mb3"><Ic n="pnl" s={13}/>
+        <span>Investments are money moved, not money spent. They never appear in <strong>Total Expense</strong>.
+        They come off the surplus to give you <strong>Balance Cash</strong>, and the same amount lands on the
+        balance sheet as an asset inside <strong>Net Worth</strong>.</span>
+      </div>
+      <div className="g2 mb3">
+        <div className="card">
+          <div className="sh mb2"><div className="sh-t"><Ic n="inc" s={14} c="var(--g)"/>Income Breakdown</div><span className="tag tg">{fmtINR(cur.income,true)}</span></div>
+          {Object.entries(incCats).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>(<div key={cat} style={{marginBottom:9}}><div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><span style={{fontSize:12.5}}>{cat}</span><span style={{fontFamily:'var(--m)',fontSize:12,fontWeight:600,color:'var(--gd)'}}>{fmtINR(amt)}</span></div><div className="prog"><div className="pf" style={{width:`${cur.income>0?amt/cur.income*100:0}%`,background:'var(--g)'}}/></div></div>))}
+          {!Object.keys(incCats).length&&<div style={{textAlign:'center',padding:'16px',color:'var(--n400)',fontSize:12}}>No income data.</div>}
+        </div>
+        <div className="card">
+          <div className="sh mb2"><div className="sh-t"><Ic n="exp" s={14} c="var(--r)"/>Expense Breakdown</div><span className="tag tr">{fmtINR(cur.expense,true)}</span></div>
+          {Object.entries(expCats).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>(<div key={cat} style={{marginBottom:9}}><div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><span style={{fontSize:12.5}}>{cat}</span><span style={{fontFamily:'var(--m)',fontSize:12,fontWeight:600,color:'var(--r)'}}>{fmtINR(amt)}</span></div><div className="prog"><div className="pf" style={{width:`${cur.expense>0?amt/cur.expense*100:0}%`,background:'var(--r)'}}/></div></div>))}
+          {!Object.keys(expCats).length&&<div style={{textAlign:'center',padding:'16px',color:'var(--n400)',fontSize:12}}>No expense data.</div>}
+        </div>
+      </div>
+      <div className="card">
+        <div className="sh mb2"><div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Monthly P&amp;L Breakdown</div></div>
+        <div className="tw">
+          <table>
+            <thead><tr><th>Month</th><th className="num">Income ({CUR.sym})</th><th className="num">Expense ({CUR.sym})</th><th className="num">Surplus / Deficit ({CUR.sym})</th><th className="num">Investments ({CUR.sym})</th><th className="num">Balance Cash ({CUR.sym})</th><th className="num">Savings %</th><th>Status</th></tr></thead>
+            <tbody>
+              {summary.map(m=>(<tr key={m.key} style={{cursor:'pointer',background:selM===m.key?'var(--gl)':''}} onClick={()=>setSelM(m.key)}><td style={{fontWeight:700}}>{m.label}</td><td className="num pos">{m.income.toLocaleString(CUR.locale)}</td><td className="num neg">{m.expense.toLocaleString(CUR.locale)}</td><td className={`num ${m.surplus>=0?'pos':'neg'}`}>{m.surplus.toLocaleString(CUR.locale)}</td><td className="num" style={{color:'var(--b)'}}>{m.invested?m.invested.toLocaleString(CUR.locale):'–'}</td><td className={`num bold ${m.cash>=0?'pos':'neg'}`}>{m.cash.toLocaleString(CUR.locale)}</td><td className="num" style={{fontSize:11.5}}>{m.income>0?(m.surplus/m.income*100).toFixed(2):'–'}%</td><td>{m.income===0&&m.expense===0?<span className="tag tx">No Data</span>:m.surplus>=0?<span className="tag tg">Surplus</span>:<span className="tag tr">Deficit</span>}</td></tr>))}
+            </tbody>
+            <tfoot><tr className="tft"><td style={{fontWeight:700}}>Period Total</td><td className="num pos bold">{totals.income.toLocaleString(CUR.locale)}</td><td className="num neg bold">{totals.expense.toLocaleString(CUR.locale)}</td><td className={`num bold ${totals.surplus>=0?'pos':'neg'}`}>{totals.surplus.toLocaleString(CUR.locale)}</td><td className="num bold" style={{color:'var(--b)'}}>{totals.invested.toLocaleString(CUR.locale)}</td><td className={`num bold ${totals.cash>=0?'pos':'neg'}`}>{totals.cash.toLocaleString(CUR.locale)}</td><td className="num bold">{totals.income>0?(totals.surplus/totals.income*100).toFixed(2):0}%</td><td/></tr></tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   CREDIT CARDS
+══════════════════════════════════════ */
+function PageCC({data,setData,toast}){
+  const {creditCards}=data;
+  const ef={bank:'',type:'',accNo:'XXXX-XXXX-XXXX-0000',limit:'',payable:'',provision:'',dueDate:''};
+  const [modal,setModal]=useState(null);
+  const [form,setForm]=useState(ef);
+  const tL=creditCards.reduce((s,c)=>s+c.limit,0);
+  const tP=creditCards.reduce((s,c)=>s+c.payable,0);
+  const tProv=creditCards.reduce((s,c)=>s+c.provision,0);
+  const util=tL>0?(tP+tProv)/tL*100:0;
+  const dues=creditCards.filter(c=>c.dueDate&&c.payable>0).sort((a,b)=>new Date(a.dueDate)-new Date(b.dueDate));
+
+  const openAdd=()=>{setForm(ef);setModal('add');};
+  const ccFileRef=useRef();
+  const handleCCCSV=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      const raw=ev.target.result.replace(/\r/g,'');
+      const lines=raw.split('\n').filter(l=>l.trim());
+      if(lines.length<2){toast('CSV empty','r');return;}
+      const hdr=parseCSVLine(lines[0]).map(h=>h.replace(/"/g,'').trim().toLowerCase().replace(/[\s_\-]/g,''));
+      const ca=(...aliases)=>(cols)=>{for(const a of aliases){const i=hdr.indexOf(a.toLowerCase().replace(/[\s_\-]/g,''));if(i>=0&&cols[i])return cols[i];}return'';};
+      const getBank=ca('bank','bankname','issuer','issuingbank');
+      const getType=ca('type','cardtype','cardname','variant','network');
+      const getAccNo=ca('accno','cardnumber','accountnumber','last4','maskedcard');
+      const getLimit=ca('limit','creditlimit','sanctionedlimit');
+      const getPayable=ca('payable','billed','billedamount','outstanding','amountdue','currentdue');
+      const getProv=ca('provision','unbilled','unbilledamount','spends');
+      const getDue=ca('duedate','paymentduedate','due','duedt');
+      const cards=lines.slice(1).map(line=>{
+        if(!line.trim())return null;
+        const cols=parseCSVLine(line);
+        const bank=getBank(cols);if(!bank)return null;
+        return{id:uid(),bank,type:getType(cols)||'Credit Card',accNo:getAccNo(cols)||'XXXX-0000',limit:parseFloat(getLimit(cols).replace(/[,\s₹$€£¥]/g,''))||0,payable:parseFloat(getPayable(cols).replace(/[,\s₹$€£¥]/g,''))||0,provision:parseFloat(getProv(cols).replace(/[,\s₹$€£¥]/g,''))||0,dueDate:normalizeDate(getDue(cols))||null};
+      }).filter(Boolean);
+      setData(d=>({...d,creditCards:[...d.creditCards,...cards]}));
+      toast(`Imported ${cards.length} credit cards`,'g');
+    };
+    r.readAsText(f);e.target.value='';
+  };
+  const downloadCCTemplate=()=>{
+    const b=new Blob(['bank,type,accNo,limit,payable,provision,dueDate\nHDFC Bank,Visa Infinite,XXXX-XXXX-XXXX-1234,300000,15000,5000,2026-05-15\nICICI Bank,Amazon Pay,XXXX-XXXX-XXXX-5678,200000,8000,2000,2026-05-20\n'],{type:'text/csv'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='finmanager-cc-template.csv';a.click();
+  };
+  const openEdit=c=>{setForm({bank:c.bank,type:c.type,accNo:c.accNo,limit:String(c.limit),payable:String(c.payable),provision:String(c.provision),dueDate:c.dueDate||''});setModal({eid:c.id});};
+  const close=()=>{setModal(null);setForm(ef);};
+  const save=()=>{
+    if(!form.bank||!form.type||!form.limit)return;
+    const e={bank:form.bank,type:form.type,accNo:form.accNo,limit:+form.limit,payable:+form.payable||0,provision:+form.provision||0,dueDate:form.dueDate||null};
+    if(modal==='add'){setData(d=>({...d,creditCards:[...d.creditCards,{id:uid(),...e}]}));toast('Card added','g');}
+    else{setData(d=>({...d,creditCards:d.creditCards.map(c=>c.id===modal.eid?{...c,...e}:c)}));toast('Card updated','g');}
+    close();
+  };
+  const undoDel=makeUndoDelete(data,setData,toast);
+  const del=id=>undoDel('Card removed',d=>({...d,creditCards:d.creditCards.filter(c=>c.id!==id)}));
+
+  const CCForm=(<>
+    <div className="f2 mb2"><div className="fg"><label>Bank Name</label><input value={form.bank} onChange={e=>setForm(f=>({...f,bank:e.target.value}))} placeholder="e.g. HDFC Bank"/></div><div className="fg"><label>Card Type / Network</label><input value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))} placeholder="e.g. Visa Infinite"/></div></div>
+    <div className="f2 mb2"><div className="fg"><label>Credit Limit ({CUR.sym})</label><input type="number" value={form.limit} onChange={e=>setForm(f=>({...f,limit:e.target.value}))}/></div><div className="fg"><label>Payment Due Date</label><input type="date" value={form.dueDate} onChange={e=>setForm(f=>({...f,dueDate:e.target.value}))}/></div></div>
+    <div className="f2"><div className="fg"><label>Billed Amount – Payable ({CUR.sym})</label><input type="number" value={form.payable} onChange={e=>setForm(f=>({...f,payable:e.target.value}))}/></div><div className="fg"><label>Unbilled – Not Yet Billed ({CUR.sym})</label><input type="number" value={form.provision} onChange={e=>setForm(f=>({...f,provision:e.target.value}))}/></div></div>
+  </>);
+
+  return(
+    <div className="page">
+      <div className="ph"><div><div className="ptitle">Credit Card Manager</div><div className="psub">Billed vs Unbilled · Due Date Tracker</div></div>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-s btn-sm" onClick={downloadCCTemplate}><Ic n="dl" s={12}/>Template</button>
+          <button className="btn btn-s btn-sm" onClick={()=>ccFileRef.current.click()}><Ic n="up" s={12}/>CSV Import</button>
+          <button className="btn btn-p" onClick={openAdd}><Ic n="plus" s={13} c="#fff"/>Add Card</button>
+        </div>
+      </div>
+      <input type="file" ref={ccFileRef} accept=".csv" style={{display:'none'}} onChange={handleCCCSV}/>
+      <div className="g4 mb3">
+        <div className="card"><div className="cl">Total Limit</div><div className="cv b">{fmtINR(tL,true)}</div><div className="cm">{creditCards.length} cards</div></div>
+        <div className="card"><div className="cl">Billed (Payable)</div><div className="cv r">{fmtINR(tP)}</div><div className="cm">Due now</div></div>
+        <div className="card"><div className="cl">Unbilled (Not Yet Billed)</div><div className="cv o">{fmtINR(tProv)}</div><div className="cm">Upcoming</div></div>
+        <div className="card"><div className="cl">Overall Utilization</div>
+          <div style={{display:'flex',gap:12,alignItems:'center',marginTop:6}}>
+            <Donut pct={util} color={util>30?'var(--r)':util>15?'var(--o)':'var(--g)'} size={70} stroke={7} label="Used"/>
+            <div><div className="cv" style={{fontSize:17,color:util>30?'var(--r)':util>15?'var(--o)':'var(--gd)'}}>{util.toFixed(2)}%</div><div className="cm">of {fmtINR(tL,true)}</div></div>
+          </div>
+        </div>
+      </div>
+
+      {/* 🔔 Payment Due Notification Panel (within 3 days) */}
+      {(()=>{
+        const urgentDues=creditCards.filter(c=>{const d=daysDiff(c.dueDate);return d!==null&&d<=3&&d>=0&&c.payable>0;}).sort((a,b)=>new Date(a.dueDate)-new Date(b.dueDate));
+        if(urgentDues.length===0)return null;
+        return(
+          <div className="card mb3" style={{border:'2px solid var(--r)',background:'linear-gradient(135deg,#fff5f5,#fff0f0)'}}>
+            <div className="sh mb2">
+              <div className="sh-t" style={{color:'var(--r)'}}><Ic n="bell" s={15} c="var(--r)"/>⚡ Payment Due Within 3 Days</div>
+              <span className="tag tr" style={{fontSize:11,padding:'3px 10px'}}>{urgentDues.length} urgent</span>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:10}}>
+              {urgentDues.map(cc=>{
+                const d=daysDiff(cc.dueDate);
+                return(
+                  <div key={cc.id} style={{display:'flex',gap:12,alignItems:'center',padding:'12px 14px',background:'#fff',borderRadius:'var(--r8)',border:'1.5px solid rgba(220,38,38,.2)',boxShadow:'0 2px 8px rgba(220,38,38,.08)'}}>
+                    <div style={{width:44,height:44,borderRadius:10,background:d===0?'var(--r)':'var(--o)',display:'grid',placeItems:'center',flexShrink:0}}>
+                      <Ic n="bell" s={20} c="#fff"/>
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:700,fontSize:13}}>{cc.bank} – {cc.type}</div>
+                      <div style={{fontSize:11,color:'var(--n500)',marginTop:1}}>
+                        {d===0?'⚠ DUE TODAY. Pay immediately!':d===1?'⚠ Due TOMORROW!':d===2?'⚠ Due in 2 days':d===3?'Due in 3 days':''}
+                      </div>
+                    </div>
+                    <div style={{textAlign:'right'}}>
+                      <div style={{fontFamily:'var(--m)',fontSize:16,fontWeight:800,color:'var(--r)'}}>{fmtINR(cc.payable)}</div>
+                      <div style={{fontSize:10.5,color:'var(--n400)',fontWeight:600}}>{fmtDate(cc.dueDate)}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{marginTop:10,fontSize:11.5,color:'#7f1d1d',fontWeight:600,display:'flex',alignItems:'center',gap:6}}>
+              <Ic n="prov" s={12} c="#7f1d1d"/>Pay on time to avoid late fees and protect your credit score.
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Beautiful due cards */}
+      {dues.length>0&&(
+        <div className="card mb3">
+          <div className="sh mb3"><div className="sh-t"><Ic n="cal" s={14} c="var(--g)"/>Upcoming Payment Dues</div><span className="tag tr">{dues.length} due</span></div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(220px,1fr))',gap:10}}>
+            {dues.map(cc=>{
+              const d=daysDiff(cc.dueDate);
+              const urgent=d!==null&&d<=2;const warn=d!==null&&d<=7;
+              const bg=urgent?'linear-gradient(135deg,#7f1d1d 0%,#b91c1c 100%)':warn?'linear-gradient(135deg,#78350f 0%,#b45309 100%)':'linear-gradient(135deg,#1e3a5f 0%,#1d4ed8 100%)';
+              return(
+                <div key={cc.id} className="due-card" style={{background:bg}}>
+                  <div className="due-urgency">
+                    <div><div className="due-bank" style={{color:'rgba(255,255,255,.7)'}}>{cc.bank}</div><div className="due-card-type" style={{color:'#fff'}}>{cc.type}</div></div>
+                    <div className="due-days-badge" style={{background:'rgba(0,0,0,.25)',color:'#fff',border:'1px solid rgba(255,255,255,.2)'}}>
+                      {d===0?'⚠ Today':d<0?`${Math.abs(d)}d Overdue`:`${d}d left`}
+                    </div>
+                  </div>
+                  <div className="due-amount-row">
+                    <div><div style={{fontSize:9,opacity:.65,color:'#fff',textTransform:'uppercase',letterSpacing:.5,marginBottom:2}}>Amount Due</div><div className="due-amount" style={{color:'#fff'}}>{fmtINR(cc.payable)}</div></div>
+                    <div className="due-date-block"><div style={{fontSize:9,opacity:.65,color:'rgba(255,255,255,.7)',textTransform:'uppercase',letterSpacing:.4}}>Due On</div><div style={{fontSize:12,fontWeight:700,color:'#fcd34d'}}>{fmtDate(cc.dueDate)}</div></div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="sh mb2"><div className="sh-t"><Ic n="cc" s={14} c="var(--g)"/>All Credit Cards</div></div>
+        <div className="tw">
+          <table>
+            <thead><tr><th>Bank</th><th>Card</th><th className="num">Limit ({CUR.sym})</th><th className="num">Billed ({CUR.sym})</th><th className="num">Unbilled ({CUR.sym})</th><th className="num">Total Due ({CUR.sym})</th><th>Due Date</th><th>Util%</th><th>Actions</th></tr></thead>
+            <tbody>
+              {creditCards.map(c=>{
+                const u=c.limit>0?(c.payable+c.provision)/c.limit*100:0,d=daysDiff(c.dueDate);
+                return(<tr key={c.id}>
+                  <td style={{fontWeight:700}}>{c.bank}</td><td style={{fontSize:12.5}}>{c.type}</td>
+                  <td className="num">{c.limit.toLocaleString(CUR.locale)}</td>
+                  <td className="num neg">{c.payable>0?fmtINR(c.payable):'–'}</td>
+                  <td className="num" style={{color:'var(--o)'}}>{c.provision>0?fmtINR(c.provision):'–'}</td>
+                  <td className="num bold neg">{(c.payable+c.provision)>0?fmtINR(c.payable+c.provision):'–'}</td>
+                  <td>{c.dueDate?<span className={`tag ${d!==null&&d<=3?'tr':d!==null&&d<=7?'to':'tb'}`}>{fmtDate(c.dueDate)}</span>:'–'}</td>
+                  <td><span className={`tag ${u>30?'tr':u>15?'to':'tg'}`}>{u.toFixed(1)}%</span></td>
+                  <td><div style={{display:'flex',gap:4}}><button className="bic" onClick={()=>openEdit(c)}><Ic n="edit" s={11}/></button><button className="bic red" onClick={()=>del(c.id)}><Ic n="del" s={11}/></button></div></td>
+                </tr>);
+              })}
+            </tbody>
+            <tfoot><tr className="tft"><td colSpan={2} style={{fontWeight:700}}>Total</td><td className="num bold">{tL.toLocaleString(CUR.locale)}</td><td className="num neg bold">{tP.toLocaleString(CUR.locale)}</td><td className="num bold" style={{color:'var(--o)'}}>{tProv.toLocaleString(CUR.locale)}</td><td className="num neg bold">{(tP+tProv).toLocaleString(CUR.locale)}</td><td colSpan={3}/></tr></tfoot>
+          </table>
+        </div>
+      </div>
+      {/* 30% Alert + Insights */}
+      {util>30&&<div className="alert ae mt3"><Ic n="prov" s={14}/>⚠ <strong>Credit Utilization at {util.toFixed(1)}%</strong> exceeds the 30% threshold. This may impact your credit score. Consider paying down balances on high-utilization cards.</div>}
+      {util>15&&util<=30&&<div className="alert aw mt3"><Ic n="prov" s={14}/>Credit utilization at {util.toFixed(1)}%, approaching the 30% recommended limit.</div>}
+      <div className="card mt3">
+        <div className="sh mb2"><div className="sh-t"><Ic n="budget" s={14} c="var(--g)"/>Per-Card Utilization Insights</div></div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))',gap:10}}>
+          {creditCards.map(c=>{
+            const u=c.limit>0?(c.payable+c.provision)/c.limit*100:0;
+            const col=u>30?'var(--r)':u>15?'var(--o)':'var(--g)';
+            return(
+              <div key={c.id} style={{padding:'12px 14px',border:`1px solid ${u>30?'var(--rl)':'var(--n100)'}`,borderRadius:'var(--r8)',background:u>30?'#fff8f8':'var(--W)'}}>
+                <div style={{fontSize:10.5,fontWeight:700,color:'var(--n500)',marginBottom:2}}>{c.bank}</div>
+                <div style={{fontSize:12.5,fontWeight:600,marginBottom:8}}>{c.type}</div>
+                <div style={{display:'flex',alignItems:'center',gap:8}}>
+                  <div className="prog" style={{flex:1,height:6}}><div className="pf" style={{width:`${Math.min(100,u)}%`,background:col}}/></div>
+                  <span style={{fontSize:11,fontWeight:700,color:col,width:40,textAlign:'right'}}>{u.toFixed(1)}%</span>
+                </div>
+                <div style={{fontSize:10,color:'var(--n400)',marginTop:4}}>Used: {fmtINR(c.payable+c.provision,true)} of {fmtINR(c.limit,true)}</div>
+                {u>30&&<div style={{fontSize:10,color:'var(--r)',fontWeight:600,marginTop:3}}>⚠ Over 30% threshold</div>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {modal&&<Modal title={modal==='add'?'Add Credit Card':'Edit Credit Card'} onClose={close} foot={<><button className="btn btn-s btn-sm" onClick={close}>Cancel</button><button className="btn btn-p btn-sm" onClick={save}><Ic n={modal==='add'?'plus':'ok'} s={12} c="#fff"/>{modal==='add'?'Add':'Save'}</button></>}>{CCForm}</Modal>}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   LOANS
+══════════════════════════════════════ */
+/* ── LoanCard: extracted so useState(showAmort) is at component top-level (Rules of Hooks) ── */
+function LoanCard({l,buildAmort,openEdit,del,setData,toast}){
+  const [showAmort,setShowAmort]=useState(false);
+  const [showHistory,setShowHistory]=useState(false);
+  const amort=buildAmort(l);
+  const remInterest=amort.reduce((s,r)=>s+r.interest,0);
+  const futurePayout=amort.reduce((s,r)=>s+r.emi,0);
+  const rem=amort.length;
+  const tInt=Math.max(0,l.emi*l.tenure-l.original);
+  const pct=l.original>0?(l.original-l.outstanding)/l.original*100:0;
+  const curPhase=(l.phases&&l.phases.length?[...l.phases].sort((a,b)=>b.fromMonth-a.fromMonth).find(p=>1>=p.fromMonth)||l.phases[0]:null);
+  const curEmi=curPhase?curPhase.emi:l.emi;
+  const curRoi=curPhase?curPhase.roi:l.roi;
+  const paidEmis=l.paidEmis||[];
+  const nextDue=amort[0]||null;
+  const isFullyPaid=l.outstanding<=0||amort.length===0;
+
+  const markPaid=(row)=>{
+    setData(d=>({...d,loans:d.loans.map(lo=>{
+      if(lo.id!==l.id)return lo;
+      const newPaid=[...(lo.paidEmis||[]),{
+        n:row.n,date:row.date,emi:row.emi,principal:row.principal,
+        interest:row.interest,opening:row.opening,closing:row.closing,paidOn:new Date().toISOString().slice(0,10)
+      }];
+      return{...lo,outstanding:Math.max(0,row.closing),remaining:Math.max(0,(lo.remaining||0)-1),paidEmis:newPaid};
+    })}));
+    toast&&toast(`EMI #${row.n} paid ✓  |  New Outstanding: ${fmtINR(Math.max(0,row.closing))}`,'g');
+  };
+
+  const undoLastPaid=()=>{
+    if(!paidEmis.length)return;
+    const last=paidEmis[paidEmis.length-1];
+    setData(d=>({...d,loans:d.loans.map(lo=>{
+      if(lo.id!==l.id)return lo;
+      return{...lo,outstanding:last.opening!==undefined?last.opening:lo.outstanding+last.principal,
+        remaining:(lo.remaining||0)+1,paidEmis:lo.paidEmis.slice(0,-1)};
+    })}));
+    toast&&toast('Last EMI payment undone','o');
+  };
+
+  return(
+    <div className="card mb2">
+      {/* Header */}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12}}>
+        <div>
+          <div style={{fontWeight:800,fontSize:14}}>{l.bank} <span className="tag tb" style={{marginLeft:6,fontSize:10.5}}>{l.type}</span>
+            {(()=>{
+              // Same 12-month rule the dashboard uses, shown here so the classification is auditable.
+              const h=new Date();h.setMonth(h.getMonth()+12);
+              const end=l.endDate?new Date(l.endDate):null;
+              const isST=end&&isFinite(end)&&end<=h;
+              return <span className={`tag ${isST?'to':'tx'}`} style={{marginLeft:6,fontSize:9.5}}
+                title={isST?'Finishes within 12 months, counted as a short-term liability in Fund Balance (Excl. Long-Term Loans)':'Runs beyond 12 months, excluded from Fund Balance (Excl. Long-Term Loans)'}>
+                {isST?'Short Term':'Long Term'}</span>;
+            })()}
+            {l.phases&&l.phases.length>1&&<span className="tag to" style={{marginLeft:6,fontSize:9.5}}>Variable EMI</span>}
+            {isFullyPaid&&<span className="tag tg" style={{marginLeft:6,fontSize:9.5}}>✓ Fully Paid</span>}
+          </div>
+          <div style={{fontSize:10.5,color:'var(--n400)',fontFamily:'var(--m)',marginTop:2}}>{l.accNo}</div>
+        </div>
+        <div style={{display:'flex',gap:7,alignItems:'center'}}>
+          <div style={{textAlign:'right'}}>
+            <div style={{fontSize:9.5,color:'var(--n400)',textTransform:'uppercase',fontWeight:600}}>Outstanding</div>
+            <div style={{fontFamily:'var(--m)',fontSize:16,fontWeight:700,color:isFullyPaid?'var(--g)':'var(--r)'}}>{fmtINR(l.outstanding)}</div>
+          </div>
+          <button className="bic" onClick={()=>openEdit(l)}><Ic n="edit" s={11}/></button>
+          <button className="bic red" onClick={()=>del(l.id)}><Ic n="del" s={11}/></button>
+        </div>
+      </div>
+
+      {/* Stats grid */}
+      <div className="g4 mb2" style={{gap:10}}>
+        {[
+          {l:'EMI/Month',v:fmtINR(curEmi)},
+          {l:'ROI',v:`${curRoi}% p.a.`},
+          {l:'Remaining',v:`${rem}/${l.tenure} mo`},
+          {l:'End Date',v:fmtDate(l.endDate)},
+          {l:'Loan Amount',v:fmtINR(l.original)},
+          {l:'Total Payable',v:fmtINR(l.emi*l.tenure)},
+          {l:'EMIs Paid',v:`${paidEmis.length} of ${l.tenure}`},
+          {l:'Remaining Interest',v:fmtINR(remInterest),c:'var(--o)'},
+        ].map(x=>(
+          <div key={x.l}><div style={{fontSize:9.5,color:'var(--n400)',textTransform:'uppercase',fontWeight:600,marginBottom:2}}>{x.l}</div><div style={{fontSize:12.5,fontWeight:700,color:x.c||''}}>{x.v}</div></div>
+        ))}
+      </div>
+
+      {/* Repayment progress bar */}
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+        <div className="prog" style={{flex:1,height:7}}><div className="pf" style={{width:`${pct}%`,background:'var(--g)'}}/></div>
+        <span style={{fontFamily:'var(--m)',fontSize:11,color:'var(--gd)',width:40,textAlign:'right'}}>{pct.toFixed(1)}%</span>
+        <span style={{fontSize:10.5,color:'var(--n400)'}}>repaid</span>
+      </div>
+
+      {/* ── NEXT DUE EMI ── */}
+      {!isFullyPaid&&nextDue&&(
+        <div style={{border:'2px solid var(--gl)',borderRadius:10,padding:'12px 14px',marginBottom:10,background:'linear-gradient(135deg,rgba(0,179,134,.05),rgba(0,179,134,.02))'}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:8}}>
+            <div>
+              <div style={{fontWeight:700,fontSize:12.5,marginBottom:4}}>
+                <span style={{background:'var(--g)',color:'#fff',borderRadius:5,padding:'2px 8px',fontSize:10.5,fontWeight:700,marginRight:8}}>Next Due</span>
+                EMI #{nextDue.n} · {fmtDate(nextDue.date)}
+              </div>
+              <div style={{fontSize:11.5,color:'var(--n500)',display:'flex',gap:14,flexWrap:'wrap'}}>
+                <span>💰 EMI: <strong style={{fontFamily:'var(--m)'}}>{fmtINR(nextDue.emi)}</strong></span>
+                <span>🏛 Principal: <strong style={{color:'var(--g)',fontFamily:'var(--m)'}}>{fmtINR(nextDue.principal)}</strong></span>
+                <span>📈 Interest: <strong style={{color:'var(--o)',fontFamily:'var(--m)'}}>{fmtINR(nextDue.interest)}</strong></span>
+              </div>
+              <div style={{fontSize:11,color:'var(--n400)',marginTop:4}}>
+                Balance after payment: <strong style={{fontFamily:'var(--m)',color:'var(--r)'}}>{fmtINR(nextDue.closing)}</strong>
+              </div>
+            </div>
+            <button
+              onClick={()=>markPaid(nextDue)}
+              style={{background:'var(--g)',color:'#fff',border:'none',borderRadius:8,padding:'8px 16px',fontSize:12,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:6,fontFamily:'var(--f)',whiteSpace:'nowrap'}}>
+              ✓ Mark as Paid
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── EMI PAYMENT HISTORY ── */}
+      {paidEmis.length>0&&(
+        <div style={{marginBottom:10}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
+            <button onClick={()=>setShowHistory(v=>!v)}
+              style={{background:'none',border:'none',cursor:'pointer',fontSize:11.5,fontWeight:700,color:'var(--n600)',display:'flex',alignItems:'center',gap:5,fontFamily:'var(--f)',padding:0}}>
+              {showHistory?'▲':'▼'} Payment History <span style={{background:'var(--gl)',color:'var(--g)',borderRadius:10,padding:'1px 8px',fontSize:10.5,fontWeight:700,marginLeft:4}}>{paidEmis.length} paid</span>
+            </button>
+            {paidEmis.length>0&&(
+              <button onClick={undoLastPaid}
+                style={{background:'none',border:'1px solid var(--n200)',borderRadius:6,padding:'3px 9px',fontSize:10.5,cursor:'pointer',color:'var(--n500)',fontFamily:'var(--f)'}}>
+                ↩ Undo Last
+              </button>
+            )}
+          </div>
+          {showHistory&&(
+            <div style={{border:'1px solid var(--n100)',borderRadius:8,overflow:'hidden'}}>
+              <div style={{maxHeight:220,overflowY:'auto'}}>
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:11.5}}>
+                  <thead><tr style={{background:'var(--n50)',position:'sticky',top:0}}>
+                    <th style={{padding:'6px 10px',textAlign:'left',fontSize:9.5,fontWeight:700,textTransform:'uppercase',color:'var(--n500)'}}>#</th>
+                    <th style={{padding:'6px 10px',textAlign:'left',fontSize:9.5,fontWeight:700,textTransform:'uppercase',color:'var(--n500)'}}>Due Date</th>
+                    <th style={{padding:'6px 10px',textAlign:'right',fontSize:9.5,fontWeight:700,textTransform:'uppercase',color:'var(--n500)'}}>EMI</th>
+                    <th style={{padding:'6px 10px',textAlign:'right',fontSize:9.5,fontWeight:700,textTransform:'uppercase',color:'var(--n500)'}}>Principal</th>
+                    <th style={{padding:'6px 10px',textAlign:'right',fontSize:9.5,fontWeight:700,textTransform:'uppercase',color:'var(--n500)'}}>Interest</th>
+                    <th style={{padding:'6px 10px',textAlign:'right',fontSize:9.5,fontWeight:700,textTransform:'uppercase',color:'var(--n500)'}}>Balance After</th>
+                    <th style={{padding:'6px 10px',textAlign:'left',fontSize:9.5,fontWeight:700,textTransform:'uppercase',color:'var(--n500)'}}>Paid On</th>
+                  </tr></thead>
+                  <tbody>
+                    {[...paidEmis].reverse().map((p,i)=>(
+                      <tr key={i} style={{borderTop:'1px solid var(--n100)',background:i%2===0?'var(--W)':'var(--n50)'}}>
+                        <td style={{padding:'6px 10px',fontWeight:700}}>
+                          <span style={{color:'var(--g)',marginRight:5}}>✓</span>{p.n}
+                        </td>
+                        <td style={{padding:'6px 10px',fontFamily:'var(--m)',fontSize:11}}>{fmtDate(p.date)}</td>
+                        <td style={{padding:'6px 10px',textAlign:'right',fontWeight:700,fontFamily:'var(--m)'}}>{fmtINR(p.emi)}</td>
+                        <td style={{padding:'6px 10px',textAlign:'right',color:'var(--g)',fontFamily:'var(--m)'}}>{fmtINR(p.principal)}</td>
+                        <td style={{padding:'6px 10px',textAlign:'right',color:'var(--o)',fontFamily:'var(--m)'}}>{fmtINR(p.interest)}</td>
+                        <td style={{padding:'6px 10px',textAlign:'right',color:'var(--r)',fontFamily:'var(--m)'}}>{fmtINR(p.closing)}</td>
+                        <td style={{padding:'6px 10px',color:'var(--n400)',fontSize:10.5}}>{fmtDate(p.paidOn)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot><tr style={{borderTop:'2px solid var(--n200)',background:'var(--n50)'}}>
+                    <td colSpan={2} style={{padding:'6px 10px',fontWeight:700,fontSize:12}}>Total Paid ({paidEmis.length} EMIs)</td>
+                    <td style={{padding:'6px 10px',textAlign:'right',fontWeight:700,fontFamily:'var(--m)'}}>{fmtINR(paidEmis.reduce((s,p)=>s+p.emi,0))}</td>
+                    <td style={{padding:'6px 10px',textAlign:'right',color:'var(--g)',fontWeight:700,fontFamily:'var(--m)'}}>{fmtINR(paidEmis.reduce((s,p)=>s+p.principal,0))}</td>
+                    <td style={{padding:'6px 10px',textAlign:'right',color:'var(--o)',fontWeight:700,fontFamily:'var(--m)'}}>{fmtINR(paidEmis.reduce((s,p)=>s+p.interest,0))}</td>
+                    <td colSpan={2}/>
+                  </tr></tfoot>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* EMI Phase history */}
+      {l.phases&&l.phases.length>1&&(
+        <div style={{marginBottom:8}}>
+          <div style={{fontSize:9.5,fontWeight:700,color:'var(--n400)',textTransform:'uppercase',letterSpacing:.5,marginBottom:5}}>EMI Revision History</div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+            {[...l.phases].sort((a,b)=>a.fromMonth-b.fromMonth).map((p,i)=>(
+              <div key={i} style={{background:'var(--n50)',border:'1px solid var(--n200)',borderRadius:6,padding:'4px 9px',fontSize:11}}>
+                <span style={{color:'var(--n500)'}}>Mo {p.fromMonth}+</span>
+                <span style={{fontWeight:700,marginLeft:5,fontFamily:'var(--m)'}}>{fmtINR(p.emi,true)}</span>
+                <span style={{color:'var(--n400)',marginLeft:4}}>{p.roi}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Amortization toggle */}
+      <button className="btn btn-g btn-sm" style={{fontSize:11,padding:'4px 10px'}} onClick={()=>setShowAmort(v=>!v)}>
+        {showAmort?'▲ Hide':'▼ Show'} Full Amortization Schedule ({amort.length} remaining)
+      </button>
+      {showAmort&&(
+        <div className="tw mt2" style={{maxHeight:320,overflowY:'auto'}}>
+          <table>
+            <thead><tr><th>#</th><th>Date</th><th className="num">Opening ({CUR.sym})</th><th className="num">EMI ({CUR.sym})</th><th className="num">Principal ({CUR.sym})</th><th className="num">Interest ({CUR.sym})</th><th className="num">Closing ({CUR.sym})</th><th>ROI</th></tr></thead>
+            <tbody>
+              {amort.map((r,i)=>(
+                <tr key={r.n} style={{background:i===0?'rgba(0,179,134,.06)':''}}>
+                  <td style={{fontWeight:700,color:i===0?'var(--g)':'var(--n400)',fontSize:11}}>{i===0?'▶':''}{r.n}</td>
+                  <td style={{fontFamily:'var(--m)',fontSize:11}}>{fmtDate(r.date)}</td>
+                  <td className="num" style={{fontSize:11}}>{fmtINR(r.opening)}</td>
+                  <td className="num" style={{fontWeight:700}}>{fmtINR(r.emi)}</td>
+                  <td className="num pos" style={{fontSize:11}}>{fmtINR(r.principal)}</td>
+                  <td className="num" style={{color:'var(--o)',fontSize:11}}>{fmtINR(r.interest)}</td>
+                  <td className="num neg" style={{fontSize:11}}>{fmtINR(r.closing)}</td>
+                  <td><span className="tag to" style={{fontSize:9.5}}>{r.roi}%</span></td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot><tr className="tft">
+              <td colSpan={3} style={{fontWeight:700}}>Totals</td>
+              <td className="num bold">{fmtINR(futurePayout)}</td>
+              <td className="num pos bold">{fmtINR(amort.reduce((s,r)=>s+r.principal,0))}</td>
+              <td className="num bold" style={{color:'var(--o)'}}>{fmtINR(remInterest)}</td>
+              <td colSpan={2}/>
+            </tr></tfoot>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+function PageLoans({data,setData,toast}){
+  const {loans}=data;
+  const ef={bank:'',accNo:'XXXX-0000',type:'Personal Loan',original:'',outstanding:'',emi:'',roi:'',startDate:'',endDate:'',tenure:'60',phases:[]};
+  const [modal,setModal]=useState(null);const [form,setForm]=useState(ef);
+  // Amortization engine: builds schedule from current outstanding using phases
+  const buildAmort=(l)=>{
+    const phases=l.phases&&l.phases.length?[...l.phases].sort((a,b)=>a.fromMonth-b.fromMonth):[{fromMonth:1,emi:l.emi,roi:l.roi}];
+    const now=new Date(),start=new Date(l.startDate||new Date());
+    const elapsed=Math.max(0,(now.getFullYear()-start.getFullYear())*12+(now.getMonth()-start.getMonth()));
+    // Use paid EMI count as the source of truth for next installment. Whichever is higher wins
+    const paidCount=(l.paidEmis||[]).length;
+    const startFrom=Math.max(elapsed,paidCount);
+    const rows=[];let bal=l.outstanding;
+    for(let i=0;i<l.tenure-startFrom&&bal>0;i++){
+      const inst=startFrom+i+1;
+      const ph=[...phases].reverse().find(p=>inst>=p.fromMonth)||phases[0];
+      const intAmt=Math.round(bal*ph.roi/100/12);
+      const prin=Math.min(bal,ph.emi-intAmt);
+      const closing=Math.max(0,bal-prin);
+      const dt=new Date(l.startDate||new Date());dt.setMonth(dt.getMonth()+inst-1);
+      rows.push({n:inst,date:dt.toISOString().slice(0,10),opening:bal,emi:ph.emi,principal:prin,interest:intAmt,closing,roi:ph.roi});
+      bal=closing;
+    }
+    return rows;
+  };
+  const tOS=loans.reduce((s,l)=>s+l.outstanding,0),tEMI=loans.reduce((s,l)=>s+l.emi,0);
+  const bROI=tOS>0?(loans.reduce((s,l)=>s+l.roi*l.outstanding,0)/tOS).toFixed(2):0;
+  // First-payment-on-startDate convention: last payment = startDate + (tenure-1) months
+  const calcEnd=(s,t)=>{if(!s||!t)return'';const d=new Date(s);d.setMonth(d.getMonth()+parseInt(t)-1);return d.toISOString().slice(0,10);};
+  // Remaining = months from today to endDate (whole-month arithmetic, no rounding errors)
+  const calcRem=(endDate,startDate,tenure)=>{
+    if(endDate){const now=new Date(),e=new Date(endDate);return Math.max(0,(e.getFullYear()-now.getFullYear())*12+(e.getMonth()-now.getMonth()));}
+    if(!startDate||!tenure)return+tenure||0;
+    return calcRem(calcEnd(startDate,tenure),null,null);
+  };
+  const openAdd=()=>{setForm(ef);setModal('add');};
+  const loanFileRef=useRef();
+  const handleLoanCSV=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      const raw=ev.target.result.replace(/\r/g,'');
+      const lines=raw.split('\n').filter(l=>l.trim());
+      if(lines.length<2){toast('CSV empty','r');return;}
+      const hdr=parseCSVLine(lines[0]).map(h=>h.replace(/"/g,'').trim().toLowerCase().replace(/[\s_\-]/g,''));
+      const ca=(...aliases)=>(cols)=>{for(const a of aliases){const i=hdr.indexOf(a.toLowerCase().replace(/[\s_\-]/g,''));if(i>=0&&cols[i])return cols[i];}return'';};
+      const getBank=ca('bank','lender','bankname','financier');
+      const getType=ca('type','loantype','category');
+      const getOrig=ca('original','loanamount','principal','amount','sanctionedamount');
+      const getOS=ca('outstanding','balance','currentbalance','remainingbalance','os');
+      const getEMI=ca('emi','monthlyemi','instalment','installment');
+      const getROI=ca('roi','rate','interestrate','rateofinterest','interest');
+      const getTen=ca('tenure','tenuremonths','months','termmonths');
+      const getSD=ca('startdate','start','loandate','disbursementdate');
+      const getED=ca('enddate','end','maturitydate','closuredate');
+      const getAccNo=ca('accno','accountnumber','loannumber','acno');
+      const lns=lines.slice(1).map(line=>{
+        if(!line.trim())return null;
+        const cols=parseCSVLine(line);
+        const bank=getBank(cols);if(!bank)return null;
+        const orig=parseFloat(getOrig(cols).replace(/[,\s₹$€£¥]/g,''))||0;
+        const os=parseFloat(getOS(cols).replace(/[,\s₹$€£¥]/g,''))||orig;
+        const emi=parseFloat(getEMI(cols).replace(/[,\s₹$€£¥]/g,''))||0;
+        const roi=parseFloat(getROI(cols))||0;
+        const ten=parseInt(getTen(cols))||60;
+        const sd=normalizeDate(getSD(cols));
+        const ed=normalizeDate(getED(cols))||calcEnd(sd,ten);
+        return{id:uid(),bank,accNo:getAccNo(cols)||'XXXX-0000',type:getType(cols)||'Personal Loan',original:orig,outstanding:os,emi,roi,startDate:sd||null,endDate:ed||null,tenure:ten,phases:[],remaining:calcRem(ed,sd,ten)};
+      }).filter(Boolean);
+      setData(d=>({...d,loans:[...d.loans,...lns]}));
+      toast(`Imported ${lns.length} loans`,'g');
+    };
+    r.readAsText(f);e.target.value='';
+  };
+  const downloadLoanTemplate=()=>{
+    const b=new Blob(['bank,accNo,type,original,outstanding,emi,roi,tenure,startDate,endDate\nHDFC Bank,XXXX-0001,Home Loan,5000000,4500000,42000,8.5,240,2024-01-15,2044-01-15\nSBI,XXXX-0002,Personal Loan,300000,200000,8500,11.5,48,2025-06-01,2029-06-01\n'],{type:'text/csv'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='finmanager-loan-template.csv';a.click();
+  };
+  const openEdit=l=>{setForm({bank:l.bank,accNo:l.accNo,type:l.type,original:String(l.original),outstanding:String(l.outstanding),emi:String(l.emi),roi:String(l.roi),startDate:l.startDate||'',endDate:l.endDate||'',tenure:String(l.tenure),phases:l.phases||[]});setModal({eid:l.id});};
+  const close=()=>{setModal(null);setForm(ef);};
+  const save=()=>{
+    if(!form.bank||!form.original)return;
+    const end=form.endDate||calcEnd(form.startDate,form.tenure);
+    const e={bank:form.bank,accNo:form.accNo,type:form.type,original:+form.original,outstanding:+(form.outstanding||form.original),emi:+form.emi,roi:+form.roi,startDate:form.startDate||null,endDate:end||null,tenure:+form.tenure,phases:form.phases,remaining:calcRem(end,form.startDate,form.tenure)};
+    if(modal==='add'){setData(d=>({...d,loans:[...d.loans,{id:uid(),...e}]}));toast('Loan added','g');}
+    else{setData(d=>({...d,loans:d.loans.map(l=>l.id===modal.eid?{...l,...e}:l)}));toast('Updated','g');}
+    close();
+  };
+  const undoDel=makeUndoDelete(data,setData,toast);
+  const del=id=>undoDel('Loan removed',d=>({...d,loans:d.loans.filter(l=>l.id!==id)}));
+
+  const LF=(<>
+    <div className="f2 mb2"><div className="fg"><label>Bank / Lender</label><input value={form.bank} onChange={e=>setForm(f=>({...f,bank:e.target.value}))}/></div><div className="fg"><label>Loan Type</label><select value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}><option>Personal Loan</option><option>Home Loan</option><option>Car Loan</option><option>Education Loan</option><option>Gold Loan</option><option>Business Loan</option><option>Other</option></select></div></div>
+    <div className="f3 mb2"><div className="fg"><label>Loan Amount ({CUR.sym})</label><input type="number" value={form.original} onChange={e=>setForm(f=>({...f,original:e.target.value}))}/></div><div className="fg"><label>Outstanding Balance ({CUR.sym})</label><input type="number" value={form.outstanding} onChange={e=>setForm(f=>({...f,outstanding:e.target.value}))}/></div><div className="fg"><label>EMI / Month ({CUR.sym})</label><input type="number" value={form.emi} onChange={e=>setForm(f=>({...f,emi:e.target.value}))}/></div></div>
+    <div className="f3 mb2"><div className="fg"><label>ROI (% p.a.)</label><input type="number" step="0.01" value={form.roi} onChange={e=>setForm(f=>({...f,roi:e.target.value}))}/></div><div className="fg"><label>Tenure (months)</label><input type="number" value={form.tenure} onChange={e=>setForm(f=>({...f,tenure:e.target.value}))}/></div><div className="fg"><label>Acc. No (Dummy)</label><input value={form.accNo} onChange={e=>setForm(f=>({...f,accNo:e.target.value}))}/></div></div>
+    <div className="f2">
+      <div className="fg"><label>Start Date</label><input type="date" value={form.startDate} onChange={e=>{const ed=calcEnd(e.target.value,form.tenure);setForm(f=>({...f,startDate:e.target.value,endDate:ed}));}}/></div>
+      <div className="fg"><label>End Date (auto-calculated)</label><input type="date" value={form.endDate} onChange={e=>setForm(f=>({...f,endDate:e.target.value}))}/></div>
+    </div>
+    {form.emi&&form.tenure&&form.original&&(<div className="alert ai" style={{marginTop:10,marginBottom:0}}><Ic n="prov" s={13}/>Total payable: {fmtINR(+form.emi * +form.tenure)} · Interest: {fmtINR(Math.max(0,+form.emi * +form.tenure - +form.original))}</div>)}
+    {/* EMI / ROI Revision History */}
+    <div style={{marginTop:14,borderTop:'1px solid var(--n100)',paddingTop:12}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+        <div style={{fontSize:11,fontWeight:700,color:'var(--n600)',textTransform:'uppercase',letterSpacing:.5}}>EMI Revision History <span style={{color:'var(--n400)',fontWeight:400}}>(for variable-rate / restructured loans)</span></div>
+        <button type="button" className="btn btn-s btn-sm" style={{fontSize:11}} onClick={()=>setForm(f=>({...f,phases:[...f.phases,{fromMonth:f.tenure?Math.floor(+f.tenure/2):1,emi:+f.emi||0,roi:+f.roi||0}]}))}>
+          <Ic n="plus" s={11}/>Add Revision
+        </button>
+      </div>
+      {form.phases.length===0&&<div style={{fontSize:11.5,color:'var(--n400)',padding:'8px 0'}}>No revisions. Single EMI &amp; ROI for full tenure.</div>}
+      {form.phases.length>0&&(
+        <div style={{border:'1px solid var(--n100)',borderRadius:'var(--r8)',overflow:'hidden'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead><tr style={{background:'var(--n50)'}}><th style={{padding:'6px 10px',textAlign:'left',fontSize:9.5,fontWeight:700,textTransform:'uppercase',color:'var(--n500)'}}>From Installment #</th><th style={{padding:'6px 10px',textAlign:'left',fontSize:9.5,fontWeight:700,textTransform:'uppercase',color:'var(--n500)'}}>New EMI ({CUR.sym})</th><th style={{padding:'6px 10px',textAlign:'left',fontSize:9.5,fontWeight:700,textTransform:'uppercase',color:'var(--n500)'}}>New ROI (% p.a.)</th><th/></tr></thead>
+            <tbody>
+              {form.phases.map((ph,i)=>(
+                <tr key={i} style={{borderTop:'1px solid var(--n100)'}}>
+                  <td style={{padding:'5px 8px'}}><input type="number" min={1} max={form.tenure||999} value={ph.fromMonth} style={{width:80,padding:'4px 7px',border:'1.5px solid var(--n200)',borderRadius:5,fontSize:12,fontFamily:'var(--f)'}} onChange={e=>{const p=[...form.phases];p[i]={...p[i],fromMonth:+e.target.value};setForm(f=>({...f,phases:p}));}}/></td>
+                  <td style={{padding:'5px 8px'}}><input type="number" value={ph.emi} style={{width:100,padding:'4px 7px',border:'1.5px solid var(--n200)',borderRadius:5,fontSize:12,fontFamily:'var(--f)'}} onChange={e=>{const p=[...form.phases];p[i]={...p[i],emi:+e.target.value};setForm(f=>({...f,phases:p}));}}/></td>
+                  <td style={{padding:'5px 8px'}}><input type="number" step="0.01" value={ph.roi} style={{width:90,padding:'4px 7px',border:'1.5px solid var(--n200)',borderRadius:5,fontSize:12,fontFamily:'var(--f)'}} onChange={e=>{const p=[...form.phases];p[i]={...p[i],roi:+e.target.value};setForm(f=>({...f,phases:p}));}}/></td>
+                  <td style={{padding:'5px 8px'}}><button type="button" className="bic red" onClick={()=>setForm(f=>({...f,phases:f.phases.filter((_,j)=>j!==i)}))}><Ic n="del" s={11}/></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  </>);
+
+  return(
+    <div className="page">
+      <div className="ph"><div><div className="ptitle">Loan &amp; Debt Tracker</div><div className="psub">EMI calendar · ROI analysis · Amortization</div></div>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-s btn-sm" onClick={downloadLoanTemplate}><Ic n="dl" s={12}/>Template</button>
+          <button className="btn btn-s btn-sm" onClick={()=>loanFileRef.current.click()}><Ic n="up" s={12}/>CSV Import</button>
+          <button className="btn btn-p" onClick={openAdd}><Ic n="plus" s={13} c="#fff"/>Add Loan</button>
+        </div>
+      </div>
+      <input type="file" ref={loanFileRef} accept=".csv" style={{display:'none'}} onChange={handleLoanCSV}/>
+      <div className="g4 mb3">
+        <div className="card"><div className="cl">Total Outstanding</div><div className="cv r">{fmtINR(tOS,true)}</div><div className="cm">{loans.length} active loans</div></div>
+        <div className="card"><div className="cl">Monthly EMI</div><div className="cv o">{fmtINR(tEMI)}</div><div className="cm">{fmtINR(tEMI*12,true)}/year</div></div>
+        <div className="card"><div className="cl">Blended ROI</div><div className="cv b">{bROI}% p.a.</div><div className="cm">Weighted average</div></div>
+        <div className="card"><div className="cl">Total Interest Est.</div><div className="cv r">{fmtINR(loans.reduce((s,l)=>s+Math.max(0,l.emi*l.tenure-l.original),0),true)}</div><div className="cm">All loans combined</div></div>
+      </div>
+      {/* Remaining Interest Payable Summary */}
+      <div className="card mb3" style={{background:'linear-gradient(135deg,#fefce8,#fff7ed)',border:'1.5px solid #fcd34d'}}>
+        <div className="sh mb2"><div className="sh-t" style={{color:'#92400e'}}><Ic n="prov" s={14} c="#d97706"/>Remaining Interest Payable (Future Interest Cost)</div></div>
+        <div className="alert aw" style={{marginBottom:12}}><Ic n="prov" s={13}/>Formula: (Remaining Tenure × EMI) − Outstanding Principal. This is the total interest you will pay from today until loan closure.</div>
+        <div className="tw">
+          <table>
+            <thead><tr><th>Loan</th><th className="num">Remaining Months</th><th className="num">EMI ({CUR.sym})</th><th className="num">Remaining Payout ({CUR.sym})</th><th className="num">Outstanding ({CUR.sym})</th><th className="num" style={{background:'var(--ol)'}}>Remaining Interest ({CUR.sym})</th></tr></thead>
+            <tbody>
+              {loans.map(l=>{
+                const rem=l.remaining||0;
+                const remainingPayout=l.emi*rem;
+                const remainingInterest=Math.max(0,remainingPayout-l.outstanding);
+                return(<tr key={l.id}>
+                  <td style={{fontWeight:700}}>{l.bank} <span className="tag tb" style={{fontSize:10}}>{l.type}</span></td>
+                  <td className="num">{rem}</td>
+                  <td className="num">{fmtINR(l.emi)}</td>
+                  <td className="num">{fmtINR(remainingPayout)}</td>
+                  <td className="num neg">{fmtINR(l.outstanding)}</td>
+                  <td className="num bold" style={{color:'var(--o)',background:'rgba(217,119,6,.06)'}}>{fmtINR(remainingInterest)}</td>
+                </tr>);
+              })}
+            </tbody>
+            <tfoot><tr className="tft">
+              <td style={{fontWeight:700}}>Total</td>
+              <td className="num">–</td>
+              <td className="num bold">{fmtINR(tEMI)}/mo</td>
+              <td className="num bold">{fmtINR(loans.reduce((s,l)=>s+l.emi*(l.remaining||0),0))}</td>
+              <td className="num neg bold">{fmtINR(tOS)}</td>
+              <td className="num bold" style={{color:'var(--r)',background:'rgba(220,38,38,.06)'}}>{fmtINR(loans.reduce((s,l)=>s+Math.max(0,l.emi*(l.remaining||0)-l.outstanding),0))}</td>
+            </tr></tfoot>
+          </table>
+        </div>
+      </div>
+      {loans.map(l=><LoanCard key={l.id} l={l} buildAmort={buildAmort} openEdit={openEdit} del={del} setData={setData} toast={toast}/>)}
+      {modal&&<Modal title={modal==='add'?'Add Loan':'Edit Loan'} onClose={close} foot={<><button className="btn btn-s btn-sm" onClick={close}>Cancel</button><button className="btn btn-p btn-sm" onClick={save}><Ic n={modal==='add'?'plus':'ok'} s={12} c="#fff"/>{modal==='add'?'Add':'Save'}</button></>}>{LF}</Modal>}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   PROVISIONS
+══════════════════════════════════════ */
+function PageProvision({data,setData,toast}){
+  const {provisions}=data;
+  const ef={month:new Date().toISOString().slice(0,7),entity:'Self',type:'',narration:'',amount:''};
+  const [form,setForm]=useState(ef);const [eid,setEid]=useState(null);
+  const provFileRef=useRef();
+  const total=provisions.filter(p=>!p.paid).reduce((s,p)=>s+p.amount,0); // outstanding only
+  const handleProvCSV=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      const raw=ev.target.result.replace(/\r/g,'');
+      const lines=raw.split('\n').filter(l=>l.trim());
+      if(lines.length<2){toast('CSV empty or no data rows','r');return;}
+      const hdrRaw=parseCSVLine(lines[0]);
+      const hdr=hdrRaw.map(h=>h.replace(/"/g,'').trim().toLowerCase().replace(/[\s_\-]/g,''));
+      const ca=(...aliases)=>cols=>{for(const a of aliases){const i=hdr.indexOf(a.toLowerCase().replace(/[\s_\-]/g,''));if(i>=0&&cols[i]!==undefined&&cols[i]!=='')return cols[i];}return'';};
+      const getMonth=ca('month','yearmonth','period','date','txndate','transactiondate');
+      const getEntity=ca('entity','name','person','owner','member','who');
+      const getType=ca('type','category','head','provisiontype','expensetype');
+      const getNarr=ca('narration','description','desc','details','note','remarks','particulars','memo');
+      const getAmt=ca('amount','amt','value','inr','provisionamount');
+      let skipped=0;
+      const provs=lines.slice(1).map(line=>{
+        if(!line.trim())return null;
+        const cols=parseCSVLine(line);
+        const narr=getNarr(cols);
+        if(!narr){skipped++;return null;}
+        const rawMonth=getMonth(cols);
+        // Accept full date or YYYY-MM; normalize to YYYY-MM
+        let month=new Date().toISOString().slice(0,7);
+        if(rawMonth){
+          const nd=normalizeDate(rawMonth);
+          if(nd&&nd.length>=7)month=nd.slice(0,7);
+          else if(/^\d{4}-\d{2}$/.test(rawMonth.trim()))month=rawMonth.trim();
+        }
+        const rawAmt=getAmt(cols).replace(/[,\s₹$€£¥]/g,'');
+        const amount=parseFloat(rawAmt)||0;
+        return{id:uid(),month,entity:getEntity(cols)||'Self',type:getType(cols)||'',narration:narr,amount};
+      }).filter(Boolean);
+      setData(d=>({...d,provisions:[...d.provisions,...provs]}));
+      toast(`Imported ${provs.length} provisions${skipped?` · ${skipped} skipped`:''}`,'g');
+    };
+    r.readAsText(f);e.target.value='';
+  };
+  const downloadProvTemplate=()=>{
+    const b=new Blob(['month,entity,type,narration,amount\n2026-04,Self,Medical,Annual health checkup,8000\n2026-05,Family,Repair,AC servicing,3500\n2026-06,Self,Legal,Property document notarization,5000\n'],{type:'text/csv'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='miyeecfo-provision-template.csv';a.click();
+  };
+  const save=()=>{if(!form.narration)return;if(eid){setData(d=>({...d,provisions:d.provisions.map(p=>p.id===eid?{...p,...form,amount:+form.amount}:p)}));toast('Updated','g');setEid(null);}else{setData(d=>({...d,provisions:[...d.provisions,{id:uid(),...form,amount:+form.amount}]}));toast('Added','g');}setForm(ef);};
+  const undoDel=makeUndoDelete(data,setData,toast);
+  const del=id=>undoDel('Expected outflow removed',d=>({...d,provisions:d.provisions.filter(p=>p.id!==id)}));
+  const se=p=>{setEid(p.id);setForm({month:p.month,entity:p.entity,type:p.type,narration:p.narration,amount:String(p.amount)});};
+
+  // Marking as paid settles the item: it stops reducing net worth but stays as history,
+  // so you keep the record of what the estimate was and when it actually went out.
+  const togglePaid=p=>{
+    const paying=!p.paid;
+    setData(d=>({...d,provisions:d.provisions.map(x=>x.id===p.id
+      ?{...x,paid:paying,paidOn:paying?new Date().toISOString().slice(0,10):undefined}
+      :x)}));
+    toast(paying?`Marked paid. ${fmtINR(p.amount,true)} released back to net worth`:'Moved back to expected','g');
+  };
+
+  // Timing analysis: an expected outflow is only useful if you know WHEN it lands.
+  const nowMK=`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+  const addMonths=(mk,n)=>{const[y,m]=mk.split('-').map(Number);const d=new Date(y,m-1+n,1);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;};
+  const in3=addMonths(nowMK,3);
+  const bucketOf=p=>p.paid?'paid':p.month<nowMK?'overdue':p.month===nowMK?'thisMonth':p.month<in3?'soon':'later';
+  const pending=useMemo(()=>provisions.filter(p=>!p.paid),[provisions]);
+  const settled=useMemo(()=>provisions.filter(p=>p.paid).sort((a,b)=>(b.paidOn||'').localeCompare(a.paidOn||'')),[provisions]);
+  const sorted=useMemo(()=>[...pending].sort((a,b)=>(a.month||'').localeCompare(b.month||'')),[pending]);
+  const settledTotal=settled.reduce((s,p)=>s+p.amount,0);
+  const sum=f=>sorted.filter(f).reduce((s,p)=>s+p.amount,0);
+  const dueOverdue=sum(p=>bucketOf(p)==='overdue');
+  const dueThisMonth=sum(p=>bucketOf(p)==='thisMonth');
+  const dueNext3=sum(p=>['overdue','thisMonth','soon'].includes(bucketOf(p)));
+  const BUCKET={
+    overdue:{l:'Past due',c:'var(--r)',bg:'var(--rl)'},
+    thisMonth:{l:'This month',c:'var(--o)',bg:'var(--ol)'},
+    soon:{l:'Within 3 months',c:'var(--b)',bg:'var(--bl)'},
+    later:{l:'Later',c:'var(--n400)',bg:'var(--n50)'},
+    paid:{l:'Paid',c:'var(--gd)',bg:'var(--gl)'},
+  };
+
+  return(
+    <div className="page">
+      <div className="ph"><div><div className="ptitle">Expected Future Outflows</div><div className="psub">Estimated one-off commitments · Set aside now, spend later</div></div>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-s btn-sm" onClick={downloadProvTemplate}><Ic n="dl" s={12}/>Template</button>
+          <button className="btn btn-s btn-sm" onClick={()=>provFileRef.current.click()}><Ic n="up" s={12}/>CSV Import</button>
+        </div>
+      </div>
+      <input type="file" ref={provFileRef} accept=".csv" style={{display:'none'}} onChange={handleProvCSV}/>
+      <div className="alert ai mb3"><Ic n="prov" s={13}/>Money you expect to pay out later but have not spent yet: repairs, insurance renewals, school fees, medical contingencies. Recording them here <strong>reserves the amount against your net worth</strong>, so your available balance reflects what is genuinely free to spend.</div>
+      <div className="g4 mb3">
+        <div className="card"><div className="cl">Total Expected</div><div className="cv o">{fmtINR(total)}</div><div className="cm" style={{color:'var(--r)',fontWeight:600}}>Reserved against net worth</div></div>
+        <div className="card"><div className="cl">Past Due</div><div className={`cv ${dueOverdue>0?'r':''}`}>{fmtINR(dueOverdue,true)}</div><div className="cm">{dueOverdue>0?'Paid already? Remove it':'Nothing overdue ✓'}</div></div>
+        <div className="card"><div className="cl">Due This Month</div><div className="cv o">{fmtINR(dueThisMonth,true)}</div><div className="cm">{fmtMonth(nowMK)}</div></div>
+        <div className="card"><div className="cl">Next 3 Months</div><div className="cv b">{fmtINR(dueNext3,true)}</div><div className="cm">Cash you need to have ready</div></div>
+      </div>
+      <div className="card mb3">
+        <div className="sh mb2"><div className="sh-t"><Ic n={eid?'edit':'plus'} s={14} c="var(--g)"/>{eid?'Edit Expected Outflow':'Add Expected Outflow'}</div>{eid&&<button className="btn btn-g btn-sm" onClick={()=>{setEid(null);setForm(ef);}}>Cancel</button>}</div>
+        <div className="f4" style={{gap:10,marginBottom:10}}>
+          <div className="fg"><label>Expected Month</label><input type="month" value={form.month} onChange={e=>setForm(f=>({...f,month:e.target.value}))}/></div>
+          <div className="fg"><label>For Whom</label><input value={form.entity} onChange={e=>setForm(f=>({...f,entity:e.target.value}))} placeholder="Self / Family…"/></div>
+          <div className="fg"><label>Category</label><input value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))} placeholder="Medical / Repair…"/></div>
+          <div className="fg"><label>Estimated Amount ({CUR.sym})</label><input type="number" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))}/></div>
+        </div>
+        <div style={{display:'flex',gap:10}}>
+          <div className="fg" style={{flex:1}}><label>What is it for?</label><input value={form.narration} onChange={e=>setForm(f=>({...f,narration:e.target.value}))} placeholder="e.g. Car insurance renewal"/></div>
+          <div style={{alignSelf:'flex-end'}}><button className="btn btn-p" onClick={save}><Ic n={eid?'ok':'plus'} s={13} c="#fff"/>{eid?'Update':'Add'}</button></div>
+        </div>
+      </div>
+      <div className="tw">
+        <table>
+          <thead><tr><th>Expected</th><th>Timing</th><th>For Whom</th><th>Category</th><th>What For</th><th className="num">Estimated ({CUR.sym})</th><th>Actions</th></tr></thead>
+          <tbody>
+            {sorted.length===0&&<tr><td colSpan={7}><div style={{textAlign:'center',padding:'28px',color:'var(--n400)',fontSize:12.5}}>Nothing recorded. Add anything you know is coming: an insurance renewal, a school fee, a service due.</div></td></tr>}
+            {sorted.map(p=>{
+              const b=BUCKET[bucketOf(p)];
+              return(
+                <tr key={p.id} style={{background:eid===p.id?'var(--gl)':''}}>
+                  <td style={{fontFamily:'var(--m)',fontSize:12}}>{fmtMonth(p.month)}</td>
+                  <td><span className="tag" style={{background:b.bg,color:b.c,fontSize:10,fontWeight:700}}>{b.l}</span></td>
+                  <td><span className="tag tb">{p.entity}</span></td>
+                  <td style={{fontSize:12,color:'var(--n500)'}}>{p.type}</td>
+                  <td style={{fontSize:12.5}}>{p.narration}</td>
+                  <td className="num bold" style={{color:p.amount>0?'var(--o)':'var(--n400)'}}>{fmtNum(p.amount)}</td>
+                  <td><div style={{display:'flex',gap:4}}>
+                    <button className="bic" onClick={()=>togglePaid(p)} aria-label="Mark as paid" title="Mark as paid. Releases it from net worth, keeps the record" style={{color:'var(--g)'}}><Ic n="ok" s={11}/></button>
+                    <button className="bic" onClick={()=>se(p)} aria-label="Edit expected outflow" title="Edit"><Ic n="edit" s={11}/></button>
+                    <button className="bic red" onClick={()=>del(p.id)} aria-label="Remove expected outflow" title="Delete permanently"><Ic n="del" s={11}/></button>
+                  </div></td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot><tr className="tft"><td colSpan={5} style={{fontWeight:700}}>Total Outstanding</td><td className="num bold" style={{color:'var(--o)'}}>{fmtNum(total)}</td><td/></tr></tfoot>
+        </table>
+      </div>
+
+      {/* Settled history, no longer affects net worth, kept as a record */}
+      {settled.length>0&&(
+        <details className="dsec" style={{marginTop:14}}>
+          <summary className="dsec-s"><span className="dsec-c"/>Already Paid
+            <span className="dsec-h">{settled.length} settled · {fmtINR(settledTotal,true)} · no longer reduces net worth</span>
+          </summary>
+          <div className="dsec-b">
+            <div className="tw">
+              <table>
+                <thead><tr><th>Expected</th><th>Paid On</th><th>For Whom</th><th>What For</th><th className="num">Amount ({CUR.sym})</th><th>Actions</th></tr></thead>
+                <tbody>
+                  {settled.map(p=>(
+                    <tr key={p.id} style={{opacity:.75}}>
+                      <td style={{fontFamily:'var(--m)',fontSize:12}}>{fmtMonth(p.month)}</td>
+                      <td style={{fontFamily:'var(--m)',fontSize:12,color:'var(--gd)'}}>{p.paidOn?fmtDate(p.paidOn):'–'}</td>
+                      <td><span className="tag tb">{p.entity}</span></td>
+                      <td style={{fontSize:12.5}}>{p.narration}</td>
+                      <td className="num bold" style={{color:'var(--n500)'}}>{fmtNum(p.amount)}</td>
+                      <td><div style={{display:'flex',gap:4}}>
+                        <button className="bic" onClick={()=>togglePaid(p)} aria-label="Move back to expected" title="Not actually paid, move back"><Ic n="refresh" s={11}/></button>
+                        <button className="bic red" onClick={()=>del(p.id)} aria-label="Delete record" title="Delete permanently"><Ic n="del" s={11}/></button>
+                      </div></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   MASTER SETTINGS
+══════════════════════════════════════ */
+function PageMaster({data,setData,toast}){
+  const {expenseCategories,incomeCategories,budgetLimits,accounts}=data;
+  const undoDel=makeUndoDelete(data,setData,toast);
+  const [view,setView]=useState('monthly');
+  const [nec,setNec]=useState('');const [nic,setNic]=useState('');
+  const [editCat,setEditCat]=useState(null);const [editCatVal,setEditCatVal]=useState('');
+  const fileRef=useRef();
+  const getDisp=cat=>view==='monthly'?(budgetLimits[cat]||0):(budgetLimits[cat]||0)*12;
+  const save=(cat,val,mode)=>{const monthly=mode==='monthly'?parseFloat(val)||0:Math.round((parseFloat(val)||0)/12*100)/100;setData(d=>({...d,budgetLimits:{...d.budgetLimits,[cat]:monthly}}));};
+  const addEC=()=>{if(!nec.trim())return;setData(d=>({...d,expenseCategories:[...d.expenseCategories,nec.trim()]}));setNec('');toast('Added','g');};
+  const addIC=()=>{if(!nic.trim())return;setData(d=>({...d,incomeCategories:[...d.incomeCategories,nic.trim()]}));setNic('');toast('Added','g');};
+  const startEditCat=(cat,type)=>{setEditCat({name:cat,type});setEditCatVal(cat);};
+  const saveEditCat=()=>{
+    if(!editCatVal.trim()||!editCat)return;
+    const oldName=editCat.name,newName=editCatVal.trim();
+    if(oldName===newName){setEditCat(null);return;}
+    if(editCat.type==='expense'){
+      setData(d=>{
+        const newCats=d.expenseCategories.map(c=>c===oldName?newName:c);
+        const newBL={...d.budgetLimits};
+        if(newBL[oldName]!==undefined){newBL[newName]=newBL[oldName];delete newBL[oldName];}
+        const newMaj=(d.majorExpenseCategories||[]).map(c=>c===oldName?newName:c);
+        const newTxs=d.transactions.map(t=>t.category===oldName?{...t,category:newName}:t);
+        return{...d,expenseCategories:newCats,budgetLimits:newBL,majorExpenseCategories:newMaj,transactions:newTxs};
+      });
+    }else{
+      setData(d=>{
+        const newCats=d.incomeCategories.map(c=>c===oldName?newName:c);
+        const newTxs=d.transactions.map(t=>t.category===oldName?{...t,category:newName}:t);
+        return{...d,incomeCategories:newCats,transactions:newTxs};
+      });
+    }
+    setEditCat(null);toast(`Renamed "${oldName}" → "${newName}"`,'g');
+  };
+  const handleCSV=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{const lines=ev.target.result.split('\n').filter(l=>l.trim());const hdr=lines[0].toLowerCase().split(',').map(h=>h.trim().replace(/"/g,''));const txs=lines.slice(1).map(line=>{const cols=line.split(',').map(c=>c.trim().replace(/"/g,''));const o={};hdr.forEach((h,i)=>o[h]=cols[i]||'');if(!o.date||!o.amount||!o.type)return null;const amount=parseFloat(o.amount);if(isNaN(amount))return null;return{id:uid(),date:o.date,type:o.type.toLowerCase().trim(),category:o.category||'Other Expense',desc:o.description||o.desc||'',amount,month:o.date.slice(0,7)};}).filter(Boolean);setData(d=>({...d,transactions:[...d.transactions,...txs]}));toast(`Imported ${txs.length} transactions`,'g');};r.readAsText(f);e.target.value='';};
+  return(
+    <div className="page">
+      <div className="ph"><div><div className="ptitle">Master Settings</div><div className="psub">Categories, budget limits &amp; CSV import</div></div></div>
+      <div className="card mb3">
+        <div className="sh mb2"><div className="sh-t"><Ic n="budget" s={14} c="var(--g)"/>Budget Limits per Category</div>
+          <div style={{display:'flex',alignItems:'center',gap:10}}><span style={{fontSize:11,color:'var(--n500)'}}>View as:</span><div className="tgl"><button className={`tgo ${view==='monthly'?'on':''}`} onClick={()=>setView('monthly')}>Monthly</button><button className={`tgo ${view==='annual'?'on':''}`} onClick={()=>setView('annual')}>Annual (×12)</button></div></div>
+        </div>
+        <div className="alert ai mb2"><Ic n="prov" s={13}/>Stored as monthly values. Annual = Monthly × 12. Editing either column auto-syncs the other.</div>
+        <div className="tw">
+          <table>
+            <thead><tr><th>Category</th><th className="num" style={{background:view==='monthly'?'var(--gl)':''}}>Monthly Limit ({CUR.sym})</th><th className="num" style={{background:view==='annual'?'var(--bl)':''}}>Annual Limit ({CUR.sym}) = ×12</th></tr></thead>
+            <tbody>
+              {expenseCategories.map(cat=>{
+                const mo=budgetLimits[cat]||0,an=mo*12;
+                return(<tr key={cat}>
+                  <td style={{fontWeight:700,fontSize:12.5}}>{cat}</td>
+                  <td className="num" style={{background:view==='monthly'?'rgba(0,179,134,.04)':''}}>
+                    <input type="number" min="0" key={`m-${cat}-${mo}`} defaultValue={mo} style={{width:110,padding:'4px 8px',border:`1.5px solid ${view==='monthly'?'var(--g)':'var(--n200)'}`,borderRadius:5,fontFamily:'var(--m)',textAlign:'right',fontSize:12.5}} onBlur={e=>save(cat,e.target.value,'monthly')} onKeyDown={e=>e.key==='Enter'&&save(cat,e.target.value,'monthly')}/>
+                  </td>
+                  <td className="num" style={{background:view==='annual'?'rgba(37,99,235,.04)':''}}>
+                    <input type="number" min="0" key={`a-${cat}-${an}`} defaultValue={an} style={{width:110,padding:'4px 8px',border:`1.5px solid ${view==='annual'?'var(--b)':'var(--n200)'}`,borderRadius:5,fontFamily:'var(--m)',textAlign:'right',fontSize:12.5}} onBlur={e=>save(cat,e.target.value,'annual')} onKeyDown={e=>e.key==='Enter'&&save(cat,e.target.value,'annual')}/>
+                  </td>
+                </tr>);
+              })}
+            </tbody>
+            <tfoot><tr className="tft"><td style={{fontWeight:700}}>Total (Active Cats)</td><td className="num bold">{expenseCategories.reduce((s,c)=>(budgetLimits[c]||0)+s,0).toLocaleString(CUR.locale)}</td><td className="num bold">{(expenseCategories.reduce((s,c)=>(budgetLimits[c]||0)+s,0)*12).toLocaleString(CUR.locale)}</td></tr></tfoot>
+          </table>
+        </div>
+      </div>
+      <div className="g2 mb3">
+        <div className="card"><div className="sh mb2"><div className="sh-t"><Ic n="exp" s={14} c="var(--r)"/>Expense Categories</div><span className="tag tr" style={{fontSize:10}}>{expenseCategories.length}</span></div>
+          <div style={{display:'flex',gap:7,marginBottom:10}}><input style={{flex:1,padding:'7px 11px',border:'1.5px solid var(--n200)',borderRadius:'var(--r6)',fontSize:12.5,outline:'none',fontFamily:'var(--f)'}} placeholder="Add expense category…" value={nec} onChange={e=>setNec(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addEC()}/><button className="btn btn-p btn-sm" onClick={addEC} aria-label="Add expense category"><Ic n="plus" s={12} c="#fff"/></button></div>
+          <div style={{maxHeight:220,overflowY:'auto'}}>{expenseCategories.map(c=>{
+            const isMajor=data.majorExpenseCategories?.includes(c);
+            const isEditing=editCat?.name===c&&editCat?.type==='expense';
+            return(<div key={c} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 0',borderBottom:'1px solid var(--n50)'}}>
+              {isEditing?(
+                <div style={{display:'flex',alignItems:'center',gap:6,flex:1}}>
+                  <input value={editCatVal} onChange={e=>setEditCatVal(e.target.value)} onKeyDown={e=>e.key==='Enter'&&saveEditCat()} style={{flex:1,padding:'4px 8px',border:'1.5px solid var(--g)',borderRadius:5,fontSize:12.5,outline:'none',fontFamily:'var(--f)'}} autoFocus/>
+                  <button className="bic" onClick={saveEditCat} style={{color:'var(--g)'}} aria-label="Save category name"><Ic n="ok" s={11}/></button>
+                  <button className="bic" onClick={()=>setEditCat(null)}><Ic n="x" s={11}/></button>
+                </div>
+              ):(
+                <span style={{fontSize:12.5,display:'flex',alignItems:'center',gap:6}}>
+                  {c}
+                  {isMajor&&<span className="major-flag">\u2605 Major</span>}
+                </span>
+              )}
+              {!isEditing&&<div style={{display:'flex',gap:4}}>
+                <button className="bic" title={isMajor?'Remove Major Flag':'Mark as Major Expense'} onClick={()=>{setData(d=>{const mec=d.majorExpenseCategories||[];const newMec=mec.includes(c)?mec.filter(x=>x!==c):[...mec,c];return{...d,majorExpenseCategories:newMec};});}} style={{color:isMajor?'var(--o)':''}}><span style={{fontSize:10}}>{isMajor?'\u2605':'\u2606'}</span></button>
+                <button className="bic" title="Rename Category" onClick={()=>startEditCat(c,'expense')}><Ic n="edit" s={11}/></button>
+                <button className="bic red" aria-label={`Delete category ${c}`} onClick={()=>{
+                  undoDel(`Category "${c}" and its budget limit removed`,d=>{const bl={...d.budgetLimits};delete bl[c];return{...d,expenseCategories:d.expenseCategories.filter(x=>x!==c),budgetLimits:bl,majorExpenseCategories:(d.majorExpenseCategories||[]).filter(x=>x!==c)};});
+                }}><Ic n="del" s={11}/></button>
+              </div>}
+            </div>);
+          })}</div>
+        </div>
+        <div className="card"><div className="sh mb2"><div className="sh-t"><Ic n="inc" s={14} c="var(--g)"/>Income Categories</div><span className="tag tg" style={{fontSize:10}}>{incomeCategories.length}</span></div>
+          <div style={{display:'flex',gap:7,marginBottom:10}}><input style={{flex:1,padding:'7px 11px',border:'1.5px solid var(--n200)',borderRadius:'var(--r6)',fontSize:12.5,outline:'none',fontFamily:'var(--f)'}} placeholder="Add income category…" value={nic} onChange={e=>setNic(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addIC()}/><button className="btn btn-p btn-sm" onClick={addIC} aria-label="Add income category"><Ic n="plus" s={12} c="#fff"/></button></div>
+          <div style={{maxHeight:220,overflowY:'auto'}}>{incomeCategories.map(c=>{
+            const isEditing=editCat?.name===c&&editCat?.type==='income';
+            return(<div key={c} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 0',borderBottom:'1px solid var(--n50)'}}>
+              {isEditing?(
+                <div style={{display:'flex',alignItems:'center',gap:6,flex:1}}>
+                  <input value={editCatVal} onChange={e=>setEditCatVal(e.target.value)} onKeyDown={e=>e.key==='Enter'&&saveEditCat()} style={{flex:1,padding:'4px 8px',border:'1.5px solid var(--g)',borderRadius:5,fontSize:12.5,outline:'none',fontFamily:'var(--f)'}} autoFocus/>
+                  <button className="bic" onClick={saveEditCat} style={{color:'var(--g)'}} aria-label="Save category name"><Ic n="ok" s={11}/></button>
+                  <button className="bic" onClick={()=>setEditCat(null)}><Ic n="x" s={11}/></button>
+                </div>
+              ):(
+                <span style={{fontSize:12.5}}>{c}</span>
+              )}
+              {!isEditing&&<div style={{display:'flex',gap:4}}>
+                <button className="bic" title="Rename Category" onClick={()=>startEditCat(c,'income')}><Ic n="edit" s={11}/></button>
+                <button className="bic red" onClick={()=>setData(d=>({...d,incomeCategories:d.incomeCategories.filter(x=>x!==c)}))}><Ic n="del" s={11}/></button>
+              </div>}
+            </div>);
+          })}</div>
+        </div>
+      </div>
+      <div className="card mb3">
+        <div className="sh mb2"><div className="sh-t"><Ic n="shield" s={14} c="var(--p)"/>Emergency Fund Configuration</div></div>
+        <div className="alert ai mb3"><Ic n="prov" s={13}/>Link specific accounts and/or FDs to your emergency fund. Target = avg monthly expense × target months.</div>
+        <div className="f2 mb3">
+          <div className="fg">
+            <label>Target (Months of Expenses)</label>
+            <select value={data.emergencyFund?.targetMonths||6} onChange={e=>setData(d=>({...d,emergencyFund:{...(d.emergencyFund||{}),targetMonths:+e.target.value}}))}>
+              {[3,4,5,6,9,12].map(n=><option key={n} value={n}>{n} months</option>)}
+            </select>
+          </div>
+          <div className="fg">
+            <label>Linked Accounts (select all that apply)</label>
+            <div style={{border:'1.5px solid var(--n200)',borderRadius:'var(--r6)',padding:'6px 10px',maxHeight:120,overflowY:'auto'}}>
+              {data.accounts.map(a=>{
+                const linked=(data.emergencyFund?.accountIds||[]).includes(a.id);
+                return(
+                  <label key={a.id} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 0',cursor:'pointer',fontSize:12.5}}>
+                    <input type="checkbox" checked={linked} onChange={()=>setData(d=>{const ids=(d.emergencyFund?.accountIds||[]);const newIds=ids.includes(a.id)?ids.filter(x=>x!==a.id):[...ids,a.id];return{...d,emergencyFund:{...(d.emergencyFund||{}),accountIds:newIds}};})}/>
+                    <span style={{flex:1}}>{a.name}</span>
+                    <span style={{fontFamily:'var(--m)',fontSize:11,color:'var(--n400)'}}>{fmtINR(a.balance,true)}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="card"><div className="sh mb2"><div className="sh-t"><Ic n="up" s={14} c="var(--b)"/>CSV Data Import</div></div>
+        <div className="alert ai mb2"><Ic n="prov" s={13}/>Columns accepted: <strong>date · type · category · description · merchant · paymentMode · amount</strong>. Column order doesn't matter. Date can be any format (DD/MM/YYYY, YYYY-MM-DD, 15-Apr-2025 etc.).</div>
+        <input type="file" ref={fileRef} accept=".csv" style={{display:'none'}} onChange={handleCSV}/>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-s" onClick={()=>fileRef.current.click()}><Ic n="up" s={13}/>Choose CSV &amp; Import</button>
+          <button className="btn btn-g btn-sm" onClick={()=>{const b=new Blob(['date,type,category,description,merchant,paymentMode,amount\n01/04/2026,expense,House Rent,April Rent,,NEFT/Bank Transfer,20500\n01/04/2026,income,Salary / Consultancy,April Salary,,NEFT/Bank Transfer,83550\n05/04/2026,expense,Groceries & Food,Monthly groceries,DMart,UPI,4500\n'],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='miyeecfo-template.csv';a.click();}}>
+            <Ic n="dl" s={12}/>Sample Template
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   GOOGLE DRIVE INTEGRATION
+   ─────────────────────────────────────────────────────────
+   HOW IT WORKS:
+   1. User clicks "Connect Google Drive"
+   2. Google OAuth2 popup → user grants permission
+   3. We get an access token (valid ~1 hour)
+   4. Save: POST multipart to Drive API → creates/updates
+      "fundflow-data.json" in user's Google Drive root
+   5. Load: GET file list → find fundflow-data.json → GET content
+   6. Token refreshes silently via GIS token client
+
+   SETUP REQUIRED (one-time by developer):
+   → Go to console.cloud.google.com
+   → Create project → Enable Google Drive API
+   → OAuth consent screen → Add scope: drive.file
+   → Create OAuth 2.0 Web Client ID
+   → Add your GitHub Pages URL to Authorized JavaScript Origins
+   → Paste Client ID into GOOGLE_CLIENT_ID below
+══════════════════════════════════════════════════════════ */
+
+// ▼▼▼ Google Client ID: can be set via UI or hardcoded here ▼▼▼
+let GOOGLE_CLIENT_ID = (()=>{try{return localStorage.getItem('fm_google_client_id')||'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com';}catch{return 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com';}})();
+// ▲▲▲ ──────────────────────────────────────────────────────── ▲▲▲
+
+const DRIVE_FILENAME = 'finmanager-data.json';
+const DRIVE_FOLDER   = 'PersonalFinManager';
+const DRIVE_SCOPE    = 'https://www.googleapis.com/auth/drive.file';
+
+const SESS_KEY = 'fm_gdrive_tok';
+
+const DriveService = {
+  _token: null, _client: null, _fileId: null, _folderId: null, _initPromise: null,
+
+  /* ── session helpers: survive F5 within the same browser tab ── */
+  _saveSess(tok, ttl = 3500) {
+    try { sessionStorage.setItem(SESS_KEY, JSON.stringify({ tok, exp: Date.now() + ttl * 1000 })); } catch(_) {}
+  },
+  _loadSess() {
+    try {
+      const raw = sessionStorage.getItem(SESS_KEY);
+      if (!raw) return null;
+      const { tok, exp } = JSON.parse(raw);
+      if (Date.now() < exp) return tok;
+      sessionStorage.removeItem(SESS_KEY);
+    } catch(_) {}
+    return null;
+  },
+  _clearSess() { try { sessionStorage.removeItem(SESS_KEY); } catch(_) {} },
+
+  init(forceReinit) {
+    if (this._initPromise && !forceReinit) return this._initPromise;
+    this._initPromise = new Promise((resolve) => {
+      let tries = 0;
+      const poll = () => {
+        tries++;
+        if (window.google?.accounts?.oauth2) {
+          try {
+            this._client = window.google.accounts.oauth2.initTokenClient({
+              client_id: GOOGLE_CLIENT_ID, scope: DRIVE_SCOPE, callback: () => {},
+            });
+            // 1. Restore from sessionStorage (survives page refresh)
+            const cached = this._loadSess();
+            if (cached) { this._token = cached; resolve({ ok: true, restored: true }); return; }
+            // 2. Silent re-auth via existing Google browser session (no popup)
+            this._silentToken()
+              .then(t => { this._token = t; resolve({ ok: true, restored: true }); })
+              .catch(() => resolve({ ok: true, restored: false }));
+          } catch (e) { resolve({ ok: false, error: e.message }); }
+        } else if (tries < 30) { setTimeout(poll, 500); }
+        else { resolve({ ok: false, error: 'Google Identity Services failed to load.' }); }
+      };
+      poll();
+    });
+    return this._initPromise;
+  },
+
+  /* Silent token: uses existing Google session cookie, never shows a popup */
+  _silentToken() {
+    return new Promise((resolve, reject) => {
+      if (!this._client) { reject(new Error('not ready')); return; }
+      const guard = setTimeout(() => reject(new Error('timeout')), 6000);
+      this._client.callback = (resp) => {
+        clearTimeout(guard);
+        if (resp.error) { reject(new Error(resp.error)); return; }
+        this._saveSess(resp.access_token);
+        resolve(resp.access_token);
+      };
+      this._client.requestAccessToken({ prompt: '' }); // no popup
+    });
+  },
+
+  /* Explicit connect: prompt:'' uses existing Google session; GIS falls back to picker if needed */
+  getToken() {
+    return new Promise((resolve, reject) => {
+      if (!this._client) { reject(new Error('GIS not initialised.')); return; }
+      this._client.callback = (resp) => {
+        if (resp.error) { reject(new Error(`Google auth error: ${resp.error}`)); return; }
+        this._token = resp.access_token;
+        this._saveSess(resp.access_token);
+        resolve(resp.access_token);
+      };
+      this._client.requestAccessToken({ prompt: '' });
+    });
+  },
+
+  /* Auto-retry: silently refresh token then retry the original Drive call */
+  async _withAutoRefresh(fn) {
+    try { return await fn(); }
+    catch(e) {
+      if (e.message !== 'TOKEN_EXPIRED') throw e;
+      try { this._token = await this._silentToken(); return await fn(); }
+      catch { this._token = null; this._clearSess(); throw new Error('TOKEN_EXPIRED'); }
+    }
+  },
+
+  _hdrs(extra = {}) { return { Authorization: `Bearer ${this._token}`, ...extra }; },
+  _expired(res) { return res.status === 401; },
+
+  async ensureFolder() {
+    if (this._folderId) return this._folderId;
+    const q = encodeURIComponent(`name='${DRIVE_FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&spaces=drive`, { headers: this._hdrs() });
+    if (this._expired(res)) throw new Error('TOKEN_EXPIRED');
+    const json = await res.json();
+    if (json.files?.length > 0) { this._folderId = json.files[0].id; return this._folderId; }
+    const cr = await fetch('https://www.googleapis.com/drive/v3/files?fields=id', {
+      method: 'POST', headers: this._hdrs({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ name: DRIVE_FOLDER, mimeType: 'application/vnd.google-apps.folder' }),
+    });
+    if (!cr.ok) throw new Error('Could not create Drive folder');
+    const folder = await cr.json(); this._folderId = folder.id; return this._folderId;
+  },
+
+  async findFile() {
+    const folderId = await this.ensureFolder();
+    const q = encodeURIComponent(`name='${DRIVE_FILENAME}' and '${folderId}' in parents and trashed=false`);
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&spaces=drive`, { headers: this._hdrs() });
+    if (this._expired(res)) throw new Error('TOKEN_EXPIRED');
+    if (!res.ok) throw new Error(`Drive search failed: ${res.status}`);
+    const json = await res.json();
+    if (json.files?.length > 0) { this._fileId = json.files[0].id; return json.files[0]; }
+    this._fileId = null; return null;
+  },
+
+  async save(dataObj) {
+    await this.findFile();
+    const payload = { ...dataObj, _lastSyncedAt: new Date().toISOString() };
+    const body = JSON.stringify(payload, null, 2);
+    if (this._fileId) {
+      const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${this._fileId}?uploadType=media`,
+        { method: 'PATCH', headers: this._hdrs({ 'Content-Type': 'application/json' }), body });
+      if (this._expired(res)) throw new Error('TOKEN_EXPIRED');
+      if (!res.ok) throw new Error(`Drive update failed: ${res.status}`);
+      return this._fileId;
+    } else {
+      const folderId = await this.ensureFolder();
+      const boundary = '-------fm_' + Date.now();
+      const meta = 'Content-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify({ name: DRIVE_FILENAME, mimeType: 'application/json', parents: [folderId] });
+      const dat = 'Content-Type: application/json\r\n\r\n' + body;
+      const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+        method: 'POST', headers: this._hdrs({ 'Content-Type': `multipart/related; boundary="${boundary}"` }),
+        body: `\r\n--${boundary}\r\n${meta}\r\n--${boundary}\r\n${dat}\r\n--${boundary}--`
+      });
+      if (this._expired(res)) throw new Error('TOKEN_EXPIRED');
+      if (!res.ok) throw new Error(`Drive create failed: ${res.status}`);
+      const json = await res.json(); this._fileId = json.id; return json.id;
+    }
+  },
+
+  async load() {
+    const file = await this.findFile();
+    if (!file) return null;
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, { headers: this._hdrs({ Accept: 'application/json' }) });
+    if (this._expired(res)) throw new Error('TOKEN_EXPIRED');
+    if (!res.ok) throw new Error(`Drive download failed: ${res.status}`);
+    const loaded = await res.json();
+    return { data: loaded, modifiedTime: file.modifiedTime, syncedAt: loaded._lastSyncedAt || null };
+  },
+
+  disconnect() {
+    if (this._token && window.google?.accounts?.oauth2) { try { window.google.accounts.oauth2.revoke(this._token, () => {}); } catch(_) {} }
+    this._token = null; this._fileId = null; this._folderId = null;
+    this._clearSess();
+  },
+};
+
+
+
+/* ══════════════════════════════════════
+   DATA MANAGEMENT PAGE (with Drive)
+══════════════════════════════════════ */
+function PageData({data,setData,toast}){
+  const fileRef=useRef();
+  const legacyRef=useRef();
+  const mergeRef=useRef();
+  // localStorage auto-save handled by App useEffect
+  const expLocal=()=>{const b=new Blob([JSON.stringify({...data,_version:'v6'},null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`finmanager-${new Date().toISOString().slice(0,10)}.json`;a.click();toast('Exported','g');};
+  const imp=()=>fileRef.current.click();
+  const exportXLSX=()=>{
+    try{
+      if(typeof XLSX==='undefined'){toast('SheetJS not loaded. Check internet connection','r');return;}
+      const wb=XLSX.utils.book_new();
+      const months=getPeriodMonths(data.profile.periodStart,data.profile.periodEnd);
+      // Same engine as every screen, so the workbook can never drift from the app.
+      const fin=computeFin(data,months);
+      const {totalInc,totalExp,bankBal,fdBal,cashBal,ccLiab,loanOS,provTotal,netWorth}=fin;
+      const itxs=data.investmentTxs||[];
+      const imonth=t=>t.month||(t.date||'').slice(0,7);
+      // Sheet 1: Summary
+      const sumRows=[
+        ['MiyeeCFO Export',data.profile.name,new Date().toLocaleDateString('en-IN')],
+        [],
+        ['Period',`${data.profile.periodStart} to ${data.profile.periodEnd}`],
+        ['Total Income (Period)',totalInc],
+        ['Less: Total Expenses (Period)',totalExp],
+        ['Balance: Net Surplus',fin.surplus],
+        ['Less: Investments (Period)',fin.invPeriod],
+        ['Balance Cash',fin.cashBalance],
+        ['Savings Rate %',totalInc>0?+(fin.savingsRate).toFixed(2):0],
+        ['Investment Rate %',totalInc>0?+(fin.investRate).toFixed(2):0],
+        [],
+        ['Bank Balance',bankBal],['Cash & Wallet',cashBal],['Fixed Deposits',fdBal],
+        ['Investments (value today)',fin.invCorpus],
+        ['CC Liability',-ccLiab],['Loan Outstanding',-loanOS],['Expected Future Outflows',-provTotal],
+        ['Net Worth',netWorth],
+        ['  of which liquid',fin.liquidNetWorth],
+        ['  of which investments',fin.invCorpus],
+        [],
+        ['Lifetime Invested',fin.invTotal],
+        ['Investment Gain / Loss',fin.invGain],
+      ];
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(sumRows),'Summary');
+      // Sheet 2: Transactions
+      const txHdr=['Date','Month','Type','Category','Description','Merchant','Payment Mode','Amount'];
+      const txRows=data.transactions.map(t=>[t.date,t.month,t.type,t.category,t.desc||'',t.merchant||'',t.paymentMode||'',t.amount]);
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([txHdr,...txRows]),'Transactions');
+      // Sheet 3: Month-wise P&L
+      const pnlHdr=['Month','Income','Expense','Surplus','Investments','Balance Cash','Savings %'];
+      const pnlRows=months.map((m,i)=>{
+        const inc=fin.mInc[i]||0,exp=fin.mExp[i]||0,inv=fin.mInv[i]||0;
+        return[m.label,inc,exp,inc-exp,inv,inc-exp-inv,inc>0?+((inc-exp)/inc*100).toFixed(2):0];
+      });
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([pnlHdr,...pnlRows]),'P&L by Month');
+      // Sheet 4: Loans
+      const loanHdr=['Bank','Type','Loan Amount','Outstanding','EMI','ROI %','Start Date','End Date','Tenure'];
+      const loanRows=data.loans.map(l=>[l.bank,l.type,l.original,l.outstanding,l.emi,l.roi,l.startDate||'',l.endDate||'',l.tenure]);
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([loanHdr,...loanRows]),'Loans');
+      // Sheet 5: Savings Goals
+      if((data.goals||[]).length){
+        const goalHdr=['Goal','Target ({CUR.sym})','Saved ({CUR.sym})','Progress %','Target Date','Notes'];
+        const goalRows=(data.goals||[]).map(g=>[g.name,g.targetAmount,g.currentAmount,g.targetAmount>0?+((g.currentAmount/g.targetAmount)*100).toFixed(1):0,g.targetDate||'',g.notes||'']);
+        XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([goalHdr,...goalRows]),'Goals');
+      }
+      // Sheet 6: Investment contributions
+      if(itxs.length){
+        const instrById={};(data.goals||[]).forEach(g=>(g.instruments||[]).forEach(i=>{instrById[i.id]={...i,goalName:g.name};}));
+        const invHdr=['Date','Month','Goal','Instrument','Type','Amount','Units','NAV','In Period','Notes'];
+        const invRows=[...itxs].sort((a,b)=>(a.date||'').localeCompare(b.date||'')).map(t=>{
+          const i=instrById[t.instrumentId]||{};
+          return[t.date,imonth(t),i.goalName||'',i.name||'',i.type||'',t.amount||0,t.units||'',t.nav||'',
+            months.some(m=>m.key===imonth(t))?'Yes':'No',t.notes||''];
+        });
+        XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([invHdr,...invRows]),'Investments');
+      }
+      XLSX.writeFile(wb,`finmanager-${new Date().toISOString().slice(0,10)}.xlsx`);
+      toast(`Excel exported (${wb.SheetNames.length} sheets)`,'g');
+    }catch(e){toast('Excel export failed: '+e.message,'r');}
+  };
+  /* ── Migration: normalise any old JSON export to current schema ── */
+  const migrateData=(raw)=>{
+    const d={...raw};
+    // Ensure all required top-level keys exist
+    if(!d.profile)d.profile={name:'Your Name',email:'you@example.com',phone:'',pan:'',currency:'INR',city:'',avatar:'YN',periodStart:'2025-04',periodEnd:'2026-03'};
+    if(!d.profile.periodStart)d.profile.periodStart='2025-04';
+    if(!d.profile.periodEnd)d.profile.periodEnd='2026-03';
+    if(!d.accounts)d.accounts=[];
+    if(!d.creditCards)d.creditCards=[];
+    if(!d.loans)d.loans=[];
+    d.loans=d.loans.map(l=>({...l,paidEmis:l.paidEmis||[]}));
+    if(!d.provisions)d.provisions=[];
+    if(!d.transactions)d.transactions=[];
+    if(!d.incomeCategories)d.incomeCategories=['Salary / Consultancy','Freelance Income','Interest Income','Other Income'];
+    if(!d.expenseCategories)d.expenseCategories=['House Rent','Groceries & Food','Electricity','Insurance','Other Expense'];
+    if(!d.budgetLimits)d.budgetLimits={};
+    if(!d.majorExpenseCategories)d.majorExpenseCategories=[];
+    if(!d.emergencyFund)d.emergencyFund={accountIds:[],targetMonths:6};
+    if(!d.goals)d.goals=[];
+    if(!d.recurring)d.recurring=[];
+    if(!d.investmentTxs)d.investmentTxs=[];
+    // Reconciliation: `opening` is the balance at the start of the reporting period.
+    // Left null for existing data. The Reconciliation page infers it and offers to adopt it.
+    d.accounts=d.accounts.map(a=>({...a,opening:a.opening===undefined?null:a.opening}));
+    // Ensure profile.features exists
+    if(!d.profile.features)d.profile.features={investmentTracker:true};
+    // Ensure all goals have instruments array
+    d.goals=d.goals.map(g=>({...g,instruments:g.instruments||[]}));
+    // Migrate top-level investments[] → goal.instruments[] (Goal-First Architecture)
+    if(d.investments&&d.investments.length){
+      const gpId='__general_portfolio__';
+      d.investments.forEach(inv=>{
+        const targetGoalId=inv.goalId&&d.goals.find(g=>g.id===inv.goalId)?inv.goalId:gpId;
+        if(targetGoalId===gpId&&!d.goals.find(g=>g.id===gpId)){
+          d.goals=[...d.goals,{id:gpId,name:'General Portfolio',targetAmount:0,currentAmount:0,
+            targetDate:'',color:'#2563eb',notes:'Auto-created from migrated investments',instruments:[]}];
+        }
+        d.goals=d.goals.map(g=>{
+          if(g.id!==targetGoalId)return g;
+          if((g.instruments||[]).find(i=>i.id===inv.id))return g;
+          return{...g,instruments:[...g.instruments,{...inv,units:inv.units||0,currentNAV:inv.currentNAV||null,lastBuyNAV:inv.lastBuyNAV||null,lastNAVDate:inv.lastNAVDate||null}]};
+        });
+      });
+      delete d.investments;
+    } else { delete d.investments; }
+    // Reconciliation needs to know which fund an investment was paid from.
+    // Pre-existing entries predate the field; a bank transfer is the safe default.
+    d.investmentTxs=d.investmentTxs.map(t=>({...t,paymentMode:t.paymentMode||'NEFT/Bank Transfer'}));
+    // Migrate investmentTxs: ensure goalId field exists
+    d.investmentTxs=d.investmentTxs.map(tx=>{
+      if(tx.goalId)return tx;
+      const instrId=tx.instrumentId||tx.investmentId||null;
+      for(const g of d.goals){
+        if((g.instruments||[]).find(i=>i.id===instrId))
+          return{...tx,goalId:g.id,instrumentId:instrId};
+      }
+      return{...tx,instrumentId:instrId};
+    });
+    // Ensure every transaction has required fields
+    d.transactions=d.transactions.map(t=>({
+      id:t.id||uid(),date:t.date||'',type:t.type||'expense',category:t.category||'Other Expense',
+      desc:t.desc||t.description||t.narration||'',amount:parseFloat(t.amount)||0,
+      month:t.month||(t.date?t.date.slice(0,7):''),paymentMode:t.paymentMode||t.payment_mode||t.mode||'',
+      merchant:t.merchant||'',
+    }));
+    // Ensure every account has required fields
+    d.accounts=d.accounts.map(a=>({id:a.id||uid(),name:a.name||'Unknown',type:a.type||'bank',accNo:a.accNo||a.acc_no||'XXXX-0000',balance:parseFloat(a.balance)||0,color:a.color||'#1a4a6e'}));
+    // Ensure every CC has required fields
+    d.creditCards=d.creditCards.map(c=>({id:c.id||uid(),bank:c.bank||'Unknown',type:c.type||c.card_type||'Card',accNo:c.accNo||c.acc_no||'XXXX-0000',limit:parseFloat(c.limit||c.credit_limit)||0,payable:parseFloat(c.payable||c.billed)||0,provision:parseFloat(c.provision||c.unbilled)||0,dueDate:c.dueDate||c.due_date||null}));
+    // Ensure every loan has required fields
+    d.loans=d.loans.map(l=>({id:l.id||uid(),bank:l.bank||l.lender||'Unknown',accNo:l.accNo||l.acc_no||'XXXX-0000',type:l.type||l.loan_type||'Personal Loan',original:parseFloat(l.original||l.loan_amount||l.principal)||0,outstanding:parseFloat(l.outstanding||l.balance)||0,emi:parseFloat(l.emi)||0,roi:parseFloat(l.roi||l.rate||l.interest_rate)||0,startDate:l.startDate||l.start_date||null,endDate:l.endDate||l.end_date||null,tenure:parseInt(l.tenure)||60,remaining:parseInt(l.remaining)||parseInt(l.tenure)||0}));
+    // Ensure every provision has required fields
+    d.provisions=(d.provisions||[]).map(p=>({id:p.id||uid(),month:p.month||new Date().toISOString().slice(0,7),entity:p.entity||'Self',type:p.type||'',narration:p.narration||p.description||p.desc||'',amount:parseFloat(p.amount)||0}));
+    // Handle old localStorage key format (ff_v3, ff_v4 etc)
+    if(d.funds&&!d.accounts.length){d.accounts=d.funds;}
+    delete d.funds;delete d._version;
+    return d;
+  };
+  const himp=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{const raw=JSON.parse(ev.target.result);const migrated=migrateData(raw);setData(migrated);toast('Imported successfully (with auto-migration)','g');}catch{toast('Invalid JSON','r');}};r.readAsText(f);e.target.value='';};
+  const himpLegacy=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{const raw=JSON.parse(ev.target.result);const migrated=migrateData(raw);setData(migrated);toast('Legacy data imported & migrated to current version!','g');}catch{toast('Invalid JSON file','r');}};r.readAsText(f);e.target.value='';};
+  const himpMerge=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      try{
+        const raw=JSON.parse(ev.target.result);
+        const migrated=migrateData(raw);
+        setData(cur=>{
+          // Merge by id: skip any record whose id already exists in current data
+          const existTx=new Set(cur.transactions.map(t=>t.id));
+          const existAcc=new Set(cur.accounts.map(a=>a.id));
+          const existCC=new Set(cur.creditCards.map(c=>c.id));
+          const existLoan=new Set(cur.loans.map(l=>l.id));
+          const existProv=new Set(cur.provisions.map(p=>p.id));
+          const newTx=(migrated.transactions||[]).filter(t=>!existTx.has(t.id));
+          const newAcc=(migrated.accounts||[]).filter(a=>!existAcc.has(a.id));
+          const newCC=(migrated.creditCards||[]).filter(c=>!existCC.has(c.id));
+          const newLoan=(migrated.loans||[]).filter(l=>!existLoan.has(l.id));
+          const newProv=(migrated.provisions||[]).filter(p=>!existProv.has(p.id));
+          toast(`Merged: +${newTx.length} txns, +${newAcc.length} accounts, +${newCC.length} cards, +${newLoan.length} loans, +${newProv.length} provisions`,'g');
+          return{...cur,
+            transactions:[...cur.transactions,...newTx],
+            accounts:[...cur.accounts,...newAcc],
+            creditCards:[...cur.creditCards,...newCC],
+            loans:[...cur.loans,...newLoan],
+            provisions:[...cur.provisions,...newProv],
+          };
+        });
+      }catch{toast('Invalid JSON file','r');}
+    };
+    r.readAsText(f);e.target.value='';
+  };
+  // ── RESET: clears ALL financial data but PRESERVES user profile
+  const reset=()=>{
+    if(window.confirm('Reset all financial data?\n\nThis will PERMANENTLY DELETE:\n• All transactions\n• All accounts & balances\n• All credit cards\n• All loans\n• All provisions\n• All budget limits\n• All categories\n\nYour Profile & Period settings will be KEPT.\n\nThis cannot be undone.')){
+      setData(d=>({
+        profile: d.profile,
+        accounts: [],
+        creditCards: [],
+        loans: [],
+        provisions: [],
+        transactions: [],
+        incomeCategories: [],
+        expenseCategories: [],
+        budgetLimits: {},
+        majorExpenseCategories: [],
+        emergencyFund: {accountIds:[], targetMonths:6},
+      }));
+      try{localStorage.removeItem('ff_v5');localStorage.removeItem('ff_v3');}catch(e){}
+      toast('All financial data deleted. Start fresh!','x');
+    }
+  };
+  const restore=()=>{const s=localStorage.getItem('ff_v5');if(s){try{setData(JSON.parse(s));toast('Restored from auto-backup','g');}catch{toast('Corrupt backup','r');}}else toast('No auto-backup found','r');};
+  const [autoBackup,setAutoBackup]=useState(()=>{try{return localStorage.getItem('fm_autobackup')||'off';}catch{return 'off';}});
+  const autoBackupLast=(()=>{try{return localStorage.getItem('fm_autobackup_last')||'';}catch{return '';}})();
+
+  return(
+    <div className="page">
+      <div className="ph"><div><div className="ptitle">Data Management</div><div className="psub">Export · Import · Restore · Reset</div></div></div>
+      <input type="file" ref={fileRef} accept=".json" style={{display:'none'}} onChange={himp}/>
+      <input type="file" ref={legacyRef} accept=".json" style={{display:'none'}} onChange={himpLegacy}/>
+      <input type="file" ref={mergeRef} accept=".json" style={{display:'none'}} onChange={himpMerge}/>
+
+      {/* Stats */}
+      <div className="g4 mb3">
+        {[{l:'Transactions',v:data.transactions.length},{l:'Accounts',v:data.accounts.length},{l:'Credit Cards',v:data.creditCards.length},{l:'Loans',v:data.loans.length},{l:'Future Outflows',v:data.provisions.length},{l:'Expense Cats',v:data.expenseCategories.length},{l:'Income Cats',v:data.incomeCategories.length},{l:'Budget Limits',v:Object.keys(data.budgetLimits).length}].map(s=><div className="card" key={s.l}><div className="cl">{s.l}</div><div className="cv" style={{fontSize:18}}>{s.v}</div></div>)}
+      </div>
+
+      <div className="alert as mb3"><Ic n="ok" s={13}/>Auto-backup active. Data saved to browser storage on every change. Use Google Drive Sync for cloud backup.</div>
+
+      {/* Backup preference */}
+      <div className="card mb3">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="dl" s={14} c="var(--g)"/>Backup Preference</div>
+          <span className="tag tx" style={{fontSize:10}}>
+            {autoBackup==='off'?'Manual only':autoBackupLast?`Last auto: ${fmtDate(autoBackupLast)}`:'Not run yet'}
+          </span>
+        </div>
+        <p style={{fontSize:12.5,color:'var(--n500)',marginBottom:12}}>
+          A backup writes a JSON snapshot to your Downloads folder. By default MiyeeCFO only backs up
+          when you press <strong>Export JSON File</strong> below. It never downloads on its own. Opt in here
+          if you would rather it save a copy automatically when the app opens.
+        </p>
+        <div className="tgl" style={{display:'inline-flex'}}>
+          {[
+            {k:'off',l:'Manual Only'},
+            {k:'daily',l:'Auto · Once a Day'},
+            {k:'always',l:'Auto · Every Launch'},
+          ].map(o=>(
+            <button key={o.k} className={`tgo ${autoBackup===o.k?'on':''}`}
+              onClick={()=>{setAutoBackup(o.k);try{localStorage.setItem('fm_autobackup',o.k);}catch{}toast(`Backup: ${o.l}`,'g');}}>
+              {o.l}
+            </button>
+          ))}
+        </div>
+        <div style={{fontSize:11,color:'var(--n400)',marginTop:10,lineHeight:1.5}}>
+          <strong>Manual Only</strong> is the default. Nothing downloads unless you ask. On the auto settings your
+          browser may ask once for permission to download multiple files from this site; allow it, otherwise the
+          snapshot is skipped. <strong>Every Launch</strong> writes a file on every refresh.
+        </div>
+      </div>
+
+      <div className="g3 mb3">
+        <div className="card">
+          <div className="sh mb2"><div className="sh-t"><Ic n="dl" s={14} c="var(--g)"/>Export Local Backup</div></div>
+          <p style={{fontSize:12.5,color:'var(--n500)',marginBottom:12}}>Download a complete JSON snapshot or a formatted Excel workbook (5 sheets: Summary, Transactions, P&L, Loans, Goals).</p>
+          <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+            <button className="btn btn-p" onClick={expLocal}><Ic n="dl" s={13} c="#fff"/>Export JSON File</button>
+            <button className="btn btn-s" onClick={exportXLSX} style={{color:'#1d6f42',borderColor:'#1d6f42'}}><Ic n="dl" s={13} c="#1d6f42"/>Export Excel (.xlsx)</button>
+          </div>
+        </div>
+        <div className="card">
+          <div className="sh mb2"><div className="sh-t"><Ic n="up" s={14} c="var(--b)"/>Import Backup File</div></div>
+          <p style={{fontSize:12.5,color:'var(--n500)',marginBottom:12}}>Restore from a previously exported backup JSON file. <strong>Replaces</strong> all current data. Auto-migrates older versions.</p>
+          <button className="btn btn-s" onClick={imp}><Ic n="up" s={13}/>Choose JSON File</button>
+        </div>
+        <div className="card" style={{border:'1.5px solid var(--g)',background:'var(--gxl)'}}>
+          <div className="sh mb2"><div className="sh-t" style={{color:'var(--gd)'}}><Ic n="refresh" s={14} c="var(--g)"/>Merge Import Old Data</div></div>
+          <p style={{fontSize:12.5,color:'var(--n600)',marginBottom:12}}><strong>Adds</strong> transactions, accounts, cards, loans & provisions from an old backup into your current data, without overwriting anything. Duplicate IDs are skipped automatically.</p>
+          <button className="btn btn-p" onClick={()=>mergeRef.current.click()}><Ic n="up" s={13} c="#fff"/>Choose JSON to Merge</button>
+        </div>
+      </div>
+
+      {/* Legacy / Old Version Import */}
+      <div className="card mb3" style={{border:'1.5px solid var(--b)',background:'linear-gradient(135deg,#eff6ff,#f0f9ff)'}}>
+        <div className="sh mb2"><div className="sh-t" style={{color:'var(--bd)'}}><Ic n="refresh" s={14} c="var(--b)"/>Import from Older Version (v3 / v4 / v5 / FundFlow)</div></div>
+        <div className="alert ai mb2" style={{marginBottom:10}}>
+          <Ic n="prov" s={13}/>
+          <div style={{fontSize:12}}>
+            Have a JSON export from an older version of MiyeeCFO, FundFlow, or any prior release?<br/>
+            This importer <strong>auto-migrates</strong> your data, filling missing fields, converting old field names, and ensuring compatibility with the current schema.<br/>
+            <strong>Supported:</strong> FundFlow v3, v4, v5, FinManager v1–v5, and any JSON with transactions/accounts/creditCards arrays.
+          </div>
+        </div>
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          <button className="btn btn-p" onClick={()=>legacyRef.current.click()} style={{background:'var(--b)'}}><Ic n="up" s={13} c="#fff"/>Import Old Version JSON</button>
+          <span style={{fontSize:11.5,color:'var(--n400)'}}>Overwrites current data after migration</span>
+        </div>
+      </div>
+
+      <div className="g2">
+        <div className="card">
+          <div className="sh mb2"><div className="sh-t"><Ic n="refresh" s={14} c="var(--o)"/>Restore Auto-Backup</div></div>
+          <p style={{fontSize:12.5,color:'var(--n500)',marginBottom:12}}>Restore from the last auto-saved localStorage snapshot. Useful if you accidentally made wrong changes.</p>
+          <button className="btn btn-s" onClick={restore}><Ic n="refresh" s={13}/>Restore from Auto-Backup</button>
+        </div>
+        <div className="card" style={{border:'2px solid var(--r)',background:'#fff8f8'}}>
+          <div className="sh mb2"><div className="sh-t" style={{color:'var(--r)'}}><Ic n="del" s={14} c="var(--r)"/>Reset Financial Data</div></div>
+          <div className="alert ae mb2" style={{marginBottom:10}}>
+            <Ic n="prov" s={13}/>
+            <div style={{fontSize:11.5}}>
+              <strong>What gets cleared:</strong> Transactions, Accounts, Credit Cards, Loans, Expected Future Outflows, Budget Limits, Categories<br/>
+              <strong style={{color:'var(--gd)'}}>What is KEPT:</strong> Your Profile &amp; Period Settings
+            </div>
+          </div>
+          <button className="btn btn-d" onClick={reset}><Ic n="del" s={13}/>Reset Financial Data</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+/* ══════════════════════════════════════
+   GOOGLE DRIVE SYNC PAGE (dedicated tab)
+══════════════════════════════════════ */
+function PageDriveSync({data,setData,toast,syncMode,toggleSyncMode}){
+  // status: idle | connecting | connected | saving | loading | error
+  const [status,setStatus]=useState(()=>DriveService._token?'connected':'idle');
+  const [msg,setMsg]=useState('');
+  const [detail,setDetail]=useState('');
+  const [lastSave,setLastSave]=useState(null);
+  const [lastLoad,setLastLoad]=useState(null);
+  const [gisReady,setGisReady]=useState(false);
+  const [clientIdInput,setClientIdInput]=useState(GOOGLE_CLIENT_ID==='YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com'?'':GOOGLE_CLIENT_ID);
+
+  const clientIdSet = GOOGLE_CLIENT_ID !== 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com' && GOOGLE_CLIENT_ID.includes('.apps.googleusercontent.com');
+  const isHttps = typeof window!=='undefined' && (window.location.protocol==='https:' || window.location.hostname==='localhost');
+  const busy = status==='connecting'||status==='saving'||status==='loading';
+
+  const saveClientId=()=>{
+    const val=clientIdInput.trim();
+    if(!val||!val.includes('.apps.googleusercontent.com')){toast('Invalid Client ID format','r');return;}
+    GOOGLE_CLIENT_ID=val;
+    try{localStorage.setItem('fm_google_client_id',val);}catch{}
+    DriveService._initPromise=null;DriveService._client=null;
+    DriveService.init(true).then(res=>{setGisReady(res.ok);if(!res.ok)setDetail(res.error||'');});
+    toast('Client ID saved','g');
+  };
+
+  /* Initialise GIS on mount */
+  useEffect(()=>{
+    if(!clientIdSet) return;
+    DriveService.init().then(res=>{
+      setGisReady(res.ok);
+      if(!res.ok) setDetail(res.error||'GIS failed to load');
+      if(res.ok && DriveService._token){
+        setStatus('connected');
+        setMsg(res.restored
+          ? '✓ Reconnected automatically. Session restored.'
+          : 'Session token still active from earlier this session.');
+      }
+    });
+  },[]);
+
+  const ts=()=>new Date().toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+
+  /* Connect */
+  const connect=async()=>{
+    if(!clientIdSet){setStatus('error');setMsg('Google Client ID not configured. See setup checklist below.');return;}
+    if(!isHttps){setStatus('error');setMsg('Google login requires HTTPS. Open from GitHub Pages or localhost.');return;}
+    if(!gisReady){setStatus('error');setMsg('Google Identity Services not loaded yet. Wait 3 seconds and try again.');return;}
+    setStatus('connecting'); setMsg('Google sign-in window is opening…'); setDetail('');
+    try{
+      await DriveService.getToken();
+      setStatus('connected'); setMsg('Signed in successfully. You can now Save or Load.');
+    }catch(e){
+      setStatus('error');
+      setMsg('Sign-in failed or was cancelled.');
+      setDetail(e.message);
+    }
+  };
+
+  /* Save */
+  const save=async()=>{
+    if(!DriveService._token){await connect(); if(!DriveService._token) return;}
+    setStatus('saving'); setMsg('Uploading to Google Drive…'); setDetail('');
+    try{
+      await DriveService.save(data);
+      const t=ts(); setLastSave(t);
+      setStatus('connected');
+      setMsg(`Saved to Drive > ${DRIVE_FOLDER} > ${DRIVE_FILENAME} · ${t}`);
+      toast('Saved to Google Drive ✓','g');
+    }catch(e){
+      if(e.message==='TOKEN_EXPIRED'){
+        setStatus('idle'); DriveService._token=null;
+        setMsg('Your session expired. Click Connect again, then Save.');
+      }else{
+        setStatus('error'); setMsg('Save failed.'); setDetail(e.message);
+        toast('Drive save failed','r');
+      }
+    }
+  };
+
+  /* Load */
+  const load=async()=>{
+    if(!DriveService._token){await connect(); if(!DriveService._token) return;}
+    setStatus('loading'); setMsg(`Searching in Google Drive > ${DRIVE_FOLDER} > ${DRIVE_FILENAME}…`); setDetail('');
+    try{
+      const result=await DriveService.load();
+      if(result){
+        const driveTime=result.syncedAt?new Date(result.syncedAt):new Date(result.modifiedTime);
+        const localTime=data._lastSyncedAt?new Date(data._lastSyncedAt):null;
+        // Remove sync metadata before comparing
+        const cleanDrive={...result.data};delete cleanDrive._lastSyncedAt;delete cleanDrive._syncSource;
+        const cleanLocal={...data};delete cleanLocal._lastSyncedAt;delete cleanLocal._syncSource;
+
+        if(localTime && localTime > driveTime){
+          // Local is newer, ask user
+          const useLocal=window.confirm(
+            `Your LOCAL data is NEWER than Drive data.\n\nLocal: ${localTime.toLocaleString(CUR.locale)}\nDrive: ${driveTime.toLocaleString(CUR.locale)}\n\nClick OK to keep local (and push to Drive).\nClick Cancel to overwrite local with Drive data.`
+          );
+          if(useLocal){
+            await DriveService.save(data);
+            const t=ts(); setLastSave(t);
+            setStatus('connected');
+            setMsg(`Local data was newer, pushed to Drive at ${t}`);
+            toast('Local data pushed to Drive ✓','g');
+          }else{
+            setData(result.data);
+            const t=ts(); setLastLoad(t);
+            setStatus('connected');
+            setMsg(`Loaded older Drive data · ${t}`);
+            toast('Loaded from Drive ✓','g');
+          }
+        }else{
+          // Drive is newer or same, load it
+          setData(result.data);
+          const t=ts(); setLastLoad(t);
+          setStatus('connected');
+          setMsg(`Loaded from Drive > ${DRIVE_FOLDER} · ${t}${result.syncedAt?' (synced '+new Date(result.syncedAt).toLocaleString(CUR.locale)+')':''}`);
+          toast('Loaded from Google Drive ✓','g');
+        }
+      }else{
+        setStatus('connected');
+        setMsg(`No file found in Drive > ${DRIVE_FOLDER}. Click "Save to Drive" first.`);
+        toast('No file found','x');
+      }
+    }catch(e){
+      if(e.message==='TOKEN_EXPIRED'){
+        setStatus('idle'); DriveService._token=null;
+        setMsg('Session expired. Click Connect again.');
+      }else{
+        setStatus('error'); setMsg('Load failed.'); setDetail(e.message);
+        toast('Drive load failed','r');
+      }
+    }
+  };
+
+  /* Disconnect */
+  const disconnect=()=>{
+    DriveService.disconnect();
+    setStatus('idle'); setMsg('Disconnected from Google Drive.'); setDetail('');
+  };
+
+  const sc={idle:'var(--n400)',connecting:'var(--o)',connected:'var(--g)',saving:'var(--b)',loading:'var(--b)',error:'var(--r)'};
+
+  const DriveLogo=({sz=20})=>(
+    <svg width={sz} height={sz} viewBox="0 0 87.3 78" fill="none" style={{flexShrink:0}}>
+      <path d="M6.6 66.85l3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3L27.5 53H0c0 1.55.4 3.1 1.2 4.5l5.4 9.35z" fill="#0066DA"/>
+      <path d="M43.65 25L29.9 1.2C28.55.4 27 0 25.45 0c-1.55 0-3.1.4-4.45 1.2L7.25 24.6c-.8 1.4-1.2 2.95-1.2 4.5h27.5L43.65 25z" fill="#00AC47"/>
+      <path d="M73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5H60.1l5.8 11.6 7.65 12.2z" fill="#EA4335"/>
+      <path d="M43.65 25L57.4 1.2C56.05.4 54.5 0 52.95 0H34.35c-1.55 0-3.1.4-4.45 1.2L43.65 25z" fill="#00832D"/>
+      <path d="M60.1 53H27.5L13.75 76.8c1.35.8 2.9 1.2 4.45 1.2h50.9c1.55 0 3.1-.4 4.45-1.2L60.1 53z" fill="#2684FC"/>
+      <path d="M73.4 28.5c-.8-1.4-1.95-2.5-3.3-3.3L56.4 1.5 43.65 25l16.45 28H87.3c0-1.55-.4-3.1-1.2-4.5L73.4 28.5z" fill="#FFBA00"/>
+    </svg>
+  );
+
+  return(
+    <div className="page">
+      {/* Header */}
+      <div className="ph">
+        <div>
+          <div className="ptitle" style={{display:'flex',alignItems:'center',gap:10}}>
+            <DriveLogo sz={24}/>Google Drive Sync
+          </div>
+          <div className="psub">Cloud backup · save &amp; load from any device</div>
+        </div>
+        <span style={{fontSize:11.5,fontWeight:700,color:sc[status],background:'var(--n50)',border:'1.5px solid var(--n200)',borderRadius:99,padding:'5px 13px'}}>
+          ● {status.charAt(0).toUpperCase()+status.slice(1)}
+        </span>
+      </div>
+
+      {/* ── Google OAuth Client ID Setup ── */}
+      <div className="card mb3" style={{border:`1.5px solid ${clientIdSet?'var(--g)':'var(--o)'}`}}>
+        <div className="sh mb2"><div className="sh-t"><Ic n="gear" s={14} c="var(--o)"/>Google OAuth 2.0 Client ID</div></div>
+        <div style={{fontSize:12,color:'var(--n500)',marginBottom:10,lineHeight:1.6}}>
+          Generate at <strong>console.cloud.google.com</strong> → APIs &amp; Services → Credentials → OAuth 2.0 Client IDs. For GitHub Pages, add <code style={{background:'rgba(0,0,0,.06)',padding:'1px 5px',borderRadius:3,fontFamily:'var(--m)',fontSize:11}}>https://YOUR-USERNAME.github.io</code> to Authorized JavaScript Origins.
+        </div>
+        <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:10}}>
+          <input value={clientIdInput} onChange={e=>setClientIdInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&saveClientId()} placeholder="xxxxxxxx.apps.googleusercontent.com" style={{flex:1,padding:'9px 13px',border:`1.5px solid ${clientIdSet?'var(--g)':'var(--n200)'}`,borderRadius:'var(--r6)',fontSize:12.5,fontFamily:'var(--m)',color:'var(--n700)',outline:'none',background:'var(--W)'}}/>
+          <button className="btn btn-p btn-sm" onClick={saveClientId} disabled={!clientIdInput.trim()} style={{background:'var(--r)',padding:'8px 16px'}}>Save</button>
+        </div>
+        {/* Status indicators */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+          {[
+            {l:'Client ID configured',ok:clientIdSet},
+            {l:'HTTPS / GitHub Pages',ok:isHttps},
+            {l:'Google Identity Services',ok:gisReady},
+            {l:'Drive connected',ok:status==='connected'},
+          ].map(r=>(
+            <div key={r.l} style={{display:'flex',alignItems:'center',gap:7,padding:'7px 10px',borderRadius:'var(--r6)',background:r.ok?'var(--gl)':'var(--n50)',fontSize:11.5,fontWeight:600,color:r.ok?'var(--gd)':'var(--n400)'}}>
+              {r.ok?'\u2705':'\u274C'} {r.l}
+            </div>
+          ))}
+        </div>
+        {clientIdSet&&!isHttps&&<div className="alert aw mt2" style={{marginBottom:0}}><Ic n="prov" s={13}/><span style={{fontSize:11.5}}>Google OAuth needs HTTPS. Host on GitHub Pages or use localhost.</span></div>}
+      </div>
+
+      {/* ── Connection card ── */}
+      <div className="card mb3" style={{border:`2px solid ${status==='connected'?'var(--g)':status==='error'?'var(--r)':'var(--n200)'}`,transition:'border-color .3s'}}>
+        <div style={{display:'flex',gap:16,alignItems:'flex-start'}}>
+          <div style={{width:52,height:52,borderRadius:13,background:status==='connected'?'var(--g)':status==='error'?'var(--rl)':'var(--n100)',display:'grid',placeItems:'center',flexShrink:0,transition:'background .3s'}}>
+            <DriveLogo sz={26}/>
+          </div>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:5,color:status==='error'?'var(--r)':status==='connected'?'var(--gd)':'var(--n900)'}}>
+              {status==='idle'&&'Not connected'}
+              {status==='connecting'&&'Opening Google sign-in…'}
+              {status==='connected'&&'Connected to Google Drive ✓'}
+              {status==='saving'&&'Saving your data…'}
+              {status==='loading'&&'Loading your data…'}
+              {status==='error'&&'Something went wrong'}
+            </div>
+
+            {/* Status message */}
+            {msg&&(
+              <div className={`alert ${status==='error'?'ae':status==='connected'?'as':'ai'}`} style={{marginBottom:12}}>
+                <Ic n={status==='error'?'x':status==='connected'?'ok':'prov'} s={13}/>
+                <div>
+                  <div style={{fontSize:12.5}}>{msg}</div>
+                  {detail&&<div style={{fontSize:11,marginTop:3,opacity:.7,fontFamily:'monospace'}}>{detail}</div>}
+                </div>
+              </div>
+            )}
+
+            {/* Buttons */}
+            <div style={{display:'flex',gap:9,flexWrap:'wrap'}}>
+              {(status==='idle'||status==='error')&&(
+                <button className="btn btn-p" onClick={connect} disabled={!clientIdSet||!isHttps||busy}>
+                  <DriveLogo sz={13}/>Sign in with Google
+                </button>
+              )}
+              {status==='connected'&&(
+                <>
+                  <button className="btn btn-p" onClick={save} disabled={busy}>
+                    <Ic n="dl" s={13} c="#fff"/>Save to Drive
+                  </button>
+                  <button className="btn btn-s" onClick={load} disabled={busy}>
+                    <Ic n="up" s={13}/>Load from Drive
+                  </button>
+                  <button className="btn btn-g btn-sm" onClick={disconnect} style={{color:'var(--r)'}}>
+                    <Ic n="x" s={12}/>Disconnect
+                  </button>
+                </>
+              )}
+              {busy&&(
+                <button className="btn btn-s" disabled style={{opacity:.55}}>
+                  ⏳ {status==='saving'?'Saving…':status==='loading'?'Loading…':'Connecting…'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Sync Mode Toggle ── */}
+      {status==='connected'&&(
+        <div className="card mb3" style={{border:`1.5px solid ${syncMode==='auto'?'var(--g)':'var(--n200)'}`}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+            <div style={{display:'flex',alignItems:'center',gap:12}}>
+              <div style={{width:40,height:40,borderRadius:10,background:syncMode==='auto'?'var(--gl)':'var(--n100)',display:'grid',placeItems:'center'}}>
+                <Ic n={syncMode==='auto'?'refresh':'cal'} s={18} c={syncMode==='auto'?'var(--g)':'var(--n500)'}/>
+              </div>
+              <div>
+                <div style={{fontWeight:700,fontSize:13}}>Sync Mode: <span style={{color:syncMode==='auto'?'var(--gd)':'var(--n500)'}}>{syncMode==='auto'?'Auto Sync':'Manual'}</span></div>
+                <div style={{fontSize:11.5,color:'var(--n400)',marginTop:1}}>
+                  {syncMode==='auto'
+                    ?'Data auto-syncs to Drive every 5 minutes and when you close the tab. No action needed.'
+                    :'Click "☁ Sync" in the top bar or "Save to Drive" below to push changes manually.'}
+                </div>
+              </div>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <span style={{fontSize:11,color:'var(--n400)',fontWeight:600}}>Manual</span>
+              <div onClick={()=>toggleSyncMode(syncMode==='auto'?'manual':'auto')} style={{width:44,height:24,borderRadius:99,background:syncMode==='auto'?'var(--g)':'var(--n300)',cursor:'pointer',position:'relative',transition:'background .2s',flexShrink:0}}>
+                <div style={{width:18,height:18,borderRadius:99,background:'#fff',position:'absolute',top:3,left:syncMode==='auto'?23:3,transition:'left .2s',boxShadow:'0 1px 3px rgba(0,0,0,.2)'}}/>
+              </div>
+              <span style={{fontSize:11,color:syncMode==='auto'?'var(--gd)':'var(--n400)',fontWeight:600}}>Auto</span>
+            </div>
+          </div>
+          {syncMode==='auto'&&(
+            <div style={{marginTop:10,padding:'8px 12px',background:'var(--gl)',borderRadius:'var(--r6)',fontSize:11.5,color:'var(--gd)',display:'flex',alignItems:'center',gap:6}}>
+              <Ic n="ok" s={12} c="var(--g)"/>Auto-sync active. Changes save to Drive > {DRIVE_FOLDER} every 5 min. Free, no charges.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── File Location ── */}
+      <div className="card mb3" style={{background:'var(--n50)'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <DriveLogo sz={18}/>
+          <div>
+            <div style={{fontSize:11,fontWeight:700,color:'var(--n500)',textTransform:'uppercase',letterSpacing:.5}}>Drive File Location</div>
+            <div style={{fontFamily:'var(--m)',fontSize:12.5,color:'var(--n700)',marginTop:2}}>
+              Google Drive &gt; <span style={{color:'var(--gd)',fontWeight:700}}>{DRIVE_FOLDER}</span> &gt; <span style={{color:'var(--b)'}}>{DRIVE_FILENAME}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Sync timestamps */}
+      {(lastSave||lastLoad)&&(
+        <div className="g2 mb3">
+          <div style={{padding:'12px 16px',background:'var(--gl)',borderRadius:'var(--r12)',border:'1px solid rgba(0,179,134,.2)'}}>
+            <div style={{fontSize:10,color:'var(--gd)',fontWeight:700,textTransform:'uppercase',letterSpacing:.5,marginBottom:4}}>Last Saved to Drive</div>
+            <div style={{fontFamily:'var(--m)',fontSize:13,fontWeight:600}}>{lastSave||'–'}</div>
+          </div>
+          <div style={{padding:'12px 16px',background:'var(--bl)',borderRadius:'var(--r12)',border:'1px solid rgba(37,99,235,.15)'}}>
+            <div style={{fontSize:10,color:'var(--bd)',fontWeight:700,textTransform:'uppercase',letterSpacing:.5,marginBottom:4}}>Last Loaded from Drive</div>
+            <div style={{fontFamily:'var(--m)',fontSize:13,fontWeight:600}}>{lastLoad||'–'}</div>
+          </div>
+        </div>
+      )}
+
+      {/* How it works + schedule */}
+      <div className="g2">
+        <div className="card">
+          <div className="sh mb2"><div className="sh-t"><Ic n="prov" s={14} c="var(--b)"/>How It Works</div></div>
+          {[
+            {n:'1',t:'Paste Client ID',d:'Get a free Google OAuth Client ID from console.cloud.google.com and paste it in the field above.'},
+            {n:'2',t:'Host on GitHub Pages',d:'Upload index.html to a GitHub repo. Enable Pages. Open the https:// URL.'},
+            {n:'3',t:'Sign in & Connect',d:'Click "Sign in with Google". A popup appears. Log in and allow drive.file access.'},
+            {n:'4',t:'Auto or Manual Sync',d:`Toggle Auto to sync every 5 min, or keep Manual and click "☁ Sync". File saves to Drive > ${DRIVE_FOLDER} > ${DRIVE_FILENAME}.`},
+          ].map(s=>(
+            <div key={s.n} style={{display:'flex',gap:11,marginBottom:11,alignItems:'flex-start'}}>
+              <div style={{width:22,height:22,borderRadius:99,background:'var(--g)',color:'#fff',fontSize:10.5,fontWeight:800,display:'grid',placeItems:'center',flexShrink:0,marginTop:1}}>{s.n}</div>
+              <div><div style={{fontWeight:700,fontSize:12.5,marginBottom:1}}>{s.t}</div><div style={{fontSize:11.5,color:'var(--n500)',lineHeight:1.55}}>{s.d}</div></div>
+            </div>
+          ))}
+        </div>
+        <div className="card">
+          <div className="sh mb2"><div className="sh-t"><Ic n="cal" s={14} c="var(--g)"/>Backup Schedule</div></div>
+          {[
+            {freq:'Automatic',c:'tg',action:'Browser localStorage',how:'Every change auto-saved instantly. No action needed.'},
+            {freq:'Toggle',c:syncMode==='auto'?'tg':'to',action:`Google Drive: ${syncMode==='auto'?'AUTO':'MANUAL'}`,how:syncMode==='auto'?'Auto-syncs every 5 min + on tab close. Toggle in top bar.':'Click "☁ Sync" in top bar to push changes. Toggle to Auto in top bar.'},
+            {freq:'Monthly',c:'to',action:'Export JSON file',how:'Data Management → Export JSON. Extra safety net.'},
+          ].map(r=>(
+            <div key={r.freq} style={{padding:'10px 0',borderBottom:'1px solid var(--n50)'}}>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:3}}>
+                <span className={`tag ${r.c}`}>{r.freq}</span>
+                <span style={{fontSize:12.5,fontWeight:600}}>{r.action}</span>
+              </div>
+              <div style={{fontSize:11.5,color:'var(--n400)',paddingLeft:4}}>{r.how}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   PROFILE  (with dynamic period setting)
+══════════════════════════════════════ */
+function PageProfile({data,setData,toast}){
+  const {profile}=data;
+  const [editing,setEditing]=useState(false);
+  const [form,setForm]=useState(profile);
+  // Font is a per-device preference (localStorage only), applied instantly and
+  // independently of the profile "Edit" flow.
+  const FONTS=window.FONTS||{verdana:{label:'Verdana (Default)'}};
+  const fontKeys=Object.keys(FONTS);
+  const [font,setFont]=useState(()=>{try{return localStorage.getItem('fm_font')||'verdana';}catch{return 'verdana';}});
+  const changeFont=k=>{
+    setFont(k);
+    try{localStorage.setItem('fm_font',k);}catch{}
+    if(window.applyFont)window.applyFont(k);
+    toast(`Font: ${FONTS[k]?FONTS[k].label:k}`,'g');
+  };
+  const save=()=>{setData(d=>({...d,profile:form}));setEditing(false);toast('Profile saved','g');};
+  const fields=[{k:'name',l:'Full Name'},{k:'email',l:'Email Address'},{k:'phone',l:'Phone Number'},{k:'pan',l:'Tax ID / PAN'},{k:'currency',l:'Currency',opts:Object.keys(CURRENCIES)},{k:'city',l:'City'},{k:'avatar',l:'Avatar Initials (2 chars)'}];
+  return(
+    <div className="page">
+      <div className="ph"><div><div className="ptitle">User Profile</div><div className="psub">Personal information &amp; period settings</div></div></div>
+      <div className="row">
+        <div style={{width:220,flexShrink:0}}>
+          <div className="card" style={{textAlign:'center',padding:'24px 16px'}}>
+            <div style={{width:64,height:64,background:'linear-gradient(135deg,#667eea,#764ba2)',borderRadius:'50%',display:'grid',placeItems:'center',margin:'0 auto 12px',fontSize:19,fontWeight:800,color:'#fff'}}>{profile.avatar||profile.name[0]}</div>
+            <div style={{fontWeight:800,fontSize:15}}>{profile.name}</div>
+            <div style={{fontSize:11.5,color:'var(--n400)',marginTop:3}}>{profile.email}</div>
+            <div className="div"/>
+            <div className="sr"><span className="sr-l">City</span><span className="sr-v">{profile.city}</span></div>
+            <div className="sr"><span className="sr-l">Currency</span><span className="sr-v">{profile.currency}</span></div>
+          </div>
+        </div>
+        <div className="col card">
+          <div className="sh mb3">
+            <div className="sh-t"><Ic n="user" s={14} c="var(--g)"/>Personal Details</div>
+            {!editing?<button className="btn btn-s btn-sm" onClick={()=>{setForm(profile);setEditing(true);}}><Ic n="edit" s={12}/>Edit</button>
+            :<div style={{display:'flex',gap:7}}><button className="btn btn-p btn-sm" onClick={save}><Ic n="ok" s={12} c="#fff"/>Save</button><button className="btn btn-g btn-sm" onClick={()=>setEditing(false)}>Cancel</button></div>}
+          </div>
+          <div className="f2 mb3">
+            {fields.map(({k,l,opts})=>(
+              <div className="fg" key={k}>
+                <label>{l}</label>
+                {editing
+                  ?(opts
+                    ?<select value={form[k]||'INR'} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))}>
+                       {opts.map(c=><option key={c} value={c}>{CURRENCIES[c].sym.trim()} · {c} · {CURRENCIES[c].name}</option>)}
+                     </select>
+                    :<input value={form[k]||''} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))}/>)
+                  :<div style={{padding:'8px 11px',background:'var(--n50)',borderRadius:'var(--r6)',fontSize:13,color:'var(--n700)',border:'1.5px solid var(--n100)'}}>
+                     {k==='currency'&&CURRENCIES[profile[k]]?`${CURRENCIES[profile[k]].sym.trim()} · ${profile[k]} · ${CURRENCIES[profile[k]].name}`:(profile[k]||'–')}
+                   </div>}
+              </div>
+            ))}
+            <div className="fg" style={{gridColumn:'1 / -1'}}>
+              <div style={{fontSize:11,color:'var(--n400)',lineHeight:1.5}}>
+                Currency is global. It changes the symbol, digit grouping and short-scale
+                (Indian lakh/crore vs thousand/million) everywhere in the app. It does not convert
+                existing amounts; the numbers you have entered stay as they are.
+              </div>
+            </div>
+          </div>
+
+          {/* APPEARANCE: device preference, always editable */}
+          <div style={{marginBottom:16,background:'var(--bl)',border:'1.5px solid rgba(37,99,235,.2)',borderRadius:8,padding:'14px 16px'}}>
+            <div style={{fontWeight:700,fontSize:13,color:'var(--b)',marginBottom:10,display:'flex',alignItems:'center',gap:7}}>🎨 Appearance</div>
+            <div className="f2">
+              <div className="fg">
+                <label>Font Style</label>
+                <select value={font} onChange={e=>changeFont(e.target.value)} style={{fontFamily:'var(--f)'}}>
+                  {fontKeys.map(k=><option key={k} value={k} style={{fontFamily:FONTS[k].stack||'inherit'}}>{FONTS[k].label||k}</option>)}
+                </select>
+              </div>
+              <div className="fg" style={{display:'flex',alignItems:'flex-end'}}>
+                <div style={{fontSize:15,fontWeight:700,color:'var(--n700)'}}>The quick brown fox · 12,345</div>
+              </div>
+            </div>
+            <div style={{fontSize:11,color:'var(--n400)',marginTop:8,lineHeight:1.5}}>
+              Applies instantly across the whole app and is saved to this browser only. Verdana and Calibri
+              use fonts already on your device (no download); Poppins and Google Sans fetch a web font the first
+              time you pick them.
+            </div>
+          </div>
+
+          {/* DYNAMIC PERIOD SECTION */}
+          <div style={{background:'var(--gl)',border:'1.5px solid var(--g)',borderRadius:'var(--r8)',padding:'14px 16px'}}>
+            <div style={{fontWeight:700,fontSize:13,color:'var(--gd)',marginBottom:3,display:'flex',alignItems:'center',gap:7}}><Ic n="cal" s={14} c="var(--g)"/>Budget Period Settings</div>
+            <div style={{fontSize:12,color:'var(--gd)',opacity:.8,marginBottom:12}}>All charts, P&L, and Budget pages use this period. Change anytime. Not locked to a financial year.</div>
+            <div className="f2">
+              <div className="fg">
+                <label style={{color:'var(--gd)'}}>Period Start (Month)</label>
+                {editing?<input type="month" value={form.periodStart} onChange={e=>setForm(f=>({...f,periodStart:e.target.value}))} style={{borderColor:'var(--g)'}}/>
+                :<div style={{padding:'8px 11px',background:'#fff',borderRadius:'var(--r6)',fontSize:13,fontWeight:600,color:'var(--gd)',border:'1.5px solid var(--g)'}}>{profile.periodStart}</div>}
+              </div>
+              <div className="fg">
+                <label style={{color:'var(--gd)'}}>Period End (Month)</label>
+                {editing?<input type="month" value={form.periodEnd} onChange={e=>setForm(f=>({...f,periodEnd:e.target.value}))} style={{borderColor:'var(--g)'}}/>
+                :<div style={{padding:'8px 11px',background:'#fff',borderRadius:'var(--r6)',fontSize:13,fontWeight:600,color:'var(--gd)',border:'1.5px solid var(--g)'}}>{profile.periodEnd}</div>}
+              </div>
+            </div>
+            {editing&&(
+              <div style={{marginTop:10,padding:'8px 11px',background:'#fff',borderRadius:'var(--r6)',fontSize:12,color:'var(--gd)',border:'1px solid var(--g)'}}>
+                📅 Active period will be: <strong>{periodLabel(form.periodStart,form.periodEnd)}</strong> ({getPeriodMonths(form.periodStart,form.periodEnd).length} months)
+              </div>
+            )}
+          </div>
+
+          {/* FEATURE MODULES SECTION */}
+          <div style={{marginTop:16,background:'var(--pl)',border:'1.5px solid rgba(124,58,237,.2)',borderRadius:8,padding:'14px 16px'}}>
+            <div style={{fontWeight:700,fontSize:13,color:'var(--p)',marginBottom:12,display:'flex',alignItems:'center',gap:7}}>🔧 Feature Modules</div>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 12px',background:'var(--W)',borderRadius:8,border:'1px solid var(--n100)'}}>
+              <div>
+                <div style={{fontWeight:700,fontSize:13}}>💰 Investment Tracker</div>
+                <div style={{fontSize:11,color:'var(--n400)',marginTop:2}}>Includes: Savings Goals · Investment Tracker · Financial Forecast</div>
+                <div style={{fontSize:10.5,color:'var(--n300)',marginTop:2}}>Turning OFF hides the tabs. Your data is preserved and restored when turned back ON.</div>
+              </div>
+              <button
+                onClick={()=>setData(d=>({...d,profile:{...d.profile,features:{...(d.profile.features||{}),investmentTracker:d.profile.features?.investmentTracker===false?true:false}}}))}
+                style={{padding:'7px 18px',borderRadius:99,fontWeight:700,fontSize:12,flexShrink:0,marginLeft:16,
+                  background:profile.features?.investmentTracker!==false?'var(--g)':'var(--n200)',
+                  color:profile.features?.investmentTracker!==false?'#fff':'var(--n500)',border:'none',cursor:'pointer'}}>
+                {profile.features?.investmentTracker!==false?'● ON':'○ OFF'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function ScoreBar({label,val,max,color}){
+  return(
+    <div style={{marginBottom:10}}>
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:3}}>
+        <span style={{fontSize:12}}>{label}</span>
+        <span style={{fontFamily:'var(--m)',fontSize:11,fontWeight:600,color}}>{val.toFixed(1)}/{max}</span>
+      </div>
+      <div className="prog"><div className="pf" style={{width:`${val/max*100}%`,background:color}}/></div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   CFO DASHBOARD
+══════════════════════════════════════ */
+function PageCFO({data}){
+  const {transactions,accounts,creditCards,loans,budgetLimits,expenseCategories,profile}=data;
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const [sim,setSim]=useState({prepay:0,sip:0,incDelta:0,expDelta:0});
+
+  const f=useFin(data,months);
+  const {bankBal,fdBal,cashBal,liquid,ccLiab,loanOS,provTotal,netWorth,
+    periodTxs,totalInc,totalExp,surplus,savingsRate,
+    daysElapsed,avgDailyBurn:avgDailyBurnRate,burnRate,avgMonthlyInc,avgMonthlyExp,
+    liquidRunway,fundRunway,invPeriod,invCorpus,invGain,invTotal,cashBalance,investRate,liquidNetWorth}=f;
+  const runway=fundRunway;                                       // used for health score & KPI
+  const activeBudget=f.budgetMonthly;
+
+  // Financial Health Score (0-100)
+  // Sub-scores ramp linearly inside each band rather than jumping at the boundary,
+  // so ₹1 either side of break-even no longer swings the total by 15 points.
+  const ramp=(v,lo,hi,pts)=>Math.max(0,Math.min(pts,(v-lo)/(hi-lo)*pts));
+  const scores={
+    savings: Math.min(25,savingsRate>=30?25:ramp(savingsRate,-10,30,25)),
+    runway: Math.min(20,runway>=12?20:ramp(runway,0,12,20)),
+    ccUtil: Math.min(20,(()=>{const tL=creditCards.reduce((s,c)=>s+c.limit,0);const tU=creditCards.reduce((s,c)=>s+c.payable+c.provision,0);const u=tL>0?tU/tL*100:0;return u<=10?20:Math.max(4,20-ramp(u,10,60,16));})()),
+    debtBurden: Math.min(20,(()=>{const monthlyDebt=loans.reduce((s,l)=>s+l.emi,0);const ratio=avgMonthlyInc>0?monthlyDebt/avgMonthlyInc*100:0;return ratio<=15?20:Math.max(3,20-ramp(ratio,15,50,17));})()),
+    // Was a hard cliff: surplus>0 ? 15 : 0. Now scales with how much of income is kept.
+    surplus: totalInc>0?ramp(surplus/totalInc*100,-20,25,15):(surplus>0?15:0),
+  };
+  const healthScore=Math.round(Object.values(scores).reduce((s,v)=>s+v,0));
+  const healthLabel=healthScore>=80?'Excellent':healthScore>=65?'Good':healthScore>=50?'Fair':'Needs Attention';
+  const healthColor=healthScore>=80?'var(--g)':healthScore>=65?'var(--b)':healthScore>=50?'var(--o)':'var(--r)';
+
+  const monthlyTotals=useMemo(()=>months.map((m,i)=>{
+    const inc=f.mInc[i]||0,exp=f.mExp[i]||0,inv=f.mInv[i]||0;
+    return{...m,inc,exp,inv,surplus:inc-exp,cash:inc-exp-inv};
+  }),[months,f.mInc,f.mExp,f.mInv]);
+
+  // ScoreBar defined at module level below
+
+  return(
+    <div className="page">
+      <div className="ph"><div><div className="ptitle">CFO Dashboard</div><div className="psub">Runway · Burn Rate · Savings Rate · Health Score</div></div></div>
+
+      {/* Hero Row */}
+      <div className="g4 mb3">
+        <div className={`kpi-card ${healthScore>=65?'g':'r'}`}>
+          <div className="kpi-ic-wrap">
+            <div className="kpi-ic" style={{background:healthScore>=80?'var(--gl)':healthScore>=65?'var(--bl)':healthScore>=50?'var(--ol)':'var(--rl)'}}>
+              <Ic n="shield" c={healthColor}/>
+            </div>
+            <span style={{fontSize:9.5,fontWeight:700,color:healthColor}}>{healthLabel}</span>
+          </div>
+          <div className="cl">Health Score</div>
+          <div className="cv" style={{fontSize:24,color:healthColor}}>{healthScore}<span style={{fontSize:14,color:'var(--n400)'}}>/100</span></div>
+        </div>
+        <div className="kpi-card g">
+          <div className="kpi-ic-wrap"><div className="kpi-ic" style={{background:'var(--gl)'}}><Ic n="inc" c="var(--g)"/></div></div>
+          <div className="cl">Savings Rate</div>
+          <div className={`cv ${savingsRate>=20?'g':savingsRate>=10?'o':'r'}`} style={{fontSize:22}}>{savingsRate.toFixed(1)}%</div>
+          <div className="cm">Target: ≥20% · Period avg</div>
+        </div>
+        <div className="kpi-card o">
+          <div className="kpi-ic-wrap"><div className="kpi-ic" style={{background:'var(--ol)'}}><Ic n="exp" c="var(--o)"/></div></div>
+          <div className="cl">Avg Daily Burn Rate</div>
+          <div className="cv o" style={{fontSize:18}}>{fmtINR(avgDailyBurnRate,true)}</div>
+          <div className="cm">{daysElapsed}d elapsed · {fmtINR(burnRate,true)}/mo</div>
+        </div>
+        <div className={`kpi-card ${runway>=6?'g':runway>=3?'o':'r'}`}>
+          <div className="kpi-ic-wrap">
+            <div className="kpi-ic" style={{background:runway>=6?'var(--gl)':runway>=3?'var(--ol)':'var(--rl)'}}>
+              <Ic n="cal" c={runway>=6?'var(--g)':runway>=3?'var(--o)':'var(--r)'}/>
+            </div>
+          </div>
+          <div className="cl">Fund Runway</div>
+          <div className={`cv ${runway>=6?'g':runway>=3?'o':'r'}`} style={{fontSize:22}}>{runway>=99?'∞':runway.toFixed(1)}<span style={{fontSize:12,color:'var(--n400)'}}> mo</span></div>
+          <div className="cm">{fmtINR(liquid,true)} liquid + {fmtINR(fdBal,true)} FD · {runway>=6?'Safe':runway>=3?'Moderate':'Critical'}</div>
+          <div style={{fontSize:10,color:'var(--n400)',marginTop:2}}>Liquid only: {liquidRunway>=99?'∞':liquidRunway.toFixed(1)} mo</div>
+        </div>
+      </div>
+
+      <div className="g2 mb3">
+        {/* Health Score Breakdown */}
+        <div className="card">
+          <div className="sh mb3"><div className="sh-t"><Ic n="shield" s={14} c="var(--g)"/>Health Score Breakdown</div>
+            <div style={{fontFamily:'var(--m)',fontSize:22,fontWeight:800,color:healthColor}}>{healthScore}<span style={{fontSize:12,color:'var(--n400)'}}>/100</span></div>
+          </div>
+          <ScoreBar label="Savings Rate (25 pts)" val={scores.savings} max={25} color="var(--g)"/>
+          <ScoreBar label="Fund Runway (20 pts)" val={scores.runway} max={20} color="var(--b)"/>
+          <ScoreBar label="CC Utilization (20 pts)" val={scores.ccUtil} max={20} color="var(--o)"/>
+          <ScoreBar label="Debt Burden (20 pts)" val={scores.debtBurden} max={20} color="var(--p)"/>
+          <ScoreBar label="Period Surplus (15 pts)" val={scores.surplus} max={15} color="var(--g)"/>
+          <div className="div"/>
+          <div style={{fontSize:11.5,color:'var(--n400)',marginBottom:10}}>
+            {healthScore>=80?'✓ Excellent financial health! Keep up the momentum.':healthScore>=65?'✓ Good health. Work on savings rate and reducing CC utilization.':healthScore>=50?'⚠ Fair health. Focus on building emergency fund and reducing debt.':'⚠ Needs attention. Reduce burn rate and pay down high-interest debt.'}
+          </div>
+          {/* Scoring reference table */}
+          <div style={{background:'var(--n50)',borderRadius:'var(--r8)',padding:'10px 12px'}}>
+            <div style={{fontSize:9.5,fontWeight:700,textTransform:'uppercase',letterSpacing:.6,color:'var(--n400)',marginBottom:8}}>Scoring Thresholds</div>
+            {[
+              {l:'Savings Rate',max:25,bands:'Scales −10% → 30%; full marks at ≥30%'},
+              {l:'Fund Runway',max:20,bands:'Scales 0 → 12 months; full marks at ≥12mo'},
+              {l:'CC Utilization',max:20,bands:'Full marks ≤10%; tapers to 4 by 60%'},
+              {l:'Debt Burden (EMI/Inc)',max:20,bands:'Full marks ≤15%; tapers to 3 by 50%'},
+              {l:'Period Surplus',max:15,bands:'Scales −20% → +25% of income'},
+            ].map(t=>(
+              <div key={t.l} style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',padding:'3px 0',borderBottom:'1px solid var(--n100)'}}>
+                <span style={{fontSize:11,color:'var(--n600)',fontWeight:600,minWidth:140}}>{t.l}</span>
+                <span style={{fontSize:9.5,color:'var(--n400)',textAlign:'right',fontFamily:'var(--m)'}}>{t.bands}</span>
+                <span style={{fontSize:10,color:'var(--n500)',marginLeft:8,flexShrink:0}}>/{t.max}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Key Ratios */}
+        <div className="card">
+          <div className="sh mb3"><div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Key Financial Ratios</div></div>
+          {[
+            {l:'Gross Income (Period)',v:fmtINR(totalInc),c:'pos'},
+            {l:'Total Expenses (Period)',v:fmtINR(totalExp),c:'neg'},
+            {l:'Net Surplus',v:fmtINR(surplus),c:surplus>=0?'pos':'neg'},
+            {l:'Less: Invested (Period)',v:fmtINR(invPeriod),c:invPeriod>0?'pos':''},
+            {l:'Balance Cash',v:fmtINR(cashBalance),c:cashBalance>=0?'pos':'neg'},
+            {l:'Savings Rate',v:`${savingsRate.toFixed(2)}%`,c:savingsRate>=20?'pos':'neg'},
+            {l:'Investment Rate',v:`${investRate.toFixed(2)}%`,c:investRate>=10?'pos':''},
+            {l:'Avg Monthly Income',v:fmtINR(avgMonthlyInc,true),c:''},
+            {l:'Avg Daily Burn Rate',v:`${fmtINR(avgDailyBurnRate,true)} (${daysElapsed}d)`,c:'neg'},
+            {l:'Avg Monthly Burn',v:fmtINR(burnRate,true),c:'neg'},
+            {l:'Debt-to-Income (Monthly)',v:`${avgMonthlyInc>0?(loans.reduce((s,l)=>s+l.emi,0)/avgMonthlyInc*100).toFixed(1):0}%`,c:''},
+            {l:'CC Liability / Net Worth',v:`${netWorth>0?(ccLiab/netWorth*100).toFixed(1):0}%`,c:''},
+            {l:'Fund Runway (Liquid + FD)',v:`${runway>=99?'∞':runway.toFixed(1)} months`,c:runway>=6?'pos':runway>=3?'':'neg'},
+            {l:'↳ Liquid-only Runway',v:`${liquidRunway>=99?'∞':liquidRunway.toFixed(1)} months`,c:''},
+            {l:'Investments at Value',v:fmtINR(invCorpus),c:invCorpus>0?'pos':''},
+            {l:'↳ Invested vs Value',v:`${fmtINR(invTotal,true)} → ${fmtINR(invCorpus,true)} (${invGain>=0?'+':'−'}${fmtINR(Math.abs(invGain),true)})`,c:invGain>=0?'pos':'neg'},
+            {l:'Net Worth',v:fmtINR(netWorth),c:netWorth>=0?'pos':'neg'},
+            {l:'↳ Liquid Net Worth',v:fmtINR(liquidNetWorth),c:liquidNetWorth>=0?'pos':'neg'},
+          ].map(r=>(
+            <div key={r.l} className="sr">
+              <span className="sr-l">{r.l}</span>
+              <span className={`sr-v ${r.c}`}>{r.v}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* What-If CFO Simulator */}
+      {(()=>{
+        const simPrepay=Number(sim.prepay)||0;
+        const simSIP=Number(sim.sip)||0;
+        const simIncD=Number(sim.incDelta)||0;
+        const simExpD=Number(sim.expDelta)||0;
+        const simMonthlyInc=avgMonthlyInc+simIncD;
+        const simBurn=Math.max(0,burnRate+simSIP-simExpD);
+        const simRunway=simBurn>0?(liquid+fdBal)/simBurn:99;
+        const simSavRate=simMonthlyInc>0?((simMonthlyInc-simBurn)/simMonthlyInc*100):0;
+        const simLoanOS=Math.max(0,loanOS-simPrepay);
+        const simInterestSaved=loans.reduce((s,l)=>{const share=loanOS>0?(l.outstanding/loanOS)*simPrepay:0;return s+share*(l.roi/100/12)*(l.remaining||0);},0);
+        const simDebtRatio=simMonthlyInc>0?(loans.reduce((s2,l)=>s2+l.emi,0)/simMonthlyInc*100):0;
+        const simScoreSavings=simSavRate>=30?25:simSavRate>=20?20:simSavRate>=10?12:5;
+        const simScoreRunway=simRunway>=12?20:simRunway>=6?14:simRunway>=3?8:2;
+        const simScoreCC=scores.ccUtil;
+        const simScoreDebt=simDebtRatio<=15?20:simDebtRatio<=25?14:simDebtRatio<=35?8:3;
+        const simHealth=simScoreSavings+simScoreRunway+simScoreCC+simScoreDebt+scores.surplus;
+        const dRunway=(simRunway-runway).toFixed(1);
+        const dHealth=simHealth-healthScore;
+        const anyChange=simPrepay||simSIP||simIncD||simExpD;
+        return(
+          <div className="card mb3" style={{border:'1.5px solid var(--bl)',background:'linear-gradient(135deg,#f0f9ff,#eff6ff)'}}>
+            <div className="sh mb3">
+              <div className="sh-t" style={{color:'var(--bd)'}}><Ic n="pnl" s={14} c="var(--b)"/>What-If CFO Simulator</div>
+              {anyChange&&<button className="btn btn-g btn-sm" style={{fontSize:11}} onClick={()=>setSim({prepay:0,sip:0,incDelta:0,expDelta:0})}>Reset</button>}
+            </div>
+            <div className="g2 mb3">
+              <div className="f2">
+                <div className="fg"><label style={{color:'var(--n600)',fontSize:11}}>Loan Prepayment ({CUR.sym} one-time)</label><input type="number" min={0} max={loanOS} step={10000} placeholder="e.g. 100000" value={sim.prepay||''} onChange={e=>setSim(s=>({...s,prepay:e.target.value}))}/></div>
+                <div className="fg"><label style={{color:'var(--n600)',fontSize:11}}>Extra SIP / Month ({CUR.sym})</label><input type="number" min={0} step={500} placeholder="e.g. 5000" value={sim.sip||''} onChange={e=>setSim(s=>({...s,sip:e.target.value}))}/></div>
+                <div className="fg"><label style={{color:'var(--n600)',fontSize:11}}>Monthly Income Change ({CUR.sym} ±)</label><input type="number" step={1000} placeholder="e.g. +10000 or -5000" value={sim.incDelta||''} onChange={e=>setSim(s=>({...s,incDelta:e.target.value}))}/></div>
+                <div className="fg"><label style={{color:'var(--n600)',fontSize:11}}>Monthly Expense Cut ({CUR.sym})</label><input type="number" min={0} step={500} placeholder="e.g. 3000" value={sim.expDelta||''} onChange={e=>setSim(s=>({...s,expDelta:e.target.value}))}/></div>
+              </div>
+              <div>
+                {[
+                  {l:'Fund Runway',cur:`${runway.toFixed(1)} mo`,sim:`${simRunway.toFixed(1)} mo`,delta:dRunway,pos:+dRunway>0},
+                  {l:'Health Score',cur:`${healthScore}/100`,sim:`${simHealth}/100`,delta:(dHealth>=0?'+':'')+dHealth,pos:dHealth>0},
+                  {l:'Savings Rate',cur:`${savingsRate.toFixed(1)}%`,sim:`${simSavRate.toFixed(1)}%`,delta:(simSavRate-savingsRate>=0?'+':'')+(simSavRate-savingsRate).toFixed(1)+'%',pos:simSavRate>savingsRate},
+                  {l:'Interest Saved',cur:'–',sim:simInterestSaved>0?fmtINR(simInterestSaved,true):fmtINR(0),delta:simInterestSaved>0?'saved':'',pos:simInterestSaved>0},
+                ].map(r=>(
+                  <div key={r.l} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 0',borderBottom:'1px solid var(--n100)'}}>
+                    <span style={{fontSize:12.5,color:'var(--n600)',fontWeight:600}}>{r.l}</span>
+                    <div style={{display:'flex',alignItems:'center',gap:10}}>
+                      {anyChange&&<span style={{fontSize:11,color:'var(--n400)',fontFamily:'var(--m)'}}>{r.cur}</span>}
+                      {anyChange&&<span style={{color:'var(--n300)',fontSize:11}}>→</span>}
+                      <span style={{fontSize:13,fontWeight:700,fontFamily:'var(--m)',color:anyChange?(r.pos?'var(--g)':'var(--r)'):'var(--n700)'}}>{r.sim}</span>
+                      {anyChange&&r.delta&&<span style={{fontSize:10.5,fontWeight:700,color:r.pos?'var(--g)':'var(--r)',background:r.pos?'var(--gl)':'var(--rl)',padding:'1px 6px',borderRadius:99}}>{r.delta}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {!anyChange&&<div style={{fontSize:12,color:'var(--n400)',textAlign:'center',padding:'6px 0'}}>Enter values above to see the impact on your financial health.</div>}
+          </div>
+        );
+      })()}
+
+      {/* Monthly Cash Flow Table */}
+      <div className="card">
+        <div className="sh mb2"><div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>Monthly Cash Flow</div></div>
+        <div className="tw">
+          <table>
+            <thead><tr><th>Month</th><th className="num">Income</th><th className="num">Expense</th><th className="num">Surplus/Deficit</th><th className="num">Investments</th><th className="num">Balance Cash</th><th className="num">Savings %</th><th>Cash Flow</th></tr></thead>
+            <tbody>
+              {monthlyTotals.map(m=>(
+                <tr key={m.key}>
+                  <td style={{fontWeight:700}}>{m.label}</td>
+                  <td className="num pos">{fmtINR(m.inc,true)}</td>
+                  <td className="num neg">{fmtINR(m.exp,true)}</td>
+                  <td className={`num ${m.surplus>=0?'pos':'neg'}`}>{fmtINR(m.surplus,true)}</td>
+                  <td className="num" style={{color:'var(--b)'}}>{m.inv?fmtINR(m.inv,true):'–'}</td>
+                  <td className={`num bold ${m.cash>=0?'pos':'neg'}`}>{fmtINR(m.cash,true)}</td>
+                  <td className="num" style={{fontSize:11}}>{m.inc>0?(m.surplus/m.inc*100).toFixed(1):0}%</td>
+                  <td>{m.inc===0&&m.exp===0?<span className="tag tx">No Data</span>:m.surplus>=0?<span className="tag tg">+ve</span>:<span className="tag tr">-ve</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="tft">
+                <td style={{fontWeight:700}}>Period Total</td>
+                <td className="num pos bold">{fmtINR(totalInc,true)}</td>
+                <td className="num neg bold">{fmtINR(totalExp,true)}</td>
+                <td className={`num bold ${surplus>=0?'pos':'neg'}`}>{fmtINR(surplus,true)}</td>
+                <td className="num bold" style={{color:'var(--b)'}}>{fmtINR(invPeriod,true)}</td>
+                <td className={`num bold ${cashBalance>=0?'pos':'neg'}`}>{fmtINR(cashBalance,true)}</td>
+                <td className="num bold">{savingsRate.toFixed(1)}%</td>
+                <td/>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   DEBT OPTIMIZER (renamed from Debt Killer)
+══════════════════════════════════════ */
+function PageDebtOptimizer({data,setData,toast}){
+  const {loans,creditCards,transactions,profile}=data;
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const [strategy,setStrategy]=useState('avalanche');
+
+  const periodTxs=transactions.filter(t=>months.some(m=>m.key===t.month));
+  const totalInc=periodTxs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
+  const totalExp=periodTxs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
+  const avgSurplus=months.length>0?(totalInc-totalExp)/months.length:0;
+
+  // Build debt list: loans + CC billed
+  const debts=[
+    ...loans.map(l=>({id:l.id,name:`${l.bank} – ${l.type}`,outstanding:l.outstanding,roi:l.roi,emi:l.emi,type:'loan',accNo:l.accNo})),
+    ...creditCards.filter(c=>c.payable>0).map(c=>({id:c.id,name:`${c.bank} ${c.type}`,outstanding:c.payable,roi:24,emi:c.payable,type:'cc',accNo:c.accNo})),
+  ];
+
+  // Avalanche: sort by ROI desc (highest interest first = most savings)
+  // Snowball: sort by outstanding asc (smallest first = quick wins)
+  const sorted=[...debts].sort((a,b)=>strategy==='avalanche'?b.roi-a.roi:a.outstanding-b.outstanding);
+
+  const totalOS=debts.reduce((s,d)=>s+d.outstanding,0);
+  const totalEMI=debts.reduce((s,d)=>s+d.emi,0);
+  const totalInterestLeft=debts.reduce((s,d)=>s+Math.max(0,d.emi*12-d.outstanding*0.1),0); // est.
+
+  // Auto EMI calculator
+  const [calcP,setCalcP]=useState('');const [calcR,setCalcR]=useState('');const [calcT,setCalcT]=useState('');
+  const calcEMI=(p,r,t)=>{if(!p||!r||!t)return 0;const mo=r/12/100;if(mo===0)return p/t;return p*mo*Math.pow(1+mo,t)/(Math.pow(1+mo,t)-1);};
+  const emi=calcEMI(+calcP,+calcR,+calcT);
+  const totalPay=emi*calcT;
+  const interest=totalPay-calcP;
+
+  const CAGR=(pv,fv,n)=>n>0?((Math.pow(fv/Math.max(1,pv),1/n)-1)*100):0;
+
+  return(
+    <div className="page">
+      <div className="ph">
+        <div><div className="ptitle">Debt Optimizer</div><div className="psub">Payoff Priority · ROI Analysis · Auto EMI Calculator</div></div>
+        <div className="tgl">
+          <button className={`tgo ${strategy==='avalanche'?'on':''}`} onClick={()=>setStrategy('avalanche')}>Avalanche (ROI)</button>
+          <button className={`tgo ${strategy==='snowball'?'on':''}`} onClick={()=>setStrategy('snowball')}>Snowball (Balance)</button>
+        </div>
+      </div>
+
+      <div className="g4 mb3">
+        <div className="card"><div className="cl">Total Debt O/S</div><div className="cv r">{fmtINR(totalOS,true)}</div><div className="cm">{debts.length} debts</div></div>
+        <div className="card"><div className="cl">Monthly EMI Total</div><div className="cv o">{fmtINR(totalEMI,true)}</div><div className="cm">{fmtINR(totalEMI*12,true)}/year</div></div>
+        <div className="card"><div className="cl">Avg Monthly Surplus</div><div className={`cv ${avgSurplus>=0?'g':'r'}`}>{fmtINR(Math.abs(avgSurplus),true)}</div><div className="cm">Available for extra payments</div></div>
+        <div className="card"><div className="cl">Blended Cost</div><div className="cv b">{totalOS>0?(debts.reduce((s,d)=>s+d.roi*d.outstanding,0)/totalOS).toFixed(2):0}% p.a.</div><div className="cm">Weighted avg ROI</div></div>
+      </div>
+
+      <div className="alert ai mb3"><Ic n="prov" s={13}/>
+        <strong>{strategy==='avalanche'?'Avalanche Strategy':'Snowball Strategy'}:</strong>{' '}
+        {strategy==='avalanche'?'Pay minimums on all debts, throw extra cash at HIGHEST interest rate debt first. Mathematically optimal. Saves the most interest.':'Pay minimums on all debts, throw extra cash at SMALLEST balance first. Psychologically rewarding. Builds momentum.'}
+      </div>
+
+      {/* Priority List */}
+      <div className="card mb3">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="loan" s={14} c="var(--g)"/>Debt Payoff Priority ({strategy==='avalanche'?'Highest ROI First':'Smallest Balance First'})</div>
+        </div>
+        {sorted.length===0?<div style={{textAlign:'center',padding:'20px',color:'var(--n400)',fontSize:12.5}}>No active debts. Debt-free! 🎉</div>:(
+          <div style={{display:'flex',flexDirection:'column',gap:10}}>
+            {sorted.map((d,i)=>{
+              const isFirst=i===0;
+              const monthsToPayoff=d.emi>0?Math.ceil(d.outstanding/d.emi):999;
+              const intCost=(d.outstanding*(d.roi/100/12)*monthsToPayoff);
+              return(
+                <div key={d.id} style={{padding:'14px 16px',border:`2px solid ${isFirst?'var(--g)':'var(--n100)'}`,borderRadius:'var(--r8)',background:isFirst?'var(--gxl)':'var(--W)',position:'relative'}}>
+                  <div style={{display:'flex',alignItems:'flex-start',gap:12}}>
+                    <div className="debt-priority" style={{background:isFirst?'var(--g)':i===1?'var(--o)':'var(--n200)',color:isFirst?'#fff':i===1?'#fff':'var(--n600)',flexShrink:0}}>
+                      #{i+1}
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
+                        <div>
+                          <div style={{fontWeight:700,fontSize:13}}>{d.name}</div>
+                          <div style={{fontSize:10.5,color:'var(--n400)',fontFamily:'var(--m)'}}>{d.accNo} · {d.type==='cc'?'Credit Card':'Loan'}</div>
+                        </div>
+                        <div style={{textAlign:'right'}}>
+                          <div style={{fontFamily:'var(--m)',fontSize:16,fontWeight:700,color:'var(--r)'}}>{fmtINR(d.outstanding,true)}</div>
+                          <div style={{fontSize:10,color:'var(--n400)'}}>outstanding</div>
+                        </div>
+                      </div>
+                      <div className="g4" style={{gap:10}}>
+                        <div><div style={{fontSize:9,color:'var(--n400)',textTransform:'uppercase',fontWeight:600}}>ROI</div><div style={{fontSize:13,fontWeight:700,color:'var(--r)'}}>{d.roi}%</div></div>
+                        <div><div style={{fontSize:9,color:'var(--n400)',textTransform:'uppercase',fontWeight:600}}>EMI/Month</div><div style={{fontSize:13,fontWeight:700}}>{fmtINR(d.emi,true)}</div></div>
+                        <div><div style={{fontSize:9,color:'var(--n400)',textTransform:'uppercase',fontWeight:600}}>Months Left</div><div style={{fontSize:13,fontWeight:700}}>{monthsToPayoff>=999?'∞':monthsToPayoff}</div></div>
+                        <div><div style={{fontSize:9,color:'var(--n400)',textTransform:'uppercase',fontWeight:600}}>Interest Cost</div><div style={{fontSize:13,fontWeight:700,color:'var(--r)'}}>{fmtINR(intCost,true)}</div></div>
+                      </div>
+                      {isFirst&&avgSurplus>0&&(
+                        <div style={{marginTop:10,padding:'8px 10px',background:'var(--gl)',borderRadius:'var(--r6)',fontSize:12,color:'var(--gd)'}}>
+                          💡 With {fmtINR(avgSurplus,true)} surplus/month → Payoff in ~{Math.ceil(d.outstanding/(d.emi+avgSurplus))} months vs {monthsToPayoff} months currently
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* EMI Calculator */}
+      <div className="card">
+        <div className="sh mb3"><div className="sh-t"><Ic n="loan" s={14} c="var(--b)"/>Auto EMI Calculator</div></div>
+        <div className="f3 mb3">
+          <div className="fg"><label>Principal Amount ({CUR.sym})</label><input type="number" placeholder="e.g. 500000" value={calcP} onChange={e=>setCalcP(e.target.value)}/></div>
+          <div className="fg"><label>Annual Interest Rate (%)</label><input type="number" step="0.1" placeholder="e.g. 12.5" value={calcR} onChange={e=>setCalcR(e.target.value)}/></div>
+          <div className="fg"><label>Tenure (months)</label><input type="number" placeholder="e.g. 60" value={calcT} onChange={e=>setCalcT(e.target.value)}/></div>
+        </div>
+        {emi>0&&(
+          <div className="g4" style={{gap:12}}>
+            <div className="card flat" style={{background:'var(--gl)'}}><div className="cl">Monthly EMI</div><div className="cv g" style={{fontSize:18}}>{fmtINR(Math.round(emi))}</div></div>
+            <div className="card flat" style={{background:'var(--rl)'}}><div className="cl">Total Payable</div><div className="cv r" style={{fontSize:18}}>{fmtINR(Math.round(totalPay))}</div></div>
+            <div className="card flat" style={{background:'var(--ol)'}}><div className="cl">Total Interest</div><div className="cv o" style={{fontSize:18}}>{fmtINR(Math.round(interest))}</div></div>
+            <div className="card flat" style={{background:'var(--bl)'}}><div className="cl">Effective Cost</div><div className="cv b" style={{fontSize:18}}>{(interest/+calcP*100).toFixed(1)}%</div></div>
+          </div>
+        )}
+        {!emi&&<div style={{textAlign:'center',padding:'16px',color:'var(--n400)',fontSize:12.5}}>Enter principal, rate, and tenure to calculate EMI</div>}
+      </div>
+    </div>
+  );
+}
+
+
+/* ══════════════════════════════════════
+   AI INSIGHTS (powered by Claude API)
+══════════════════════════════════════ */
+function PageAI({data,toast}){
+  const [loading,setLoading]=useState(false);
+  const [result,setResult]=useState('');
+  const [activePrompt,setActivePrompt]=useState(null);
+  const [chatHistory,setChatHistory]=useState([]);
+  const [chatInput,setChatInput]=useState('');
+  const [apiKey,setApiKey]=useState(()=>{try{return localStorage.getItem('fm_ai_key')||'';}catch{return '';}});
+  const [showKey,setShowKey]=useState(false);
+  const [keyStatus,setKeyStatus]=useState(apiKey?'saved':'none'); // none | saved | invalid
+  const [provider,setProvider]=useState(()=>{try{return localStorage.getItem('fm_ai_provider')||'groq';}catch{return 'groq';}});
+  const [geminiModel,setGeminiModel]=useState(()=>{try{return localStorage.getItem('fm_gemini_model')||'gemini-2.0-flash-lite';}catch{return 'gemini-2.0-flash-lite';}});
+  const resultRef=useRef(null);
+  const chatEndRef=useRef(null);
+
+  const saveApiKey=(key)=>{
+    setApiKey(key);
+    if(key.trim()){
+      try{localStorage.setItem('fm_ai_key',key.trim());localStorage.setItem('fm_ai_provider',provider);}catch{}
+      setKeyStatus('saved');
+    }else{
+      try{localStorage.removeItem('fm_ai_key');}catch{}
+      setKeyStatus('none');
+    }
+  };
+  const clearApiKey=()=>{setApiKey('');try{localStorage.removeItem('fm_ai_key');}catch{}setKeyStatus('none');toast('API key removed','x');};
+
+  const isInsideArtifact=(()=>{try{return window.location.origin.includes('claude.ai')||window.location.origin.includes('anthropic');}catch{return false;}})();
+  const hasKey=apiKey.trim().length>10;
+  const canUseAI=isInsideArtifact||hasKey;
+
+  const {transactions,accounts,creditCards,loans,provisions,budgetLimits,expenseCategories,incomeCategories,profile}=data;
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+
+  /* ── Build compact financial summary for AI (token-efficient) ── */
+  const buildContext=()=>{
+    const periodTxs=transactions.filter(t=>months.some(m=>m.key===t.month));
+    const totalInc=periodTxs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
+    const totalExp=periodTxs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
+    const bankBal=accounts.filter(a=>a.type==='bank').reduce((s,a)=>s+a.balance,0);
+    const fdBal=accounts.filter(a=>a.type==='fd').reduce((s,a)=>s+a.balance,0);
+    const cashBal=accounts.filter(a=>a.type==='cash'||a.type==='wallet').reduce((s,a)=>s+a.balance,0);
+    const ccLiab=creditCards.reduce((s,c)=>s+c.payable+c.provision,0);
+    const loanOS=loans.reduce((s,l)=>s+l.outstanding,0);
+    const provTotal=provisions.filter(p=>!p.paid).reduce((s,p)=>s+p.amount,0);
+    const totalEMI=loans.reduce((s,l)=>s+l.emi,0);
+    const totalLimit=creditCards.reduce((s,c)=>s+c.limit,0);
+    const f=n=>Math.round(n);// compact numbers
+    // Canonical engine figures: investments, balance cash and the true net worth.
+    const fin=computeFin(data,months);
+
+    // Top 6 expense cats only
+    const catMap={};periodTxs.filter(t=>t.type==='expense').forEach(t=>{catMap[t.category]=(catMap[t.category]||0)+t.amount;});
+    const topCats=Object.entries(catMap).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([c,v])=>`${c}:${f(v)}(bgt:${f((budgetLimits[c]||0)*months.length)})`).join(',');
+
+    // Income sources
+    const incMap={};periodTxs.filter(t=>t.type==='income').forEach(t=>{incMap[t.category]=(incMap[t.category]||0)+t.amount;});
+    const incCats=Object.entries(incMap).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([c,v])=>`${c}:${f(v)}`).join(',');
+
+    // Monthly P&L (compact)
+    const mBreak=months.map(m=>{
+      const i=periodTxs.filter(t=>t.month===m.key&&t.type==='income').reduce((s,t)=>s+t.amount,0);
+      const e=periodTxs.filter(t=>t.month===m.key&&t.type==='expense').reduce((s,t)=>s+t.amount,0);
+      return i||e?`${m.label}:I${f(i)}/E${f(e)}`:null;
+    }).filter(Boolean).join('|');
+
+    // Loans compact
+    const loanStr=loans.map(l=>`${l.bank}(${l.type}):OS${f(l.outstanding)},EMI${f(l.emi)},ROI${l.roi}%,Rem${l.remaining}mo`).join(';');
+
+    // CC compact
+    const ccStr=creditCards.map(c=>`${c.bank}:Lmt${f(c.limit)},Billed${f(c.payable)},Unbilled${f(c.provision)}${c.dueDate?',Due'+c.dueDate:''}`).join(';');
+
+    return `User:${profile.name}|Period:${months.length}mo(${profile.periodStart} to ${profile.periodEnd})|INR
+BALANCE:Bank${f(bankBal)},Cash${f(cashBal)},FD${f(fdBal)},InvestmentsAtValue${f(fin.invCorpus)},CCDue${f(ccLiab)}(${totalLimit>0?(ccLiab/totalLimit*100).toFixed(0):0}%of${f(totalLimit)}),Loans${f(loanOS)},Prov${f(provTotal)},NW${f(fin.netWorth)}(liquid${f(fin.liquidNetWorth)}+investments${f(fin.invCorpus)})
+P&L:Inc${f(totalInc)},Exp${f(totalExp)},Surplus${f(fin.surplus)},LessInvestedThisPeriod${f(fin.invPeriod)},BalanceCash${f(fin.cashBalance)},SaveRate${fin.savingsRate.toFixed(1)}%,InvestRate${fin.investRate.toFixed(1)}%,AvgMoInc${f(months.length>0?totalInc/months.length:0)},AvgMoExp${f(months.length>0?totalExp/months.length:0)},EMI/mo${f(totalEMI)}
+NOTE:Investments are a transfer, never an expense. They reduce Balance Cash and increase Net Worth as an asset.
+MONTHS:${mBreak||'none'}
+EXP_CATS:${topCats||'none'}
+INC_SRC:${incCats||'none'}
+LOANS:${loanStr||'none'}
+CC:${ccStr||'none'}
+PROV:${provisions.length>0?provisions.slice(0,5).map(p=>`${p.type||p.entity}:${f(p.amount)}`).join(','):'none'}
+MAJOR_CATS:${(data.majorExpenseCategories||[]).join(',')||'none'}
+INVESTMENTS:${(()=>{
+  const allInstrs=(data.goals||[]).flatMap(g=>(g.instruments||[]).map(i=>({...i,goalId:g.id,goalName:g.name})));
+  if(!allInstrs.length)return 'none';
+  const sipFV=(amt,rate,yr)=>{const r2=rate/100/12,n=Math.round(yr*12);return r2===0?amt*n:amt*(((1+r2)**n-1)/r2)*(1+r2);};
+  const totalMo=allInstrs.filter(i=>i.type!=='FD'&&i.type!=='PPF').reduce((s,i)=>s+i.amount,0);
+  const totalCorpus=allInstrs.reduce((s,i)=>s+(i.type==='FD'||i.type==='PPF'?(i.amount||0)*Math.pow(1+(i.returnRate||0)/100,i.years||0):sipFV(i.amount||0,i.returnRate||0,i.years||0)),0);
+  const details=allInstrs.map(i=>`${i.name}(${i.type}@${i.returnRate}%,${i.years}yr,Goal:${i.goalName})`).join(';');
+  return `Total:${f(totalMo)}/mo,CombinedCorpus:${f(totalCorpus)}|${details}`;
+})()}
+INVEST_TXS:${(()=>{
+  const itxs=data.investmentTxs||[];
+  if(!itxs.length)return 'none';
+  const totalInvested=itxs.reduce((s,t)=>s+t.amount,0);
+  const growth=`ValueToday:${f(fin.invCorpus)},Gain:${f(fin.invGain)},ThisPeriod:${f(fin.invPeriod)},`;
+  const byInstr={};itxs.forEach(t=>{const k=t.instrumentId||t.investmentId||'?';byInstr[k]=(byInstr[k]||0)+t.amount;});
+  const allInstrs=(data.goals||[]).flatMap(g=>(g.instruments||[]));
+  return `TotalLogged:${f(totalInvested)},${growth}${Object.entries(byInstr).map(([id,v])=>{const i=allInstrs.find(x=>x.id===id);return `${i?i.name:id}:${f(v)}`;}).join(',')}`;
+})()}
+GOALS:${(()=>{
+  const gs=data.goals||[];
+  if(!gs.length)return 'none';
+  return gs.map(g=>{
+    const pct=g.targetAmount>0?(g.currentAmount/g.targetAmount*100).toFixed(0):0;
+    const instrCount=(g.instruments||[]).length;
+    return `${g.name}:Target${f(g.targetAmount)},Saved${f(g.currentAmount)}(${pct}%)${g.targetDate?',By'+g.targetDate:''}${instrCount?',Instruments:'+instrCount:''}`;
+  }).join('|');
+})()}`.trim();
+  };
+
+  /* ── Call AI API (Anthropic Claude / OpenAI GPT) ── */
+  const callAI=async(userPrompt,isChat=false)=>{
+    if(!canUseAI){toast('Please add an API key first','r');return;}
+    setLoading(true);
+    if(!isChat){setResult('');setActivePrompt(userPrompt);}
+
+    const ctx=buildContext();
+    const systemPrompt=`You are an expert CFO and personal finance advisor analyzing real data from "MiyeeCFO". The data includes income, expenses, loans, credit cards, savings goals, investment plans with projected corpus, and actual investment transaction logs. ${LOCALE_HINT()} Be specific and actionable. Comment on investment plan health (is corpus sufficient for goals? Is return rate realistic?). Identify if savings goals will be met based on linked investments. Suggest reallocation if needed. 4-6 prioritized insights. Celebrate wins before flagging concerns. Format with short paragraphs and bullet points. Never fabricate data not present in the context.`;
+
+    const userMsg=isChat?userPrompt:`Here is my complete financial data:\n\n${ctx}\n\n---\n\nBased on this data, please: ${userPrompt}`;
+    const messages=isChat
+      ?[...chatHistory.map(m=>({role:m.role,content:m.content})),{role:'user',content:userMsg}]
+      :[{role:'user',content:userMsg}];
+
+    try{
+      let text='';
+
+      if(provider==='groq'&&hasKey){
+        // ── Groq API (FREE: uses Llama/Mixtral, very fast) ──
+        const response=await fetch('https://api.groq.com/openai/v1/chat/completions',{
+          method:'POST',
+          headers:{'Content-Type':'application/json','Authorization':`Bearer ${apiKey.trim()}`},
+          body:JSON.stringify({
+            model:'llama-3.3-70b-versatile',
+            max_tokens:1024,
+            messages:[{role:'system',content:systemPrompt+'\n\nFINANCIAL DATA:\n'+ctx},...messages],
+          }),
+        });
+        if(!response.ok){
+          const err=await response.json().catch(()=>({}));
+          throw new Error(err.error?.message||`Groq API error: ${response.status}`);
+        }
+        const d=await response.json();
+        text=d.choices?.[0]?.message?.content?.trim()||'No response received.';
+
+      }else if(provider==='openai'&&hasKey){
+        // ── OpenAI API ──
+        const response=await fetch('https://api.openai.com/v1/chat/completions',{
+          method:'POST',
+          headers:{'Content-Type':'application/json','Authorization':`Bearer ${apiKey.trim()}`},
+          body:JSON.stringify({
+            model:'gpt-4o-mini',
+            max_tokens:1024,
+            messages:[{role:'system',content:systemPrompt+'\n\nFINANCIAL DATA:\n'+ctx},...messages],
+          }),
+        });
+        if(!response.ok){
+          const err=await response.json().catch(()=>({}));
+          throw new Error(err.error?.message||`OpenAI API error: ${response.status}`);
+        }
+        const d=await response.json();
+        text=d.choices?.[0]?.message?.content?.trim()||'No response received.';
+
+      }else if(provider==='gemini'&&hasKey){
+        // ── Google Gemini API (with auto-fallback across models) ──
+        const modelsToTry=[geminiModel,'gemini-2.0-flash-lite','gemini-1.5-flash','gemini-2.0-flash'].filter((v,i,a)=>a.indexOf(v)===i);
+        let lastErr='';
+        for(const model of modelsToTry){
+          try{
+            // Key goes in a header, not the query string. Query params leak into
+            // proxy logs, browser history and Referer headers.
+            const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{
+              method:'POST',
+              headers:{'Content-Type':'application/json','x-goog-api-key':apiKey.trim()},
+              body:JSON.stringify({
+                system_instruction:{parts:[{text:systemPrompt+'\n\nFINANCIAL DATA:\n'+ctx}]},
+                contents:[...messages.map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content}]}))],
+                generationConfig:{maxOutputTokens:1500},
+              }),
+            });
+            if(!response.ok){
+              const err=await response.json().catch(()=>({}));
+              lastErr=err.error?.message||`Gemini ${model} error: ${response.status}`;
+              if(response.status===429||lastErr.includes('quota')||lastErr.includes('RESOURCE_EXHAUSTED')){
+                continue; // try next model
+              }
+              throw new Error(lastErr);
+            }
+            const d=await response.json();
+            text=d.candidates?.[0]?.content?.parts?.map(p=>p.text).join('\n').trim()||'No response received.';
+            // If we used a fallback model, save it as the new default
+            if(model!==geminiModel){setGeminiModel(model);try{localStorage.setItem('fm_gemini_model',model);}catch{}}
+            break;
+          }catch(e){
+            lastErr=e.message;
+            continue;
+          }
+        }
+        if(!text)throw new Error(`All Gemini models exhausted. Last error: ${lastErr}\n\nTip: Your free tier quota may be depleted. Wait 15-60 seconds and retry, or try a different model from the dropdown.`);
+
+      }else{
+        // ── Anthropic Claude API (default: works inside claude.ai artifacts OR with API key) ──
+        const headers={'Content-Type':'application/json'};
+        if(hasKey){
+          headers['x-api-key']=apiKey.trim();
+          headers['anthropic-version']='2023-06-01';
+          headers['anthropic-dangerous-direct-browser-access']='true';
+        }
+        const response=await fetch('https://api.anthropic.com/v1/messages',{
+          method:'POST',
+          headers,
+          body:JSON.stringify({
+            model:'claude-sonnet-4-20250514',
+            max_tokens:1024,
+            system:systemPrompt+'\n\nFINANCIAL DATA:\n'+ctx,
+            messages,
+          }),
+        });
+        if(!response.ok){
+          const err=await response.json().catch(()=>({}));
+          throw new Error(err.error?.message||`Anthropic API error: ${response.status}`);
+        }
+        const d=await response.json();
+        text=d.content?.map(b=>b.type==='text'?b.text:'').join('\n').trim()||'No response received.';
+      }
+
+      if(isChat){
+        setChatHistory(h=>[...h,{role:'user',content:userPrompt},{role:'assistant',content:text}]);
+        setChatInput('');
+        setTimeout(()=>chatEndRef.current?.scrollIntoView({behavior:'smooth'}),100);
+      }else{
+        setResult(text);
+        setTimeout(()=>resultRef.current?.scrollIntoView({behavior:'smooth',block:'start'}),100);
+      }
+      setKeyStatus('saved');
+    }catch(err){
+      const errMsg=`AI Error: ${err.message||'Connection failed'}.\n\nIf you are on GitHub Pages, make sure your API key is correct. For Anthropic keys, CORS may block direct browser calls. Try using OpenAI or Gemini as the provider instead.`;
+      if(isChat){setChatHistory(h=>[...h,{role:'user',content:userPrompt},{role:'assistant',content:errMsg}]);}
+      else{setResult(errMsg);}
+      if(err.message?.includes?.('401')||err.message?.includes?.('invalid'))setKeyStatus('invalid');
+    }
+    setLoading(false);
+  };
+
+  /* ── Pre-built analysis prompts ── */
+  const PROMPTS=[
+    {id:'health',icon:'🏥',label:'Financial Health Check',color:'#7c3aed',bg:'#f5f3ff',desc:'Overall assessment of your finances with a health score breakdown',prompt:'Give me a comprehensive financial health check. Score my finances 0-100 across: savings rate, debt management, liquidity, investment readiness, and expense control. For each dimension, explain what I am doing well and what needs attention. End with a 30-60-90 day action plan.'},
+    {id:'expense',icon:'📊',label:'Expense Deep Dive',color:'#dc2626',bg:'#fef2f2',desc:'Analyze spending patterns, find leaks, and suggest cuts',prompt:`Do a deep-dive analysis of my expenses. Identify: (1) Which categories are over budget and by how much? (2) What are the top 3 areas where I can realistically cut 10-20% spending? (3) Any unusual spending patterns or spikes in specific months? (4) How does my expense structure compare to the ideal 50-30-20 rule? Give specific ${CUR.sym} amounts I could save.`},
+    {id:'income',icon:'💰',label:'Income & Savings Analysis',color:'#059669',bg:'#ecfdf5',desc:'Income stability, savings trajectory, and growth opportunities',prompt:`Analyze my income and savings. Cover: (1) Income stability and diversification: am I too dependent on one source? (2) Monthly savings trend: is it improving or declining? (3) What savings rate should I target and how to get there? (4) At my current savings rate, project my wealth in 1, 3, and 5 years. (5) Suggest 2-3 ways to increase income or optimise tax savings available in my country.`},
+    {id:'debt',icon:'⚡',label:'Debt Strategy',color:'#d97706',bg:'#fffbeb',desc:'Optimal payoff plan for loans and credit cards',prompt:`Create a debt optimization strategy. Analyze: (1) Total debt burden vs income: is it sustainable? (2) Rank my debts by interest cost and suggest avalanche vs snowball approach. (3) Should I prepay any loan? Calculate interest saved with an extra payment. (4) CC utilization impact on credit score. (5) Give me a month-by-month debt freedom timeline.`},
+    {id:'emergency',icon:'🛡️',label:'Emergency Fund Review',color:'#0d9488',bg:'#f0fdfa',desc:'Is your safety net adequate? Gap analysis and action plan',prompt:'Review my emergency fund preparedness. Analyze: (1) How many months of essential expenses can I currently cover? (2) What is the ideal target for my situation? (3) Where should I park the emergency fund (savings account, liquid fund, FD split)? (4) How long will it take to fully fund it at current savings rate? (5) What risks am I exposed to without adequate emergency funds?'},
+    {id:'tax',icon:'📋',label:'Tax Optimization Tips',color:'#1d4ed8',bg:'#eff6ff',desc:'Tax planning strategies for your country',prompt:`Based on my income and expense pattern, suggest tax optimisation strategies. ${TAX_HINT()} Cover: (1) Which deductions or allowances am I likely under-using? (2) Any choice of tax regime or filing status worth reviewing? (3) Reliefs for medical insurance, education loan interest and housing. (4) Tax-advantaged retirement contributions. (5) Estimate potential tax savings with specific amounts.`},
+    {id:'month',icon:'📅',label:'Month-over-Month Trends',color:'#7c3aed',bg:'#f5f3ff',desc:'Compare months, spot trends, and forecast next month',prompt:'Analyze month-over-month trends in my financial data. (1) Which month was best/worst for savings? Why? (2) Are expenses trending up or down? Any seasonal patterns? (3) Income consistency: any gaps or irregularities? (4) Project next month\'s likely income, expense, and surplus based on the trend. (5) What should I watch out for next month?'},
+    {id:'custom',icon:'💬',label:'Ask AI Anything',color:'#475569',bg:'#f8fafc',desc:'Start a conversation with AI about your finances',prompt:null},
+  ];
+
+  const handleChat=()=>{
+    if(!chatInput.trim()||loading)return;
+    callAI(chatInput.trim(),true);
+  };
+
+  /* ── Format AI response with sections ── */
+  const FormatResult=({text})=>{
+    if(!text)return null;
+    // Simple markdown-like formatting
+    const lines=text.split('\n');
+    const elements=[];let key=0;
+    lines.forEach((line)=>{
+      if(line.startsWith('##')){
+        elements.push(<div key={key++} style={{fontSize:14,fontWeight:800,color:'var(--p)',marginTop:16,marginBottom:6,display:'flex',alignItems:'center',gap:6}}>{line.replace(/^#+\s*/,'')}</div>);
+      }else if(line.startsWith('**')&&line.endsWith('**')){
+        elements.push(<div key={key++} style={{fontSize:13,fontWeight:700,color:'var(--n900)',marginTop:12,marginBottom:4}}>{line.replace(/\*\*/g,'')}</div>);
+      }else if(line.startsWith('- ')||line.startsWith('• ')){
+        elements.push(<div key={key++} style={{fontSize:12.5,color:'var(--n700)',paddingLeft:16,position:'relative',marginBottom:3,lineHeight:1.65}}>
+          <span style={{position:'absolute',left:4,color:'var(--p)',fontWeight:700}}>•</span>
+          {line.replace(/^[-•]\s*/,'')}
+        </div>);
+      }else if(line.trim()===''){
+        elements.push(<div key={key++} style={{height:6}}/>);
+      }else{
+        elements.push(<div key={key++} style={{fontSize:12.5,color:'var(--n700)',lineHeight:1.7,marginBottom:2}}>{line}</div>);
+      }
+    });
+    return <div>{elements}</div>;
+  };
+
+  return(
+    <div className="page">
+      <div className="ph">
+        <div>
+          <div className="ptitle" style={{display:'flex',alignItems:'center',gap:10}}>
+            <span style={{background:'linear-gradient(135deg,#7c3aed,#0d9488)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent'}}>AI Insights</span>
+            <span style={{fontSize:10,fontWeight:700,padding:'3px 8px',borderRadius:99,background:'linear-gradient(135deg,#7c3aed,#0d9488)',color:'#fff',letterSpacing:.5}}>BETA</span>
+          </div>
+          <div className="psub">Powered by Claude · Analyzes your real financial data · All processing happens securely</div>
+        </div>
+      </div>
+
+      {/* AI Hero Banner */}
+      <div className="card mb3 ai-card ai-glow" style={{background:'linear-gradient(135deg,#1a1040 0%,#0f172a 40%,#0a2540 100%)',border:'1px solid rgba(124,58,237,.3)',padding:'22px 24px',color:'#fff'}}>
+        <div style={{display:'flex',alignItems:'flex-start',gap:16,position:'relative',zIndex:1}}>
+          <div style={{width:48,height:48,borderRadius:12,background:'linear-gradient(135deg,#7c3aed,#0d9488)',display:'grid',placeItems:'center',flexShrink:0,boxShadow:'0 4px 15px rgba(124,58,237,.4)'}}>
+            <Ic n="ai" s={22} c="#fff"/>
+          </div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:16,fontWeight:800,marginBottom:4}}>Your Personal Finance AI Advisor</div>
+            <div style={{fontSize:12,opacity:.7,lineHeight:1.6}}>
+              Select an analysis below or ask a custom question. The AI reads your actual financial data (income, expenses, loans, credit cards, budget, and provisions) to give you personalized, data-driven insights in the context of your selected currency and country.
+            </div>
+          </div>
+          <div style={{textAlign:'right',flexShrink:0}}>
+            <div style={{fontSize:10,opacity:.5,textTransform:'uppercase',letterSpacing:.5}}>Data Points</div>
+            <div style={{fontFamily:'var(--m)',fontSize:20,fontWeight:800,color:'#a78bfa'}}>{transactions.length+accounts.length+creditCards.length+loans.length}</div>
+            <div style={{fontSize:10,opacity:.4,marginTop:1}}>{months.length} months analyzed</div>
+          </div>
+        </div>
+        <div style={{display:'flex',gap:12,marginTop:16,flexWrap:'wrap',position:'relative',zIndex:1}}>
+          {[
+            {l:'Transactions',v:transactions.length,c:'#6ee7b7'},
+            {l:'Accounts',v:accounts.length,c:'#93c5fd'},
+            {l:'Credit Cards',v:creditCards.length,c:'#fcd34d'},
+            {l:'Loans',v:loans.length,c:'#fca5a5'},
+            {l:'Future Outflows',v:provisions.length,c:'#c4b5fd'},
+          ].map(s=>(
+            <div key={s.l} style={{background:'rgba(255,255,255,.08)',borderRadius:8,padding:'6px 12px',border:'1px solid rgba(255,255,255,.1)'}}>
+              <div style={{fontSize:9,opacity:.5,textTransform:'uppercase',letterSpacing:.5}}>{s.l}</div>
+              <div style={{fontFamily:'var(--m)',fontSize:14,fontWeight:700,color:s.c}}>{s.v}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* API Key Configuration */}
+      <div className="card mb3" style={{border:`1.5px solid ${canUseAI?'var(--g)':keyStatus==='invalid'?'var(--r)':'var(--n200)'}`,transition:'border-color .3s'}}>
+        <div className="sh mb2">
+          <div className="sh-t" style={{color:canUseAI?'var(--gd)':'var(--n700)'}}>
+            <Ic n="gear" s={14} c={canUseAI?'var(--g)':'var(--n500)'}/>
+            AI Configuration
+          </div>
+          <span className={`tag ${canUseAI?'tg':keyStatus==='invalid'?'tr':'tx'}`} style={{fontSize:10}}>
+            {isInsideArtifact?'● Claude.ai Mode':canUseAI?`● ${provider==='openai'?'OpenAI':provider==='gemini'?'Gemini':provider==='groq'?'Groq':'Anthropic'} Connected`:'○ Not Configured'}
+          </span>
+        </div>
+
+        {isInsideArtifact&&(
+          <div className="alert as" style={{marginBottom:0}}>
+            <Ic n="ok" s={13}/>
+            Running inside Claude.ai. AI is available automatically. No API key needed.
+          </div>
+        )}
+
+        {!isInsideArtifact&&(
+          <div>
+            <div style={{fontSize:12.5,color:'var(--n500)',marginBottom:12,lineHeight:1.6}}>
+              To use AI Insights on GitHub Pages or local hosting, add an API key below. Your key is stored only in your browser's localStorage, never sent anywhere except the AI provider.
+            </div>
+
+            {/* Provider Selection */}
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:.6,color:'var(--n500)',marginBottom:6}}>AI Provider</div>
+              <div className="tgl" style={{width:'fit-content'}}>
+                {[
+                  {id:'groq',l:'Groq (Free)',desc:'Completely free'},
+                  {id:'gemini',l:'Google Gemini',desc:'Free tier available'},
+                  {id:'openai',l:'OpenAI GPT',desc:'Requires paid key'},
+                  {id:'anthropic',l:'Claude (Anthropic)',desc:'Requires paid key'},
+                ].map(p=>(
+                  <button key={p.id} className={`tgo ${provider===p.id?'on':''}`} onClick={()=>{setProvider(p.id);try{localStorage.setItem('fm_ai_provider',p.id);}catch{}}} style={{fontSize:11.5}}>
+                    {p.l}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Provider-specific instructions */}
+            <div className="alert ai mb2" style={{marginBottom:10}}>
+              <Ic n="prov" s={13}/>
+              <div style={{fontSize:11.5}}>
+                {provider==='groq'&&<span><strong>Groq (Recommended, Completely Free):</strong> Go to <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style={{color:'var(--bd)',textDecoration:'underline'}}>console.groq.com/keys</a> → Sign up (free) → Create API Key → Paste below. Uses Llama 3.3 70B. No credit card needed. 30 requests/minute free.</span>}
+                {provider==='gemini'&&<span><strong>Google Gemini:</strong> Go to <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style={{color:'var(--bd)',textDecoration:'underline'}}>aistudio.google.com/apikey</a> → Create API Key → Paste below. Note: Free tier may require billing account linked (no charge). If quota errors persist, use Groq instead.</span>}
+                {provider==='openai'&&<span><strong>OpenAI:</strong> Go to <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" style={{color:'var(--bd)',textDecoration:'underline'}}>platform.openai.com/api-keys</a> → Create new key → Paste below. Uses GPT-4o-mini. Requires credits.</span>}
+                {provider==='anthropic'&&<span><strong>Anthropic Claude:</strong> Go to <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" style={{color:'var(--bd)',textDecoration:'underline'}}>console.anthropic.com</a> → API Keys → Create → Paste below. Note: CORS may block browser calls; if it fails, use Groq instead.</span>}
+              </div>
+            </div>
+
+            {/* Gemini Model Selector */}
+            {provider==='gemini'&&(
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:.6,color:'var(--n500)',marginBottom:6}}>Gemini Model</div>
+                <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                  <select value={geminiModel} onChange={e=>{setGeminiModel(e.target.value);try{localStorage.setItem('fm_gemini_model',e.target.value);}catch{}}} style={{padding:'7px 11px',border:'1.5px solid var(--n200)',borderRadius:'var(--r6)',fontSize:12.5,fontFamily:'var(--f)',color:'var(--n700)',outline:'none',background:'var(--W)',minWidth:220}}>
+                    <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash-Lite (Best free tier)</option>
+                    <option value="gemini-1.5-flash">Gemini 1.5 Flash (Stable free tier)</option>
+                    <option value="gemini-2.0-flash">Gemini 2.0 Flash (May need billing)</option>
+                    <option value="gemini-1.5-pro">Gemini 1.5 Pro (Best quality, limited free)</option>
+                  </select>
+                  <span style={{fontSize:10.5,color:'var(--n400)'}}>Auto-fallback: if quota exceeded, tries other models automatically</span>
+                </div>
+              </div>
+            )}
+
+            {/* Key Input */}
+            <div style={{display:'flex',gap:8,alignItems:'center'}}>
+              <div style={{flex:1,position:'relative'}}>
+                <input
+                  type={showKey?'text':'password'}
+                  value={apiKey}
+                  onChange={e=>setApiKey(e.target.value)}
+                  onKeyDown={e=>e.key==='Enter'&&saveApiKey(apiKey)}
+                  placeholder={provider==='gemini'?'AIza...':provider==='groq'?'gsk_...':'sk-...'}
+                  style={{
+                    width:'100%',padding:'9px 70px 9px 13px',border:`1.5px solid ${keyStatus==='invalid'?'var(--r)':keyStatus==='saved'?'var(--g)':'var(--n200)'}`,
+                    borderRadius:'var(--r6)',fontSize:13,fontFamily:'var(--m)',color:'var(--n700)',outline:'none',background:'var(--W)',letterSpacing:showKey?0:2
+                  }}
+                />
+                <button onClick={()=>setShowKey(!showKey)} style={{position:'absolute',right:8,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',cursor:'pointer',fontSize:11,color:'var(--n400)',fontFamily:'var(--f)'}}>
+                  {showKey?'Hide':'Show'}
+                </button>
+              </div>
+              <button className="btn btn-p btn-sm" onClick={()=>saveApiKey(apiKey)} disabled={!apiKey.trim()}>
+                <Ic n="ok" s={12} c="#fff"/>Save Key
+              </button>
+              {hasKey&&<button className="btn btn-d btn-sm" onClick={clearApiKey}><Ic n="del" s={12}/>Clear</button>}
+            </div>
+
+            {keyStatus==='saved'&&hasKey&&<div style={{fontSize:11,color:'var(--gd)',fontWeight:600,marginTop:6,display:'flex',alignItems:'center',gap:5}}><Ic n="ok" s={11} c="var(--gd)"/>Key saved in browser. Ready to use AI.</div>}
+            {keyStatus==='invalid'&&<div style={{fontSize:11,color:'var(--r)',fontWeight:600,marginTop:6,display:'flex',alignItems:'center',gap:5}}><Ic n="x" s={11} c="var(--r)"/>Key seems invalid. Check and try again.</div>}
+
+            <div style={{fontSize:10.5,color:'var(--n400)',marginTop:8,lineHeight:1.5}}>
+              Your key is stored in localStorage only. It is sent directly to {provider==='gemini'?'Google':provider==='groq'?'Groq':provider==='openai'?'OpenAI':'Anthropic'} for processing. We never collect, log, or store your key on any server.
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Analysis Prompt Grid */}
+      <div className="card mb3">
+        <div className="sh mb3"><div className="sh-t"><Ic n="ai" s={14} c="var(--p)"/>Choose an Analysis</div>
+          {activePrompt&&<button className="btn btn-g btn-sm" onClick={()=>{setActivePrompt(null);setResult('');setChatHistory([]);}}>Clear</button>}
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(240px,1fr))',gap:8}}>
+          {PROMPTS.map(p=>(
+            <button key={p.id} className={`ai-prompt-btn ${activePrompt===p.prompt?'active':''}`}
+              onClick={()=>{
+                if(!canUseAI){toast('Please configure an API key above first','r');return;}
+                if(p.id==='custom'){setActivePrompt('custom');setChatHistory([]);setResult('');}
+                else callAI(p.prompt);
+              }}
+              disabled={loading}
+              style={!canUseAI?{opacity:.5,cursor:'not-allowed'}:{}}>
+              <div className="ai-prompt-ic" style={{background:p.bg,fontSize:16}}>{p.icon}</div>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:12.5,marginBottom:1}}>{p.label}</div>
+                <div style={{fontSize:10.5,color:'var(--n400)',fontWeight:400}}>{p.desc}</div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Loading State */}
+      {loading&&!activePrompt?.startsWith?.('custom')&&activePrompt!=='custom'&&(
+        <div className="card mb3" style={{textAlign:'center',padding:'32px'}}>
+          <div style={{width:48,height:48,borderRadius:12,background:'linear-gradient(135deg,var(--pl),var(--tl))',display:'grid',placeItems:'center',margin:'0 auto 12px'}}>
+            <Ic n="ai" s={22} c="var(--p)"/>
+          </div>
+          <div style={{fontWeight:700,fontSize:14,color:'var(--p)',marginBottom:6}}>AI is analyzing your finances...</div>
+          <div style={{fontSize:12,color:'var(--n400)',marginBottom:12}}>Reading {transactions.length} transactions across {months.length} months</div>
+          <div className="ai-typing"><span/><span/><span/></div>
+        </div>
+      )}
+
+      {/* Analysis Result */}
+      {result&&activePrompt!=='custom'&&(
+        <div className="card mb3" ref={resultRef} style={{border:'1.5px solid rgba(124,58,237,.2)'}}>
+          <div className="sh mb3">
+            <div className="sh-t" style={{color:'var(--p)'}}><Ic n="ai" s={14} c="var(--p)"/>AI Analysis Result</div>
+            <div style={{display:'flex',gap:6}}>
+              <button className="btn btn-g btn-sm" onClick={()=>{navigator.clipboard.writeText(result);toast('Copied to clipboard','g');}}><Ic n="dl" s={11}/>Copy</button>
+              <button className="btn btn-g btn-sm" onClick={()=>callAI(activePrompt)} disabled={loading}><Ic n="refresh" s={11}/>Retry</button>
+            </div>
+          </div>
+          <FormatResult text={result}/>
+        </div>
+      )}
+
+      {/* Custom Chat Interface */}
+      {activePrompt==='custom'&&(
+        <div className="card mb3" style={{border:'1.5px solid rgba(124,58,237,.2)',padding:0,overflow:'hidden'}}>
+          <div style={{padding:'14px 18px',borderBottom:'1px solid var(--n100)',display:'flex',alignItems:'center',gap:10}}>
+            <div style={{width:30,height:30,borderRadius:8,background:'linear-gradient(135deg,#7c3aed,#0d9488)',display:'grid',placeItems:'center'}}>
+              <Ic n="ai" s={14} c="#fff"/>
+            </div>
+            <div>
+              <div style={{fontWeight:700,fontSize:13}}>AI Finance Chat</div>
+              <div style={{fontSize:10.5,color:'var(--n400)'}}>Ask anything about your financial data</div>
+            </div>
+            {chatHistory.length>0&&<button className="btn btn-g btn-sm" style={{marginLeft:'auto'}} onClick={()=>setChatHistory([])}>Clear Chat</button>}
+          </div>
+
+          <div style={{padding:'14px 18px',minHeight:200,maxHeight:420,overflowY:'auto',background:'var(--n50)'}}>
+            {chatHistory.length===0&&!loading&&(
+              <div style={{textAlign:'center',padding:'32px 20px',color:'var(--n400)'}}>
+                <div style={{fontSize:28,marginBottom:8}}>💬</div>
+                <div style={{fontSize:13,fontWeight:600,marginBottom:4}}>Ask me anything about your finances</div>
+                <div style={{fontSize:11.5,lineHeight:1.6}}>
+                  Try: "Why did my expenses spike in January?"<br/>
+                  "Can I afford a {fmtINR(50000,true)} vacation next month?"<br/>
+                  "What would happen if I increase my SIP by {fmtINR(5000)}?"
+                </div>
+              </div>
+            )}
+            {chatHistory.map((m,i)=>(
+              <div key={i} className={`ai-msg ${m.role==='user'?'user':'bot'}`}>
+                {m.role==='user'?m.content:<FormatResult text={m.content}/>}
+              </div>
+            ))}
+            {loading&&<div className="ai-msg bot"><div className="ai-typing"><span/><span/><span/></div></div>}
+            <div ref={chatEndRef}/>
+          </div>
+
+          <div className="ai-chat-input">
+            <input placeholder="Ask about your income, expenses, loans, savings..." value={chatInput} onChange={e=>setChatInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleChat()} disabled={loading}/>
+            <button className="btn btn-p btn-sm" onClick={handleChat} disabled={loading||!chatInput.trim()} style={{borderRadius:99,padding:'8px 16px',background:'linear-gradient(135deg,#7c3aed,#0d9488)'}}>
+              {loading?'...':'Send'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Tips */}
+      <div className="card" style={{background:'var(--n50)',border:'1px solid var(--n100)'}}>
+        <div className="sh mb2"><div className="sh-t"><Ic n="prov" s={14} c="var(--n400)"/>How AI Insights Works</div></div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12}}>
+          {[
+            {n:'1',t:'Add Your API Key',d:'Get a free Gemini key or use OpenAI/Anthropic. Key stays in your browser only, never stored on any server.'},
+            {n:'2',t:'Real Numbers, Real Advice',d:'AI reads your actual transactions, balances, budgets, loans, and credit cards, not generic tips.'},
+            {n:'3',t:'Local Context',d:'Tax-saving suggestions, investment planning and EMI optimisation matched to your selected currency and country.'},
+          ].map(s=>(
+            <div key={s.n} style={{display:'flex',gap:10,alignItems:'flex-start'}}>
+              <div style={{width:22,height:22,borderRadius:99,background:'var(--p)',color:'#fff',fontSize:10.5,fontWeight:800,display:'grid',placeItems:'center',flexShrink:0,marginTop:1}}>{s.n}</div>
+              <div><div style={{fontWeight:700,fontSize:12,marginBottom:2,color:'var(--n700)'}}>{s.t}</div><div style={{fontSize:11.5,color:'var(--n400)',lineHeight:1.5}}>{s.d}</div></div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ══════════════════════════════════════
+   INVESTMENT TRACKER
+══════════════════════════════════════ */
+function PageInvestmentTracker({data,setData,toast,setPage}){
+  const itxs=data.investmentTxs||[];
+  // Same engine the Dashboard and P&L use, so the numbers on this page are the numbers there.
+  const finMonths=useMemo(()=>getPeriodMonths(data.profile.periodStart,data.profile.periodEnd),[data.profile.periodStart,data.profile.periodEnd]);
+  const fin=useFin(data,finMonths);
+  const goals=(data.goals||[]).filter(g=>(g.instruments||[]).length>0);
+  const allGoals=data.goals||[];
+
+  const TC={'SIP':'var(--g)','Mutual Fund':'var(--b)','Equity (India)':'var(--b)','Equity (US)':'var(--p)','Crypto':'var(--o)','RD':'var(--t)','FD':'var(--o)','PPF':'var(--p)'};
+  const TBG={'SIP':'var(--gl)','Mutual Fund':'var(--bl)','Equity (India)':'var(--bl)','Equity (US)':'var(--pl)','Crypto':'var(--ol)','RD':'var(--tl)','FD':'var(--ol)','PPF':'var(--pl)'};
+
+  // ── All instruments across goals, with stats ──
+  // Corpus prefers the latest market price you have entered, else a modelled
+  // compound of each logged contribution (see instrValueFromTxs).
+  const allInstrs=goals.flatMap(g=>(g.instruments||[]).map(i=>({...i,goalId:g.id,goalName:g.name,goalColor:g.color})));
+  const instrStats=allInstrs.map(i=>{
+    const txs=itxs.filter(t=>t.instrumentId===i.id);
+    const val=instrValueFromTxs(i,txs);
+    const tm=new Date().toISOString().slice(0,7);
+    const paidThisMonth=txs.some(t=>t.date.slice(0,7)===tm);
+    return{...i,txs,totalInvested:val.invested,corpus:val.value,gain:val.value-val.invested,
+      unitsHeld:val.units,priced:val.priced,paidThisMonth,xirr:xirrFromTxs(txs,val.value)};
+  });
+
+  const totalInvestedAll=instrStats.reduce((s,p)=>s+p.totalInvested,0);
+  const totalCorpusAll=instrStats.reduce((s,p)=>s+p.corpus,0);
+  const totalGainAll=totalCorpusAll-totalInvestedAll;
+  const thisMonthTotal=instrStats.reduce((s,p)=>{const tm=new Date().toISOString().slice(0,7);return s+p.txs.filter(t=>t.date.slice(0,7)===tm).reduce((a,t)=>a+t.amount,0);},0);
+
+  // ── Asset allocation: current value grouped into broad classes ──
+  const ASSET_CLASS={'SIP':'Equity','Mutual Fund':'Equity','Equity (India)':'Equity','Equity (US)':'Equity','Crypto':'Crypto','RD':'Debt','FD':'Debt','PPF':'Debt'};
+  const CLASS_COLOR={'Equity':'#2563eb','Crypto':'#d97706','Debt':'#0d9488','Other':'#7c3aed'};
+  const allocMap={};
+  instrStats.forEach(p=>{if(p.corpus>0){const c=ASSET_CLASS[p.type]||'Other';allocMap[c]=(allocMap[c]||0)+p.corpus;}});
+  const allocRows=Object.entries(allocMap).sort((a,b)=>b[1]-a[1])
+    .map(([cls,val])=>({cls,val,pct:totalCorpusAll>0?val/totalCorpusAll*100:0,color:CLASS_COLOR[cls]||'#7c3aed'}));
+
+  // ── Log Contribution Modal ──
+  const EF={goalId:goals[0]?.id||'',instrumentId:'',amount:'',date:new Date().toISOString().slice(0,10),
+    paymentMode:'NEFT/Bank Transfer',units:'',nav:'',notes:''};
+  const [form,setForm]=useState(EF);
+  const [modal,setModal]=useState(false);
+  const [selGoalFilter,setSelGoalFilter]=useState('all');
+  const ff=v=>setForm(f=>({...f,...v}));
+
+  const selGoal=allGoals.find(g=>g.id===form.goalId);
+  const selInstrList=selGoal?(selGoal.instruments||[]):[];
+  const selInstr=selInstrList.find(i=>i.id===form.instrumentId);
+  const isNAV=selInstr&&isUnitType(selInstr.type);
+
+  const openAdd=(gId,iId)=>{
+    setForm({...EF,goalId:gId||goals[0]?.id||'',instrumentId:iId||''});
+    setModal(true);
+  };
+
+  // ── Update latest price/NAV inline, revaluing the instrument at market ──
+  const [priceEdit,setPriceEdit]=useState(null); // instrId being edited
+  const [priceVal,setPriceVal]=useState('');
+  const savePrice=(goalId,instrId)=>{
+    const px=parseFloat(priceVal);
+    if(!px||isNaN(px)||px<=0){toast('Enter a valid price','r');return;}
+    setData(d=>({...d,goals:d.goals.map(g=>g.id!==goalId?g:{...g,
+      instruments:(g.instruments||[]).map(i=>i.id!==instrId?i:{...i,currentNAV:px,lastNAVDate:new Date().toISOString().slice(0,10)})})}));
+    toast('Latest price updated · value revalued at market','g');
+    setPriceEdit(null);setPriceVal('');
+  };
+
+  const save=()=>{
+    if(!form.goalId||!form.instrumentId||!form.amount){toast('Select goal, instrument & amount','r');return;}
+    const tx={id:uid(),goalId:form.goalId,instrumentId:form.instrumentId,amount:+form.amount,
+      date:form.date,month:form.date.slice(0,7),notes:form.notes||'',
+      paymentMode:form.paymentMode||'NEFT/Bank Transfer',
+      units:isNAV&&form.units?+form.units:0,nav:isNAV&&form.nav?+form.nav:null};
+    // Auto-update goal.currentAmount
+    setData(d=>({...d,
+      investmentTxs:[...(d.investmentTxs||[]),tx],
+      goals:d.goals.map(g=>{
+        if(g.id!==form.goalId)return g;
+        const updInstr=(g.instruments||[]).map(i=>{
+          if(i.id!==form.instrumentId)return i;
+          const newUnits=(i.units||0)+(tx.units||0);
+          const newNav=isNAV&&tx.nav?tx.nav:i.currentNAV;
+          return{...i,units:isNAV?newUnits:i.units,lastBuyNAV:isNAV&&tx.nav?tx.nav:i.lastBuyNAV,
+            currentNAV:isNAV&&tx.nav?newNav:i.currentNAV,
+            lastNAVDate:isNAV&&tx.nav?tx.date:i.lastNAVDate};
+        });
+        return{...g,currentAmount:(g.currentAmount||0)+(+form.amount),instruments:updInstr};
+      })
+    }));
+    setModal(false);
+    toast(`Logged ${fmtINR(+form.amount,true)} · off your surplus, onto your net worth ✓`,'g');
+  };
+  const undoDel=makeUndoDelete(data,setData,toast);
+  const delTx=id=>undoDel('Entry deleted · goal amount not reversed',d=>({...d,investmentTxs:d.investmentTxs.filter(t=>t.id!==id)}));
+
+  const sortedTxs=[...itxs].sort((a,b)=>b.date.localeCompare(a.date));
+  const filtTxs=selGoalFilter==='all'?sortedTxs:sortedTxs.filter(t=>t.goalId===selGoalFilter);
+
+  return(
+    <div className="page">
+      <div className="ph mb3">
+        <div>
+          <div className="ptitle" style={{display:'flex',alignItems:'center',gap:8}}>
+            <div style={{width:32,height:32,borderRadius:9,background:'linear-gradient(135deg,#00b386,#f59e0b)',display:'grid',placeItems:'center',flexShrink:0}}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            </div>
+            Investment Tracker
+          </div>
+          <div className="psub">Log contributions · Auto-updates goal progress · Values SIPs, equity &amp; crypto at latest price</div>
+        </div>
+        {goals.length>0&&<button className="btn btn-p" onClick={()=>openAdd()}><Ic n="plus" s={13} c="#fff"/>Log Contribution</button>}
+      </div>
+
+      {/* ── How a contribution moves through the books ── */}
+      <div className="card mb3 stl-card">
+        <div className="sh mb2">
+          <div className="sh-t"><Ic n="pnl" s={14} c="var(--g)"/>What logging a contribution does</div>
+          <span className="tag tx" style={{fontSize:10}}>{periodLabel(data.profile.periodStart,data.profile.periodEnd)}</span>
+        </div>
+        <div className="stl-row">
+          <div className="stl-main">
+            <div className="stl-val" style={{color:fin.cashBalance>=0?'var(--pos)':'var(--neg)'}}>{fmtINR(fin.cashBalance)}</div>
+            <div className="stl-sub">
+              <strong>Balance Cash</strong> after the {fmtINR(fin.invPeriod,true)} you have invested this period.
+              Every entry below comes off your surplus and is added straight back to <strong>Net Worth</strong> as an
+              asset. Nothing is treated as an expense, so your expense ratios stay honest.
+            </div>
+            <button className="btn btn-s btn-sm" style={{marginTop:10}} onClick={()=>setPage('dashboard')}>
+              <Ic n="home" s={11}/>See it on the Dashboard
+            </button>
+          </div>
+          <div className="stl-calc">
+            {[
+              {l:'Income',v:fin.totalInc,op:null,c:'var(--gd)'},
+              {l:'Expense',v:fin.totalExp,op:'−',c:'var(--neg)'},
+              {l:'Surplus',v:fin.surplus,op:'=',c:fin.surplus>=0?'var(--pos)':'var(--neg)'},
+              {l:'Investments',v:fin.invPeriod,op:'−',c:'var(--p)',note:'this period'},
+              {l:'Balance Cash',v:fin.cashBalance,op:'=',c:fin.cashBalance>=0?'var(--pos)':'var(--neg)',bold:true},
+            ].map(x=>(
+              <React.Fragment key={x.l}>
+                {x.op&&<span className="stl-op" aria-hidden="true">{x.op}</span>}
+                <div className="stl-term">
+                  <div className="stl-term-l">{x.l}</div>
+                  <div className="stl-term-v" style={{color:x.c,fontWeight:x.bold?800:700}}>{fmtINR(x.v,true)}</div>
+                  {x.note&&<div className="stl-term-n">{x.note}</div>}
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+        <div className="stl-foot">
+          <span>Net Worth <strong>{fmtINR(fin.netWorth,true)}</strong> = liquid {fmtINR(fin.liquidNetWorth,true)} + investments {fmtINR(fin.invCorpus,true)}</span>
+          <span>Do not also record these as expenses. That would count the same money twice.</span>
+        </div>
+      </div>
+
+      {/* Gate: no goals with instruments */}
+      {goals.length===0?(
+        <div className="card" style={{textAlign:'center',padding:'40px 20px'}}>
+          <div style={{fontSize:36,marginBottom:10}}>📊</div>
+          <div style={{fontSize:14,fontWeight:700,color:'var(--n600)',marginBottom:6}}>No investment instruments found</div>
+          <div style={{fontSize:12,color:'var(--n400)',marginBottom:16}}>
+            Go to <strong>Savings Goals</strong>, create a goal, and add instruments (SIP / MF / RD / FD / PPF) inside it.
+            Then come back here to log contributions.
+          </div>
+          <button className="btn btn-p" style={{margin:'0 auto'}} onClick={()=>setPage('goals')} aria-label="Go to Savings Goals">→ Go to Savings Goals</button>
+        </div>
+      ):(
+        <>
+        {/* ── Summary tiles ── */}
+        <div className="g4 mb3">
+          {[
+            {l:'Total Invested',v:totalInvestedAll,c:'var(--b)',bg:'var(--bl)',b:'rgba(37,99,235,.15)',sub:`across ${instrStats.filter(p=>p.totalInvested>0).length} instruments`},
+            {l:'Value Today',v:totalCorpusAll,c:'var(--g)',bg:'var(--gl)',b:'rgba(0,179,134,.2)',sub:`${totalGainAll>=0?'+':'−'}${fmtINR(Math.abs(totalGainAll),true)} ${totalGainAll>=0?'gains':'loss'}`,gsub:totalGainAll>=0},
+            {l:'This Month',v:thisMonthTotal,c:'var(--o)',bg:'var(--ol)',b:'rgba(217,119,6,.15)',sub:`${instrStats.filter(p=>!p.paidThisMonth&&p.totalInvested>0).length} pending`},
+            {l:'Instruments',v:allInstrs.length,isCount:true,c:'var(--p)',bg:'var(--pl)',b:'rgba(124,58,237,.15)',sub:`across ${goals.length} goals`},
+          ].map(x=>(
+            <div key={x.l} style={{padding:'14px 16px',borderRadius:10,background:x.bg,border:`1.5px solid ${x.b}`}}>
+              <div style={{fontSize:9.5,fontWeight:700,textTransform:'uppercase',letterSpacing:.5,color:'var(--n500)',marginBottom:6}}>{x.l}</div>
+              <div style={{fontFamily:'var(--m)',fontSize:x.isCount?26:20,fontWeight:800,color:x.c}}>{x.isCount?x.v:fmtINR(x.v,true)}</div>
+              {x.sub&&<div style={{fontSize:10,color:x.gsub?'var(--gd)':'var(--n400)',marginTop:3,fontWeight:x.gsub?700:400}}>{x.sub}</div>}
+            </div>
+          ))}
+        </div>
+
+        {/* ── Asset allocation ── */}
+        {allocRows.length>0&&(
+          <div className="card mb3">
+            <div className="sh mb2">
+              <div className="sh-t"><Ic n="budget" s={14} c="var(--b)"/>Asset Allocation</div>
+              <span className="tag tx" style={{fontSize:10}}>By value today</span>
+            </div>
+            <div style={{display:'flex',gap:20,flexWrap:'wrap',alignItems:'center'}}>
+              <div style={{width:180,flexShrink:0}}>
+                <CJSDoughnut labels={allocRows.map(a=>a.cls)} values={allocRows.map(a=>a.val)} colors={allocRows.map(a=>a.color)} height={170} title="Mix"/>
+              </div>
+              <div style={{flex:1,minWidth:220}}>
+                {allocRows.map(a=>(
+                  <div key={a.cls} style={{marginBottom:10}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+                      <span style={{display:'flex',alignItems:'center',gap:7,fontSize:12.5,fontWeight:600}}>
+                        <span style={{width:9,height:9,borderRadius:2,background:a.color,display:'inline-block'}}/>{a.cls}
+                      </span>
+                      <span style={{fontFamily:'var(--m)',fontSize:12}}>{fmtINR(a.val,true)} · <strong>{a.pct.toFixed(1)}%</strong></span>
+                    </div>
+                    <div className="prog" style={{height:5}}><div className="pf" style={{width:`${a.pct}%`,background:a.color}}/></div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Per-goal sections ── */}
+        {goals.map(g=>{
+          const gInstrs=instrStats.filter(i=>i.goalId===g.id);
+          const gCorpus=gInstrs.reduce((s,i)=>s+i.corpus,0);
+          const gInvested=gInstrs.reduce((s,i)=>s+i.totalInvested,0);
+          // Money-weighted return across every contribution to this goal.
+          const gXirr=xirrFromTxs(gInstrs.flatMap(i=>i.txs),gCorpus);
+          const pct=g.targetAmount>0?Math.min(100,g.currentAmount/g.targetAmount*100):0;
+          return(
+            <div key={g.id} className="card mb3">
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+                <div style={{display:'flex',alignItems:'center',gap:9}}>
+                  <div style={{width:10,height:10,borderRadius:99,background:g.color||'var(--g)',flexShrink:0}}/>
+                  <div style={{fontWeight:800,fontSize:14}}>🎯 {g.name}</div>
+                  <span style={{fontSize:10,color:'var(--n400)'}}>· Saved {fmtINR(g.currentAmount,true)} of {fmtINR(g.targetAmount,true)}</span>
+                </div>
+                <button className="btn btn-s btn-sm" onClick={()=>openAdd(g.id)}><Ic n="plus" s={11}/>Log</button>
+              </div>
+              {/* Goal progress bar */}
+              <div className="prog" style={{height:5,marginBottom:12}}><div className="pf" style={{width:`${pct}%`,background:g.color||'var(--g)'}}/></div>
+              {gInstrs.length===0?(
+                <div style={{fontSize:12,color:'var(--n400)',textAlign:'center',padding:'12px'}}>No instruments in this goal</div>
+              ):(
+                <div className="g2">
+                  {gInstrs.map(p=>{
+                    const investedPct=p.corpus>0?Math.min(100,p.totalInvested/p.corpus*100):100;
+                    const tc=TC[p.type]||'var(--n600)';
+                    const tbg=TBG[p.type]||'var(--n100)';
+                    return(
+                      <div key={p.id} style={{borderRadius:10,border:`1.5px solid ${p.color||'var(--n200)'}33`,overflow:'hidden'}}>
+                        <div style={{padding:'10px 12px',background:`${p.color||'#888'}12`,borderBottom:`1px solid ${p.color||'#888'}22`,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                          <div style={{display:'flex',alignItems:'center',gap:7}}>
+                            <div style={{width:24,height:24,borderRadius:7,background:p.color||'var(--n400)',display:'grid',placeItems:'center',flexShrink:0}}><Ic n="budget" s={11} c="#fff"/></div>
+                            <div>
+                              <div style={{fontSize:12.5,fontWeight:800}}>{p.name}</div>
+                              <div style={{fontSize:9.5,color:'var(--n500)'}}>{fmtINR(p.amount,true)+(p.type==='SIP'?'/mo':'')} · {p.returnRate}% · {p.years}yr</div>
+                            </div>
+                          </div>
+                          <div style={{display:'flex',gap:5}}>
+                            <span style={{fontSize:9,fontWeight:700,color:tc,background:tbg,padding:'2px 6px',borderRadius:99}}>{p.type}</span>
+                            {!p.paidThisMonth&&p.totalInvested>0&&<span style={{fontSize:9,fontWeight:700,color:'var(--r)',background:'var(--rl)',padding:'2px 6px',borderRadius:99}}>⚠ Due</span>}
+                            {p.paidThisMonth&&<span style={{fontSize:9,fontWeight:700,color:'var(--g)',background:'var(--gl)',padding:'2px 6px',borderRadius:99}}>✓ Paid</span>}
+                          </div>
+                        </div>
+                        <div style={{padding:'10px 12px'}}>
+                          {p.totalInvested===0?(
+                            <div style={{textAlign:'center',padding:'8px',color:'var(--n400)',fontSize:11}}>
+                              No contributions yet
+                              <button style={{display:'block',margin:'6px auto 0',fontSize:10,padding:'3px 12px',borderRadius:5,border:'1.5px solid var(--n200)',background:'var(--W)',cursor:'pointer'}} onClick={()=>openAdd(g.id,p.id)}>+ First Contribution</button>
+                            </div>
+                          ):(
+                            <>
+                            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:8}}>
+                              {[
+                                {l:'Invested',v:fmtINR(p.totalInvested,true),c:'var(--n700)'},
+                                {l:p.priced?'Value Today':'Corpus Today',v:fmtINR(p.corpus,true),c:p.color||'var(--g)',bold:true},
+                                {l:p.gain>=0?'Gain':'Loss',v:`${p.gain>=0?'+':'−'}${fmtINR(Math.abs(p.gain),true)}`,c:p.gain>=0?'var(--gd)':'var(--r)',bold:true},
+                                {l:'XIRR',v:p.xirr==null?'–':`${p.xirr>=0?'':'−'}${Math.abs(p.xirr).toFixed(1)}%`,c:p.xirr==null?'var(--n400)':p.xirr>=0?'var(--gd)':'var(--r)',bold:true},
+                                {l:'Entries',v:p.txs.length+' contributions',c:'var(--n500)'},
+                              ].map(x=>(
+                                <div key={x.l} style={{background:'var(--n50)',borderRadius:7,padding:'6px 9px'}}>
+                                  <div style={{fontSize:9,color:'var(--n400)',marginBottom:2}}>{x.l}</div>
+                                  <div style={{fontFamily:'var(--m)',fontSize:11.5,fontWeight:x.bold?800:600,color:x.c}}>{x.v}</div>
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{height:5,borderRadius:99,background:'var(--n200)',overflow:'hidden',display:'flex',marginBottom:4}}>
+                              <div style={{width:`${investedPct}%`,background:(p.color||'#888')+'66'}}/>
+                              <div style={{flex:1,background:p.color||'var(--g)'}}/>
+                            </div>
+                            <div style={{display:'flex',justifyContent:'space-between',fontSize:9,color:'var(--n400)'}}>
+                              <span>Principal {investedPct.toFixed(0)}%</span>
+                              <span style={{color:'var(--gd)',fontWeight:700}}>Gains {(100-investedPct).toFixed(0)}%</span>
+                            </div>
+                            {/* Valuation basis: latest market price where set, else a modelled return */}
+                            {isUnitType(p.type)&&(
+                              priceEdit===p.id?(
+                                <div style={{display:'flex',gap:5,marginTop:7,alignItems:'center'}}>
+                                  <input type="number" autoFocus placeholder={`Latest ${priceLabel(p.type)}`} value={priceVal}
+                                    onChange={e=>setPriceVal(e.target.value)}
+                                    onKeyDown={e=>{if(e.key==='Enter')savePrice(g.id,p.id);if(e.key==='Escape'){setPriceEdit(null);setPriceVal('');}}}
+                                    style={{flex:1,fontSize:11,padding:'4px 8px',fontFamily:'var(--m)'}}/>
+                                  <button className="btn btn-p btn-sm" style={{fontSize:10}} onClick={()=>savePrice(g.id,p.id)}>Save</button>
+                                  <button className="bic" onClick={()=>{setPriceEdit(null);setPriceVal('');}}><Ic n="x" s={11}/></button>
+                                </div>
+                              ):(
+                                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:7,fontSize:9.5}}>
+                                  <span style={{color:'var(--n400)'}}>
+                                    {p.priced
+                                      ? <>Valued at {p.unitsHeld.toLocaleString(CUR.locale)} {unitLabel(p.type).toLowerCase()} × {fmtINR(instrPrice(p))} {priceLabel(p.type)}</>
+                                      : <>Modelled at {p.returnRate}% · add a latest {priceLabel(p.type)} to value at market</>}
+                                  </span>
+                                  <button style={{fontSize:9.5,padding:'2px 8px',borderRadius:5,border:'1.5px solid var(--n200)',background:'var(--W)',cursor:'pointer',fontWeight:600,whiteSpace:'nowrap'}}
+                                    onClick={()=>{setPriceEdit(p.id);setPriceVal(instrPrice(p)?String(instrPrice(p)):'');}}>Update {priceLabel(p.type)}</button>
+                                </div>
+                              )
+                            )}
+                            <button style={{marginTop:7,width:'100%',padding:'5px',borderRadius:6,border:'1.5px solid var(--n200)',background:'var(--W)',fontSize:10.5,cursor:'pointer',fontFamily:'var(--f)',fontWeight:600}} onClick={()=>openAdd(g.id,p.id)}>+ Log Contribution</button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {gInstrs.length>0&&<div style={{marginTop:10,paddingTop:8,borderTop:'1px solid var(--n100)',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:11.5}}>
+                <span style={{color:'var(--n500)'}}>Invested: <strong>{fmtINR(gInvested,true)}</strong></span>
+                <span style={{color:'var(--n500)'}}>XIRR: <strong style={{color:gXirr==null?'var(--n400)':gXirr>=0?'var(--gd)':'var(--r)'}}>{gXirr==null?'–':`${gXirr>=0?'':'−'}${Math.abs(gXirr).toFixed(1)}%`}</strong></span>
+                <span style={{color:'var(--g)',fontWeight:700}}>Corpus: {fmtINR(gCorpus,true)}</span>
+              </div>}
+            </div>
+          );
+        })}
+
+        {/* ── Contribution Log ── */}
+        <div className="card">
+          <div className="sh mb3">
+            <div className="sh-t"><Ic n="pnl" s={13} c="var(--b)"/>Contribution Log</div>
+            <select value={selGoalFilter} onChange={e=>setSelGoalFilter(e.target.value)} style={{fontSize:11,padding:'4px 8px',border:'1.5px solid var(--n200)',borderRadius:6,background:'var(--W)'}}>
+              <option value="all">All Goals</option>
+              {goals.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+          </div>
+          {filtTxs.length===0?(
+            <div style={{textAlign:'center',padding:'20px',color:'var(--n400)',fontSize:12}}>No contributions logged yet</div>
+          ):(
+            <div className="tw">
+              <table>
+                <thead><tr><th>Date</th><th>Goal</th><th>Instrument</th><th className="num">Amount</th><th className="num">Corpus (now)</th><th>Notes</th><th style={{width:40}}>Del</th></tr></thead>
+                <tbody>
+                  {filtTxs.map(tx=>{
+                    const gObj=allGoals.find(g=>g.id===tx.goalId);
+                    const instr=(gObj?.instruments||[]).find(i=>i.id===tx.instrumentId);
+                    const r=(instr?.returnRate||0)/100/12;
+                    const mo=Math.max(0,(Date.now()-new Date(tx.date).getTime())/(86400000*30.44));
+                    const txCorpus=(tx.amount||0)*(r>0?Math.pow(1+r,mo):1);
+                    return(
+                      <tr key={tx.id}>
+                        <td style={{fontFamily:'var(--m)',fontSize:11}}>{tx.date}</td>
+                        <td style={{fontSize:11}}>{gObj?<><span style={{width:7,height:7,borderRadius:99,background:gObj.color||'var(--g)',display:'inline-block',marginRight:5,verticalAlign:'middle'}}/>{gObj.name}</>:'–'}</td>
+                        <td style={{fontSize:11}}>{instr?<><span style={{fontSize:9,fontWeight:700,color:TC[instr.type]||'var(--n500)',background:TBG[instr.type]||'var(--n100)',padding:'1px 5px',borderRadius:4,marginRight:4}}>{instr.type}</span>{instr.name}</>:'–'}</td>
+                        <td className="num" style={{fontFamily:'var(--m)',fontWeight:700}}>{fmtINR(tx.amount,true)}</td>
+                        <td className="num" style={{fontFamily:'var(--m)',color:'var(--g)',fontWeight:700}}>{fmtINR(txCorpus,true)}</td>
+                        <td style={{color:'var(--n400)',fontSize:11}}>{tx.notes||'–'}</td>
+                        <td><button className="bic red" onClick={()=>delTx(tx.id)}><Ic n="del" s={11}/></button></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+        </>
+      )}
+
+      {/* ── Log Contribution Modal ── */}
+      {modal&&(
+        <div className="ov" onClick={()=>setModal(false)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:480}}>
+            <div className="mh"><div style={{fontWeight:700,fontSize:15}}>Log Contribution</div><button className="xb" onClick={()=>setModal(false)}>×</button></div>
+            <div style={{padding:'16px 20px 20px'}}>
+              <div className="f2 mb2">
+                <div className="fg fg-full"><label>Goal *</label>
+                  <select value={form.goalId} onChange={e=>ff({goalId:e.target.value,instrumentId:''})}>
+                    <option value="">Select Goal…</option>
+                    {allGoals.filter(g=>(g.instruments||[]).length>0).map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select>
+                </div>
+                <div className="fg fg-full"><label>Instrument *</label>
+                  <select value={form.instrumentId} onChange={e=>ff({instrumentId:e.target.value,amount:String(selInstrList.find(i=>i.id===e.target.value)?.amount||'')})}>
+                    <option value="">Select Instrument…</option>
+                    {selInstrList.map(i=><option key={i.id} value={i.id}>{i.name} ({i.type} · {fmtINR(i.amount,true)}/mo)</option>)}
+                  </select>
+                </div>
+                <div className="fg"><label>Amount ({CUR.sym}) *</label><input type="number" placeholder="0" value={form.amount} onChange={e=>ff({amount:e.target.value})}/></div>
+                <div className="fg"><label>Date</label><input type="date" value={form.date} onChange={e=>ff({date:e.target.value})}/></div>
+                <div className="fg"><label>Paid From</label>
+                  <select value={form.paymentMode} onChange={e=>ff({paymentMode:e.target.value})}>
+                    {PAYMENT_MODES.filter(m=>m!=='Credit Card').map(m=><option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+                {isNAV&&<>
+                  <div className="fg"><label>{selInstr?unitLabel(selInstr.type):'Units'} Bought</label><input type="number" placeholder="e.g. 12.345" value={form.units} onChange={e=>ff({units:e.target.value})}/></div>
+                  <div className="fg"><label>{selInstr?priceLabel(selInstr.type):'NAV'} at Purchase ({CUR.sym})</label><input type="number" placeholder="e.g. 48.50" value={form.nav} onChange={e=>ff({nav:e.target.value})}/></div>
+                </>}
+                <div className="fg fg-full"><label>Notes</label><input placeholder="e.g. April installment" value={form.notes||''} onChange={e=>ff({notes:e.target.value})}/></div>
+              </div>
+              {selInstr&&form.amount&&+form.amount>0&&<div style={{padding:'9px 12px',background:'var(--gl)',borderRadius:7,marginBottom:12,border:'1px solid rgba(0,179,134,.2)',fontSize:11,color:'var(--gd)'}}>
+                ✓ This contribution will be added to <strong>{selGoal?.name}</strong>'s saved amount automatically.
+              </div>}
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+                <button className="btn" onClick={()=>setModal(false)}>Cancel</button>
+                <button className="btn btn-p" onClick={save}>Log Contribution</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   FINANCIAL FORECAST
+══════════════════════════════════════ */
+function PageForecast({data,toast}){
+  const {transactions,accounts,creditCards,loans,profile,goals}=data;
+  // All instruments from goals (Goal-First Architecture)
+  const allInstrs=(goals||[]).flatMap(g=>(g.instruments||[]).map(i=>({...i,goalId:g.id,goalName:g.name,goalColor:g.color})));
+
+  // ── Days-elapsed averages ──
+  const pMonths=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const pTxs=transactions.filter(t=>pMonths.some(m=>m.key===t.month));
+  const pInc=pTxs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
+  const pExp=pTxs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
+  const fcS=pMonths.length?new Date(pMonths[0].key+'-01'):new Date();
+  const fcE=pMonths.length?new Date(pMonths[pMonths.length-1].key+'-28'):new Date();
+  const fcN=new Date(Math.min(Date.now(),fcE.getTime()));
+  const fcD=Math.max(1,Math.round((fcN-fcS)/86400000));
+  const avgInc=pInc/fcD*30;
+  const avgExp=pExp/fcD*30;
+  const netSav=avgInc-avgExp;
+
+  // ── Liquid NW: matches Dashboard formula ──
+  const _bankBal=accounts.filter(a=>a.type==='bank').reduce((s,a)=>s+(a.balance||0),0);
+  const _cashBal=accounts.filter(a=>a.type==='cash'||a.type==='wallet').reduce((s,a)=>s+(a.balance||0),0);
+  const _fdBal=accounts.filter(a=>a.type==='fd').reduce((s,a)=>s+(a.balance||0),0);
+  const _ccLiab=creditCards.reduce((s,c)=>s+(c.payable||0)+(c.provision||0),0);
+  const _loanOS=loans.reduce((s,l)=>s+(l.outstanding||0),0);
+  const _provTotal=(data.provisions||[]).filter(p=>!p.paid).reduce((s,p)=>s+(p.amount||0),0);
+  const liquidNW=_bankBal+_cashBal+_fdBal-_ccLiab-_loanOS-_provTotal;
+
+  // ── Investment NW from instruments ──
+  const sipFV=(amt,rate,yr)=>{const r=rate/100/12,n=Math.round(yr*12);if(!amt||!yr)return 0;return r===0?amt*n:amt*(((1+r)**n-1)/r)*(1+r);};
+  const instrCurrentVal=(i)=>{
+    if(isUnitType(i.type)&&(i.units||0)>0&&(i.currentNAV||i.lastBuyNAV)){
+      return (i.units||0)*(i.currentNAV||i.lastBuyNAV||0);
+    }
+    if(i.type==='FD'||i.type==='PPF'){return (i.amount||0)*Math.pow(1+(i.returnRate||0)/100,i.years||0);}
+    return sipFV(i.amount||0,i.returnRate||0,i.years||0);
+  };
+  const investmentNW=allInstrs.reduce((s,i)=>s+instrCurrentVal(i),0);
+  const totalNW=liquidNW+investmentNW;
+
+  // ── Loan helpers ──
+  const totalEmi=loans.reduce((s,l)=>s+(l.emi||0),0);
+  const monthlyInt=loans.reduce((s,l)=>s+(l.outstanding||0)*(l.roi||0)/100/12,0);
+  const monthlyPrin=Math.max(0,totalEmi-monthlyInt);
+  const loanEndTimes=loans.filter(l=>l.endDate).map(l=>new Date(l.endDate).getTime());
+  const moDebt=loanEndTimes.length?Math.max(0,Math.ceil((Math.max(...loanEndTimes)-Date.now())/86400000/30)):999;
+
+  // ── Investment totals ──
+  const totalMoInv=allInstrs.filter(i=>i.type!=='FD'&&i.type!=='PPF').reduce((s,i)=>s+(i.amount||0),0);
+  const liquidSav=netSav-totalMoInv;
+
+  // ── FV at projection month ──
+  const fvAt=(inv,mo)=>{
+    const mat=Math.round(inv.years*12),r=(inv.returnRate||0)/100/12;
+    if(mo<=mat){return r===0?(inv.amount||0)*mo:(inv.amount||0)*(((1+r)**mo-1)/r)*(1+r);}
+    return sipFV(inv.amount||0,inv.returnRate||0,inv.years||0)*(1+r)**(mo-mat);
+  };
+
+  // ── Milestones ──
+  // Horizons are measured from TODAY, never anchored to the accounting period.
+  // Anchoring to FY end meant that once the period had elapsed the anchor collapsed
+  // to 1 month, and every "3 / 5 / 10 Years" figure silently became 25 / 49 / 109 months.
+  const fyEnd=pMonths.length?new Date(pMonths[pMonths.length-1].key+'-28'):new Date();
+  const _now=new Date();
+  const moFY=Math.ceil((fyEnd-_now)/86400000/30); // negative once the period has closed
+  const _tDate=mo=>{const d=new Date();d.setMonth(d.getMonth()+mo);return d.toLocaleString('en-IN',{month:'short',year:'2-digit'});};
+  const MS=[
+    {l:'Today',mo:0,c:'var(--n700)'},
+    // Only show the FY-End marker while the period is actually still open.
+    ...(moFY>0?[{l:'FY End',mo:moFY,c:'var(--g)',d:_tDate(moFY)}]:[]),
+    {l:'1 Year',mo:12,c:'var(--g)',d:_tDate(12)},
+    {l:'3 Years',mo:36,c:'var(--b)',d:_tDate(36)},
+    {l:'5 Years',mo:60,c:'var(--b)',d:_tDate(60)},
+    {l:'10 Years',mo:120,c:'var(--p)',d:_tDate(120)},
+  ];
+
+  // ── NW projection WITH compound investments ──
+  const projNW=mo=>{
+    if(mo===0)return totalNW;
+    const liq=liquidSav*mo+totalEmi*Math.max(0,mo-moDebt);
+    const corp=allInstrs.reduce((s,i)=>s+fvAt(i,mo),0);
+    const debt=monthlyPrin*Math.min(mo,moDebt);
+    return totalNW+liq+corp+debt;
+  };
+  // ── Baseline WITHOUT compound investments ──
+  const simNW=mo=>{
+    if(mo===0)return totalNW;
+    return totalNW+netSav*mo+monthlyPrin*Math.min(mo,moDebt)+totalEmi*Math.max(0,mo-moDebt);
+  };
+
+  // ── NAV staleness check (>7 days) ──
+  const staleNavInstrs=allInstrs.filter(i=>(i.type==='SIP'||i.type==='Mutual Fund')&&i.lastNAVDate&&(Date.now()-new Date(i.lastNAVDate))/86400000>7);
+
+  // ── Type meta ──
+  const TC={'SIP':'var(--g)','Mutual Fund':'var(--b)','Equity (India)':'var(--b)','Equity (US)':'var(--p)','Crypto':'var(--o)','RD':'var(--t)','FD':'var(--o)','PPF':'var(--p)'};
+  const TBG={'SIP':'var(--gl)','Mutual Fund':'var(--bl)','Equity (India)':'var(--bl)','Equity (US)':'var(--pl)','Crypto':'var(--ol)','RD':'var(--tl)','FD':'var(--ol)','PPF':'var(--pl)'};
+
+  return(
+    <div className="page">
+      {/* ── Header ── */}
+      <div className="ph mb3">
+        <div>
+          <div className="ptitle" style={{display:'flex',alignItems:'center',gap:8}}>
+            <div style={{width:32,height:32,borderRadius:9,background:'linear-gradient(135deg,#00b386,#2563eb)',display:'grid',placeItems:'center',flexShrink:0}}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+            </div>
+            Financial Forecast
+          </div>
+          <div className="psub">View-only · NW snapshot · Per-goal corpus projections · Horizons measured from today</div>
+        </div>
+        <span className="tag tb" style={{fontSize:10}}>📖 View Only · Edit instruments in Goals tab</span>
+      </div>
+
+      {/* ── NAV stale warning ── */}
+      {staleNavInstrs.length>0&&<div style={{padding:'10px 14px',background:'var(--ol)',border:'1.5px solid var(--o)',borderRadius:8,marginBottom:16,fontSize:11.5,color:'var(--n800)'}}>
+        ⚠ <strong>{staleNavInstrs.length} instrument(s)</strong> have NAV not updated in 7+ days ({staleNavInstrs.map(i=>i.name).join(', ')}). Update NAV in Savings Goals → instrument card.
+      </div>}
+
+      {/* ── Section 1: NW Snapshot ── */}
+      <div className="g3 mb3" style={{gap:12}}>
+        {[
+          {l:'Liquid Net Worth',v:liquidNW,c:'var(--b)',bg:'var(--bl)',b:'rgba(37,99,235,.2)',sub:'Bank+Cash+FD – Loans – CC – Future Outflows',icon:'💳'},
+          {l:'Investment NW',v:investmentNW,c:'var(--g)',bg:'var(--gl)',b:'rgba(0,179,134,.2)',sub:`${allInstrs.length} instruments across ${(goals||[]).filter(g=>(g.instruments||[]).length>0).length} goals`,icon:'📈'},
+          {l:'Total Net Worth',v:totalNW,c:totalNW>=0?'var(--p)':'var(--r)',bg:'var(--pl)',b:'rgba(124,58,237,.2)',sub:'Liquid + Investment NW',icon:'💎'},
+        ].map(x=>(
+          <div key={x.l} style={{padding:'16px 18px',borderRadius:12,background:x.bg,border:`1.5px solid ${x.b}`}}>
+            <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:8}}>
+              <span style={{fontSize:18}}>{x.icon}</span>
+              <div style={{fontSize:9.5,fontWeight:700,textTransform:'uppercase',letterSpacing:.5,color:'var(--n500)'}}>{x.l}</div>
+            </div>
+            <div style={{fontFamily:'var(--m)',fontSize:22,fontWeight:800,color:x.c,letterSpacing:-.4}}>{fmtINR(x.v,true)}</div>
+            <div style={{fontSize:10,color:'var(--n400)',marginTop:4}}>{x.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Section 2: Per-goal corpus summary ── */}
+      {(goals||[]).length>0&&(
+        <div className="card mb3">
+          <div className="sh mb3"><div className="sh-t"><Ic n="budget" s={13} c="var(--g)"/>Goal-wise Corpus Projections</div>
+            <span style={{fontSize:10,color:'var(--n400)'}}>Formula-based at maturity · Edit in Goals tab</span>
+          </div>
+          {(goals||[]).map(g=>{
+            const instrs=g.instruments||[];
+            if(instrs.length===0)return null;
+            const gCorpus=instrs.reduce((s,i)=>{
+              if(i.type==='FD'||i.type==='PPF')return s+(i.amount||0)*Math.pow(1+(i.returnRate||0)/100,i.years||0);
+              return s+sipFV(i.amount||0,i.returnRate||0,i.years||0);
+            },0);
+            const gPrincipal=instrs.reduce((s,i)=>{
+              if(i.type==='FD'||i.type==='PPF')return s+(i.amount||0);
+              return s+(i.amount||0)*(i.years||0)*12;
+            },0);
+            const covPct=g.targetAmount>0?(gCorpus/g.targetAmount*100):0;
+            const pct=g.targetAmount>0?Math.min(100,(g.currentAmount||0)/g.targetAmount*100):0;
+            return(
+              <div key={g.id} style={{padding:'12px 14px',borderRadius:10,border:`1.5px solid ${g.color||'var(--n200)'}33`,marginBottom:10,background:'var(--n50)'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8}}>
+                    <div style={{width:10,height:10,borderRadius:99,background:g.color||'var(--g)',flexShrink:0}}/>
+                    <span style={{fontWeight:800,fontSize:13,color:'var(--n800)'}}>{g.name}</span>
+                    {g.targetDate&&<span style={{fontSize:10,color:'var(--n400)'}}>· by {fmtDate(g.targetDate)}</span>}
+                  </div>
+                  <div style={{textAlign:'right'}}>
+                    <div style={{fontSize:11,fontWeight:700,color:'var(--g)'}}>{fmtINR(gCorpus,true)} corpus</div>
+                    <div style={{fontSize:9.5,color:covPct>=100?'var(--gd)':'var(--o)',fontWeight:700}}>{covPct>=100?'✅ Covers target':covPct.toFixed(0)+'% coverage'}</div>
+                  </div>
+                </div>
+                {/* Saved progress */}
+                <div style={{fontSize:10,color:'var(--n500)',marginBottom:5}}>Saved: {fmtINR(g.currentAmount||0,true)} / {fmtINR(g.targetAmount,true)} ({pct.toFixed(1)}%)</div>
+                <div className="prog" style={{height:5,marginBottom:8}}><div className="pf" style={{width:`${pct}%`,background:g.color||'var(--g)'}}/></div>
+                {/* Instruments */}
+                <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+                  {instrs.map(i=>{
+                    const iCorpus=i.type==='FD'||i.type==='PPF'?(i.amount||0)*Math.pow(1+(i.returnRate||0)/100,i.years||0):sipFV(i.amount||0,i.returnRate||0,i.years||0);
+                    return(
+                      <div key={i.id} style={{flex:1,minWidth:160,padding:'8px 10px',background:'var(--W)',borderRadius:8,border:`1px solid ${i.color||'var(--n200)'}33`}}>
+                        <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:4}}>
+                          <span style={{width:6,height:6,borderRadius:99,background:i.color||'var(--g)',flexShrink:0}}/>
+                          <span style={{fontSize:11.5,fontWeight:700}}>{i.name}</span>
+                          <span style={{fontSize:9,fontWeight:700,color:TC[i.type]||'var(--n500)',background:TBG[i.type]||'var(--n100)',padding:'1px 5px',borderRadius:4}}>{i.type}</span>
+                        </div>
+                        <div style={{fontSize:10,color:'var(--n500)'}}>
+                          {fmtINR(i.amount||0,true)+(i.type==='SIP'?'/mo':'')} · {i.returnRate}% · {i.years}yr
+                        </div>
+                        <div style={{fontFamily:'var(--m)',fontSize:13,fontWeight:800,color:'var(--g)',marginTop:4}}>{fmtINR(iCorpus,true)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{display:'flex',gap:12,marginTop:8,paddingTop:6,borderTop:'1px dashed var(--n100)',fontSize:10.5}}>
+                  <span style={{color:'var(--n500)'}}>Principal: <strong>{fmtINR(gPrincipal,true)}</strong></span>
+                  <span style={{color:'var(--gd)',fontWeight:700}}>Gain: +{fmtINR(gCorpus-gPrincipal,true)}</span>
+                  {g.targetAmount>0&&<span style={{color:covPct>=100?'var(--g)':'var(--o)',fontWeight:700,marginLeft:'auto'}}>Target: {fmtINR(g.targetAmount,true)}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Section 3: NW Trajectory ── */}
+      <div className="card mb3">
+        <div className="sh mb3">
+          <div className="sh-t"><Ic n="budget" s={13} c="var(--b)"/>Net Worth Trajectory · {allInstrs.length>0?'With Compound Investments':'Cash Flow Only'}</div>
+          {allInstrs.length>0&&<span className="tag tg" style={{fontSize:10}}>Compound</span>}
+        </div>
+        <div className="g3" style={{gap:10,marginBottom:allInstrs.length>0?20:0}}>
+          {MS.map(ms=>{
+            const wInv=projNW(ms.mo),wOut=simNW(ms.mo);
+            const bonus=wInv-wOut;
+            const delta=wInv-totalNW;
+            return(
+              <div key={ms.l} style={{borderRadius:12,border:'1.5px solid var(--n100)',padding:'14px 14px 12px',background:'var(--n50)'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:7}}>
+                  <div style={{fontSize:9.5,color:'var(--n500)',fontWeight:700,textTransform:'uppercase',letterSpacing:.5}}>{ms.l}</div>
+                  {ms.d&&<div style={{fontSize:8.5,fontWeight:700,color:ms.c,background:`${ms.c}18`,padding:'1px 6px',borderRadius:99}}>{ms.d}</div>}
+                </div>
+                <div style={{fontFamily:'var(--m)',fontSize:20,fontWeight:800,color:ms.mo===0?'var(--n800)':ms.c,letterSpacing:-.4}}>{fmtINR(wInv,true)}</div>
+                {ms.mo>0&&<div style={{fontSize:11,color:delta>=0?'var(--gd)':'var(--r)',fontWeight:700,marginTop:5}}>{delta>=0?'▲':'▼'} {fmtINR(Math.abs(delta),true)}</div>}
+                {ms.mo>0&&allInstrs.length>0&&bonus>100&&<div style={{fontSize:9.5,color:'var(--g)',marginTop:4,background:'var(--gl)',padding:'2px 7px',borderRadius:5,display:'inline-block',fontWeight:700}}>+{fmtINR(bonus,true)} from compounding</div>}
+              </div>
+            );
+          })}
+        </div>
+        {/* Compound vs Linear comparison */}
+        {allInstrs.length>0&&(
+          <>
+          <div style={{fontSize:9.5,fontWeight:800,textTransform:'uppercase',letterSpacing:.7,color:'var(--n400)',marginBottom:12,display:'flex',alignItems:'center',gap:6}}>
+            <span style={{width:14,height:2,background:'var(--n300)',borderRadius:99,display:'inline-block'}}/>Power of Compound Investing
+            <span style={{width:14,height:2,background:'var(--n300)',borderRadius:99,display:'inline-block'}}/>
+          </div>
+          <div className="tw">
+            <table>
+              <thead>
+                <tr>
+                  <th>Milestone</th>
+                  <th className="num">Without Investing<br/><span style={{fontWeight:400,color:'var(--n400)',fontSize:9}}>linear only</span></th>
+                  <th className="num">With Investments<br/><span style={{fontWeight:400,color:'var(--g)',fontSize:9}}>compound</span></th>
+                  <th className="num">Bonus</th>
+                  <th className="num">Corpus</th>
+                </tr>
+              </thead>
+              <tbody>
+                {MS.filter(m=>m.mo>0).map(ms=>{
+                  const wInv=projNW(ms.mo),wOut=simNW(ms.mo);
+                  const bonus=wInv-wOut;
+                  const corp=allInstrs.reduce((s,i)=>s+fvAt(i,ms.mo),0);
+                  return(
+                    <tr key={ms.l}>
+                      <td style={{fontWeight:700}}>{ms.l}<span style={{fontSize:9,color:'var(--n400)',fontWeight:400}}> ({ms.d})</span></td>
+                      <td className="num" style={{fontFamily:'var(--m)',color:'var(--n500)'}}>{fmtINR(wOut,true)}</td>
+                      <td className="num" style={{fontFamily:'var(--m)',fontWeight:800,color:ms.c}}>{fmtINR(wInv,true)}</td>
+                      <td className="num">{bonus>100?<span style={{color:'var(--gd)',fontWeight:700}}>+{fmtINR(bonus,true)}</span>:'–'}</td>
+                      <td className="num" style={{fontWeight:700,color:'var(--g)'}}>{fmtINR(corp,true)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          </>
+        )}
+      </div>
+
+      {/* Monthly breakdown */}
+      <div className="card">
+        <div className="sh mb3"><div className="sh-t"><Ic n="pnl" s={13} c="var(--b)"/>Monthly Savings Snapshot</div>
+          <span style={{fontSize:10,color:'var(--n400)'}}>Based on {fcD} days of actual data</span>
+        </div>
+        <div className="g3" style={{gap:10}}>
+          {[
+            {l:'Avg Monthly Income',v:avgInc,c:'var(--gd)',bg:'var(--gl)',b:'rgba(0,179,134,.2)'},
+            {l:'Avg Monthly Expenses',v:avgExp,c:'var(--r)',bg:'var(--rl)',b:'rgba(220,38,38,.15)'},
+            {l:'Net Savings / Month',v:netSav,c:netSav>=0?'var(--b)':'var(--r)',bg:netSav>=0?'var(--bl)':'var(--rl)',b:netSav>=0?'rgba(37,99,235,.15)':'rgba(220,38,38,.15)'},
+          ].map(x=>(
+            <div key={x.l} style={{padding:'14px 16px',borderRadius:10,background:x.bg,border:`1.5px solid ${x.b}`}}>
+              <div style={{fontSize:9.5,fontWeight:700,textTransform:'uppercase',letterSpacing:.5,color:'var(--n500)',marginBottom:6}}>{x.l}</div>
+              <div style={{fontFamily:'var(--m)',fontSize:20,fontWeight:800,color:x.c}}>{x.v<0?'-':'+'}{fmtINR(Math.abs(x.v),true)}</div>
+            </div>
+          ))}
+        </div>
+        {totalMoInv>0&&<div style={{marginTop:12,padding:'10px 12px',background:'var(--n50)',borderRadius:8,border:'1px solid var(--n100)',fontSize:11,display:'flex',gap:16,flexWrap:'wrap'}}>
+          <span>💰 Invested/mo: <strong style={{color:'var(--g)'}}>{fmtINR(totalMoInv,true)}</strong></span>
+          <span>💧 Liquid savings: <strong style={{color:liquidSav>=0?'var(--b)':'var(--r)'}}>{fmtINR(Math.abs(liquidSav),true)}</strong></span>
+          <span>📊 Investment ratio: <strong>{netSav>0?(totalMoInv/netSav*100).toFixed(0):0}% of net savings</strong></span>
+        </div>}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   SAVINGS GOALS
+══════════════════════════════════════ */
+function PageGoals({data,setData,toast}){
+  const goals=data.goals||[];
+  const COLORS=['#00b386','#2563eb','#d97706','#7c3aed','#0d9488','#dc2626'];
+  const INV_TYPES=['SIP','Mutual Fund','Equity (India)','Equity (US)','Crypto','RD','FD','PPF'];
+  // SIP/MF FV formula
+  const sipFV=(amt,rate,yr)=>{const r2=rate/100/12,n=Math.round(yr*12);if(!amt||!yr)return 0;return r2===0?amt*n:amt*(((1+r2)**n-1)/r2)*(1+r2);};
+  // Lump-sum FV (for FD/RD/PPF where full corpus sits post-maturity; here we use SIP-FV since contributions are periodic)
+  const getCorpus=(instr)=>{
+    if(!instr.amount||!instr.years)return 0;
+    if(isUnitType(instr.type)||instr.type==='RD'){
+      // If a latest price is on file, value at units × price.
+      if(isUnitType(instr.type)&&(instr.units||0)>0&&(instr.currentNAV||instr.lastBuyNAV)){
+        return (instr.units||0)*(instr.currentNAV||instr.lastBuyNAV||0);
+      }
+      return sipFV(instr.amount,instr.returnRate||0,instr.years);
+    }
+    // FD/PPF: lump-sum compound
+    return instr.amount*(1+instr.returnRate/100)**instr.years;
+  };
+  // Goal form state
+  const ef={name:'',targetAmount:'',currentAmount:'0',targetDate:'',color:'#00b386',notes:'',instruments:[]};
+  const [form,setForm]=useState(ef);
+  const [modal,setModal]=useState(null);
+  // Instrument sub-form inside modal
+  const efi={name:'',type:'SIP',amount:'',returnRate:'12',years:'5',color:'#2563eb',units:'',currentNAV:'',lastBuyNAV:'',lastNAVDate:''};
+  const [instrForm,setInstrForm]=useState(efi);
+  const [instrEdit,setInstrEdit]=useState(null); // null | instrId
+  const [navEditId,setNavEditId]=useState(null);
+  const [navVal,setNavVal]=useState('');
+
+  const open=()=>{setForm(ef);setModal('add');};
+  const openEdit=g=>{
+    setForm({name:g.name,targetAmount:String(g.targetAmount),currentAmount:String(g.currentAmount||0),
+      targetDate:g.targetDate||'',color:g.color||'#00b386',notes:g.notes||'',
+      instruments:(g.instruments||[]).map(i=>({...i}))});
+    setModal({eid:g.id});
+  };
+  const close=()=>{setModal(null);setForm(ef);setInstrForm(efi);setInstrEdit(null);};
+  const save=()=>{
+    if(!form.name||!form.targetAmount)return;
+    const e={name:form.name,targetAmount:+form.targetAmount,currentAmount:+form.currentAmount||0,
+      targetDate:form.targetDate||'',color:form.color,notes:form.notes,instruments:form.instruments||[]};
+    if(modal==='add'){setData(d=>({...d,goals:[...d.goals,{id:uid(),...e}]}));toast('Goal added','g');}
+    else{setData(d=>({...d,goals:d.goals.map(g=>g.id===modal.eid?{...g,...e}:g)}));toast('Goal updated','g');}
+    close();
+  };
+  const undoDel=makeUndoDelete(data,setData,toast);
+  const del=id=>undoDel('Goal deleted',d=>({...d,goals:d.goals.filter(g=>g.id!==id)}));
+
+  // Instrument CRUD inside form
+  const addInstr=()=>{
+    if(!instrForm.name||!instrForm.amount)return;
+    const ni={id:uid(),name:instrForm.name,type:instrForm.type,amount:+instrForm.amount,
+      returnRate:+instrForm.returnRate||0,years:+instrForm.years||1,color:instrForm.color,
+      units:+instrForm.units||0,currentNAV:instrForm.currentNAV?+instrForm.currentNAV:null,
+      lastBuyNAV:instrForm.lastBuyNAV?+instrForm.lastBuyNAV:null,lastNAVDate:instrForm.lastNAVDate||null};
+    if(instrEdit){
+      setForm(f=>({...f,instruments:f.instruments.map(i=>i.id===instrEdit?{...i,...ni,id:i.id}:i)}));
+      toast('Instrument updated','g');
+    } else {
+      setForm(f=>({...f,instruments:[...f.instruments,ni]}));
+      toast('Instrument added','g');
+    }
+    setInstrForm(efi);setInstrEdit(null);
+  };
+  const editInstr=instr=>{
+    setInstrForm({name:instr.name,type:instr.type,amount:String(instr.amount),returnRate:String(instr.returnRate||0),
+      years:String(instr.years||1),color:instr.color||'#2563eb',units:String(instr.units||''),
+      currentNAV:String(instr.currentNAV||''),lastBuyNAV:String(instr.lastBuyNAV||''),lastNAVDate:instr.lastNAVDate||''});
+    setInstrEdit(instr.id);
+  };
+  const delInstr=id=>setForm(f=>({...f,instruments:f.instruments.filter(i=>i.id!==id)}));
+
+  // Update NAV inline on goal card (read mode)
+  const saveNav=(goalId,instrId)=>{
+    const nav=parseFloat(navVal);if(!nav||isNaN(nav))return;
+    setData(d=>({...d,goals:d.goals.map(g=>g.id!==goalId?g:{...g,
+      instruments:(g.instruments||[]).map(i=>i.id!==instrId?i:{...i,currentNAV:nav,lastNAVDate:new Date().toISOString().slice(0,10)})})}));
+    toast('NAV updated','g');setNavEditId(null);setNavVal('');
+  };
+
+  // Summary stats
+  const totalTarget=goals.reduce((s,g)=>s+g.targetAmount,0);
+  const totalSaved=goals.reduce((s,g)=>s+g.currentAmount,0);
+  const totalCorpus=goals.reduce((s,g)=>{
+    const instrCorpus=(g.instruments||[]).reduce((ss,i)=>ss+getCorpus(i),0);
+    return s+instrCorpus;
+  },0);
+  const {transactions:allTxs,profile}=data;
+  const pMonths=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const pTxs=allTxs.filter(t=>pMonths.some(m=>m.key===t.month));
+  const pInc=pTxs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
+  const pExp=pTxs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
+  const gfcStart=pMonths.length>0?new Date(pMonths[0].key+'-01'):new Date();
+  const gfcEnd=pMonths.length>0?new Date(pMonths[pMonths.length-1].key+'-28'):new Date();
+  const gfcNow=new Date(Math.min(Date.now(),gfcEnd.getTime()));
+  const gfcDays=Math.max(1,Math.round((gfcNow-gfcStart)/86400000));
+  const avgSavings=pInc/gfcDays*30 - pExp/gfcDays*30;
+  const getGoalForecast=g=>{
+    const remaining=Math.max(0,g.targetAmount-(g.currentAmount||0));
+    if(remaining<=0)return{status:'complete',label:'✅ Goal Reached!',color:'var(--g)',mn:0};
+    if(avgSavings<=0)return{status:'at-risk',label:'⚠ No surplus',color:'var(--r)',mn:null};
+    const mn=Math.ceil(remaining/avgSavings);
+    const eta=new Date();eta.setMonth(eta.getMonth()+mn);
+    const etaStr=eta.toLocaleString('en-IN',{month:'short',year:'numeric'});
+    const tgt=g.targetDate?new Date(g.targetDate):null;
+    const onTrack=!tgt||(eta<=tgt);
+    return{status:onTrack?'on-track':'behind',label:onTrack?`✓ ETA ${etaStr}`:`⚠ Behind · ETA ${etaStr}`,color:onTrack?'#2563eb':'var(--r)',mn};
+  };
+
+  // Goal form JSX
+  const GF=(
+    <div>
+      <div className="f2 mb2">
+        <div className="fg"><label>Goal Name</label><input placeholder="e.g. House Down Payment" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/></div>
+        <div className="fg"><label>Target Amount ({CUR.sym})</label><input type="number" value={form.targetAmount} onChange={e=>setForm(f=>({...f,targetAmount:e.target.value}))}/></div>
+        <div className="fg"><label>Amount Saved So Far ({CUR.sym})</label><input type="number" value={form.currentAmount} onChange={e=>setForm(f=>({...f,currentAmount:e.target.value}))}/></div>
+        <div className="fg"><label>Target Date</label><input type="date" value={form.targetDate} onChange={e=>setForm(f=>({...f,targetDate:e.target.value}))}/></div>
+        <div className="fg"><label>Color</label>
+          <div style={{display:'flex',gap:6,marginTop:4}}>{COLORS.map(c=><div key={c} onClick={()=>setForm(f=>({...f,color:c}))} style={{width:22,height:22,borderRadius:99,background:c,cursor:'pointer',border:form.color===c?'3px solid var(--n800)':'3px solid transparent'}}/> )}</div>
+        </div>
+        <div className="fg"><label>Notes</label><input placeholder="Optional notes" value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))}/></div>
+      </div>
+
+      {/* Instruments sub-section */}
+      <div style={{background:'var(--bl)',border:'1px solid rgba(37,99,235,.2)',borderRadius:8,padding:'12px 14px',marginBottom:8}}>
+        <div style={{fontWeight:700,fontSize:12,color:'var(--b)',marginBottom:10}}>📈 Investment Instruments</div>
+        {/* Existing instruments list */}
+        {(form.instruments||[]).length>0&&<div style={{marginBottom:10}}>
+          {form.instruments.map(i=>{
+            const corpus=getCorpus(i);
+            return(
+              <div key={i.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 8px',background:'var(--W)',borderRadius:6,marginBottom:5,border:'1px solid var(--n100)'}}>
+                <div style={{flex:1}}>
+                  <span style={{fontWeight:700,fontSize:12,color:'var(--n800)'}}>{i.name}</span>
+                  <span style={{fontSize:10.5,color:'var(--n400)',marginLeft:8}}>{i.type} · {fmtINR(i.amount,true)}/mo · {i.returnRate}% · {i.years}yr</span>
+                  {corpus>0&&<span style={{fontSize:10,color:'var(--g)',marginLeft:8}}>→ {fmtINR(corpus,true)}</span>}
+                </div>
+                <div style={{display:'flex',gap:4}}>
+                  <button className="bic" onClick={()=>editInstr(i)}><Ic n="edit" s={10}/></button>
+                  <button className="bic red" onClick={()=>delInstr(i.id)}><Ic n="del" s={10}/></button>
+                </div>
+              </div>
+            );
+          })}
+        </div>}
+        {/* Add/Edit instrument inline form */}
+        <div style={{background:'var(--W)',borderRadius:6,padding:'10px',border:'1px solid var(--n100)'}}>
+          <div style={{fontSize:11,fontWeight:700,color:'var(--n600)',marginBottom:8}}>{instrEdit?'Edit Instrument':'+ Add Instrument'}</div>
+          <div className="f2" style={{marginBottom:8}}>
+            <div className="fg"><label style={{fontSize:10.5}}>Name</label><input placeholder="e.g. HDFC SIP" value={instrForm.name} onChange={e=>setInstrForm(f=>({...f,name:e.target.value}))}/></div>
+            <div className="fg"><label style={{fontSize:10.5}}>Type</label><select value={instrForm.type} onChange={e=>setInstrForm(f=>({...f,type:e.target.value}))}>
+              {INV_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+            </select></div>
+            <div className="fg"><label style={{fontSize:10.5}}>{instrForm.type==='SIP'?`Monthly (${CUR.sym})`:`Investment Amount (${CUR.sym})`}</label><input type="number" placeholder="0" value={instrForm.amount} onChange={e=>setInstrForm(f=>({...f,amount:e.target.value}))}/></div>
+            <div className="fg"><label style={{fontSize:10.5}}>Return Rate (%)</label><input type="number" placeholder="12" value={instrForm.returnRate} onChange={e=>setInstrForm(f=>({...f,returnRate:e.target.value}))}/></div>
+            <div className="fg"><label style={{fontSize:10.5}}>Duration (Years)</label><input type="number" placeholder="5" value={instrForm.years} onChange={e=>setInstrForm(f=>({...f,years:e.target.value}))}/></div>
+            <div className="fg"><label style={{fontSize:10.5}}>Color</label>
+              <div style={{display:'flex',gap:5,marginTop:3}}>{COLORS.map(c=><div key={c} onClick={()=>setInstrForm(f=>({...f,color:c}))} style={{width:18,height:18,borderRadius:99,background:c,cursor:'pointer',border:instrForm.color===c?'2.5px solid var(--n800)':'2.5px solid transparent'}}/> )}</div>
+            </div>
+            {isUnitType(instrForm.type)&&<>
+              <div className="fg"><label style={{fontSize:10.5}}>{unitLabel(instrForm.type)} Held</label><input type="number" placeholder="0" value={instrForm.units} onChange={e=>setInstrForm(f=>({...f,units:e.target.value}))}/></div>
+              <div className="fg"><label style={{fontSize:10.5}}>Latest {priceLabel(instrForm.type)} ({CUR.sym})</label><input type="number" placeholder="0" value={instrForm.currentNAV} onChange={e=>setInstrForm(f=>({...f,currentNAV:e.target.value}))}/></div>
+            </>}
+          </div>
+          <div style={{display:'flex',gap:6}}>
+            <button className="btn btn-p btn-sm" onClick={addInstr}><Ic n={instrEdit?'ok':'plus'} s={11} c="#fff"/>{instrEdit?'Update':'Add'}</button>
+            {instrEdit&&<button className="btn btn-g btn-sm" onClick={()=>{setInstrForm(efi);setInstrEdit(null);}}>Cancel</button>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  return(
+    <div className="page">
+      <div className="ph">
+        <div><div className="ptitle">Savings Goals</div><div className="psub">Goal-first · Instruments inside goals · Formula corpus projections</div></div>
+        <button className="btn btn-p" onClick={open}><Ic n="plus" s={13} c="#fff"/>Add Goal</button>
+      </div>
+      <div className="g4 mb3">
+        <div className="card"><div className="cl">Total Goals</div><div className="cv b">{goals.length}</div><div className="cm">{goals.filter(g=>g.currentAmount>=g.targetAmount&&g.targetAmount>0).length} completed</div></div>
+        <div className="card"><div className="cl">Total Target</div><div className="cv">{fmtINR(totalTarget,true)}</div><div className="cm">across all goals</div></div>
+        <div className="card"><div className="cl">Total Saved</div><div className="cv g">{fmtINR(totalSaved,true)}</div><div className="cm">{totalTarget>0?(totalSaved/totalTarget*100).toFixed(1):0}% of targets</div></div>
+        <div className="card"><div className="cl">Projected Corpus</div><div className="cv p">{fmtINR(totalCorpus,true)}</div><div className="cm" style={{color:totalCorpus>=totalTarget?'var(--g)':'var(--o)'}}>{totalTarget>0?`${(totalCorpus/totalTarget*100).toFixed(0)}% of target`:'at maturity'}</div></div>
+      </div>
+      <div className="g3">
+        {goals.map(g=>{
+          const pct=g.targetAmount>0?Math.min(100,g.currentAmount/g.targetAmount*100):0;
+          const done=pct>=100&&g.targetAmount>0;
+          const monthsLeft=g.targetDate?Math.max(1,(new Date(g.targetDate)-new Date())/86400000/30):null;
+          const needed=monthsLeft?Math.max(0,(g.targetAmount-g.currentAmount)/monthsLeft):null;
+          const fc=getGoalForecast(g);
+          const instrs=g.instruments||[];
+          const totalInstrCorpus=instrs.reduce((s,i)=>s+getCorpus(i),0);
+          const totalInstrMo=instrs.filter(i=>i.type!=='FD'&&i.type!=='PPF').reduce((s,i)=>s+i.amount,0);
+          const covPct=g.targetAmount>0?(totalInstrCorpus/g.targetAmount*100):0;
+          return(
+            <div key={g.id} className="card" style={{borderTop:`3px solid ${g.color||'var(--g)'}`}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}>
+                <div style={{fontWeight:800,fontSize:14,color:'var(--n800)'}}>{g.name}</div>
+                <div style={{display:'flex',gap:5,alignItems:'center'}}>
+                  <span style={{fontSize:10,fontWeight:700,color:fc.color,background:`${fc.color}18`,padding:'2px 7px',borderRadius:99,whiteSpace:'nowrap'}}>{fc.label}</span>
+                  <button className="bic" onClick={()=>openEdit(g)}><Ic n="edit" s={11}/></button>
+                  <button className="bic red" onClick={()=>del(g.id)}><Ic n="del" s={11}/></button>
+                </div>
+              </div>
+              {/* Progress */}
+              <div style={{display:'flex',justifyContent:'space-between',marginBottom:5}}>
+                <span style={{fontFamily:'var(--m)',fontSize:13,fontWeight:700,color:g.color||'var(--g)'}}>{fmtINR(g.currentAmount,true)}</span>
+                <span style={{fontFamily:'var(--m)',fontSize:12,color:'var(--n400)'}}>of {fmtINR(g.targetAmount,true)}</span>
+              </div>
+              <div className="prog" style={{height:7,marginBottom:7}}><div className="pf" style={{width:`${pct}%`,background:g.color||'var(--g)'}}/></div>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+                <span style={{fontSize:11.5,fontWeight:700,color:done?'var(--g)':'var(--n500)'}}>{done?'✅ Reached!':`${pct.toFixed(1)}% saved`}</span>
+                {!done&&monthsLeft&&<span style={{fontSize:11,color:'var(--o)',fontWeight:600}}>{fmtINR(Math.round(needed||0),true)}/mo needed</span>}
+              </div>
+              {g.targetDate&&<div style={{fontSize:11,color:'var(--n400)',marginBottom:8}}>🗓 {fmtDate(g.targetDate)}{monthsLeft&&` · ${Math.ceil(monthsLeft)} mo left`}</div>}
+              {g.notes&&<div style={{fontSize:11,color:'var(--n500)',background:'var(--n50)',borderRadius:6,padding:'5px 9px',marginBottom:8}}>{g.notes}</div>}
+              {/* Instruments */}
+              {instrs.length>0&&<div style={{background:'var(--bl)',borderRadius:8,padding:'8px 10px',border:'1px solid rgba(37,99,235,.13)'}}>
+                <div style={{fontSize:9.5,fontWeight:800,color:'var(--b)',marginBottom:7,textTransform:'uppercase',letterSpacing:.4}}>📈 Instruments · {instrs.length}</div>
+                {instrs.map(i=>{
+                  const ic=getCorpus(i);
+                  const hasNAV=(i.type==='SIP'||i.type==='Mutual Fund');
+                  const navStale=hasNAV&&i.lastNAVDate&&((Date.now()-new Date(i.lastNAVDate))/86400000>7);
+                  return(
+                    <div key={i.id} style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',padding:'5px 0',borderBottom:'1px dashed rgba(37,99,235,.12)'}}>
+                      <div style={{flex:1}}>
+                        <div style={{display:'flex',alignItems:'center',gap:5}}>
+                          <span style={{width:6,height:6,borderRadius:2,background:i.color||'var(--g)',display:'inline-block',flexShrink:0}}/>
+                          <span style={{fontSize:11.5,fontWeight:700,color:'var(--n800)'}}>{i.name}</span>
+                          <span style={{fontSize:9.5,background:'rgba(37,99,235,.1)',color:'var(--b)',borderRadius:4,padding:'1px 5px',fontWeight:700}}>{i.type}</span>
+                          {navStale&&<span style={{fontSize:9,color:'var(--o)',fontWeight:700}}>NAV stale</span>}
+                        </div>
+                        <div style={{fontSize:10.5,color:'var(--n500)',paddingLeft:11,marginTop:2}}>
+                          {`${CUR.sym}${(i.amount||0).toLocaleString(CUR.locale)}${i.type==='SIP'?'/mo':''}`} · {i.returnRate}% · {i.years}yr
+                          {hasNAV&&(i.units||0)>0&&<span style={{marginLeft:6,color:'var(--n400)'}}>· {i.units} units @{i.currentNAV||i.lastBuyNAV||0}</span>}
+                        </div>
+                        {/* NAV update inline */}
+                        {hasNAV&&navEditId===i.id&&(
+                          <div style={{display:'flex',gap:5,marginTop:5,paddingLeft:11}}>
+                            <input type="number" placeholder={`New NAV ${CUR.sym}`} value={navVal} onChange={e=>setNavVal(e.target.value)}
+                              style={{width:110,padding:'4px 8px',fontSize:11,border:'1.5px solid var(--b)',borderRadius:5,fontFamily:'var(--f)'}} autoFocus/>
+                            <button className="btn btn-p btn-sm" style={{padding:'3px 10px',fontSize:10}} onClick={()=>saveNav(g.id,i.id)}>Save</button>
+                            <button className="btn btn-g btn-sm" style={{padding:'3px 8px',fontSize:10}} onClick={()=>{setNavEditId(null);setNavVal('');}}>✕</button>
+                          </div>
+                        )}
+                      </div>
+                      <div style={{textAlign:'right',flexShrink:0,marginLeft:8}}>
+                        <div style={{fontSize:11.5,fontFamily:'var(--m)',fontWeight:700,color:'var(--g)'}}>{fmtINR(ic,true)}</div>
+                        <div style={{fontSize:9.5,color:'var(--n400)'}}>corpus</div>
+                        {hasNAV&&navEditId!==i.id&&<button className="bic" style={{fontSize:9,marginTop:2}} onClick={()=>{setNavEditId(i.id);setNavVal(String(i.currentNAV||''));}}>NAV↑</button>}
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:6,paddingTop:4,borderTop:'1px solid rgba(37,99,235,.18)'}}>
+                  {totalInstrMo>0&&<span style={{fontSize:10,color:'var(--b)',fontWeight:700}}>{fmtINR(totalInstrMo,true)}/mo invested</span>}
+                  <span style={{fontSize:10.5,fontWeight:800,color:covPct>=100?'var(--g)':'var(--o)'}}>
+                    {covPct>=100?`✅ Corpus covers goal`:`Corpus ${covPct.toFixed(0)}% of target`}
+                    {' · '}<span style={{color:'var(--g)'}}>{fmtINR(totalInstrCorpus,true)}</span>
+                  </span>
+                </div>
+              </div>}
+              {instrs.length===0&&<div style={{fontSize:11,color:'var(--n400)',textAlign:'center',padding:'8px',background:'var(--n50)',borderRadius:6}}>
+                No instruments yet · Edit goal to add SIP / MF / RD / FD / PPF
+              </div>}
+            </div>
+          );
+        })}
+        {goals.length===0&&<div className="card" style={{gridColumn:'1/-1',textAlign:'center',padding:'32px',color:'var(--n400)'}}>
+          <div style={{fontSize:32,marginBottom:10}}>🎯</div>
+          <div style={{fontWeight:700,fontSize:14,marginBottom:6}}>No goals yet</div>
+          <div style={{fontSize:12.5,marginBottom:16}}>Create your first savings goal: house down payment, vacation, emergency fund top-up…</div>
+          <button className="btn btn-p" onClick={open}><Ic n="plus" s={13} c="#fff"/>Add Your First Goal</button>
+        </div>}
+      </div>
+      {modal&&<Modal title={modal==='add'?'Add Goal':'Edit Goal'} onClose={close} foot={<><button className="btn btn-s btn-sm" onClick={close}>Cancel</button><button className="btn btn-p btn-sm" onClick={save}><Ic n={modal==='add'?'plus':'ok'} s={12} c="#fff"/>{modal==='add'?'Add Goal':'Save'}</button></>}>{GF}</Modal>}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   RECURRING TRANSACTIONS
+══════════════════════════════════════ */
+const FREQ_OPTS=['monthly','weekly','quarterly','yearly'];
+function PageRecurring({data,setData,toast}){
+  const {transactions,expenseCategories,incomeCategories}=data;
+  const recurring=data.recurring||[];
+  const goals=data.goals||[];
+  const ef={type:'expense',category:'',desc:'',amount:'',paymentMode:'',merchant:'',frequency:'monthly',startDate:new Date().toISOString().slice(0,10),active:true,goalId:'',investmentId:''};
+  const [form,setForm]=useState(ef);
+  const [modal,setModal]=useState(null);
+  const cats=form.type==='expense'?expenseCategories:incomeCategories;
+  const open=()=>{setForm(ef);setModal('add');};
+  const openEdit=r=>{setForm({type:r.type,category:r.category,desc:r.desc,amount:String(r.amount),paymentMode:r.paymentMode||'',merchant:r.merchant||'',frequency:r.frequency,startDate:r.startDate||new Date().toISOString().slice(0,10),active:r.active,goalId:r.goalId||'',investmentId:r.investmentId||''});setModal({eid:r.id});};
+  const close=()=>{setModal(null);setForm(ef);};
+  const save=()=>{
+    if(!form.category||!form.amount)return;
+    const nextDate=form.startDate;
+    const e={type:form.type,category:form.category,desc:form.desc,amount:+form.amount,paymentMode:form.paymentMode||'',merchant:form.merchant||'',frequency:form.frequency,startDate:form.startDate,nextDate,active:form.active,goalId:form.goalId||'',investmentId:form.investmentId||''};
+    if(modal==='add'){setData(d=>({...d,recurring:[...d.recurring,{id:uid(),...e}]}));toast('Recurring rule added','g');}
+    else{setData(d=>({...d,recurring:d.recurring.map(r=>r.id===modal.eid?{...r,...e}:r)}));toast('Updated','g');}
+    close();
+  };
+  const undoDel=makeUndoDelete(data,setData,toast);
+  const del=id=>undoDel('Recurring rule deleted',d=>({...d,recurring:d.recurring.filter(r=>r.id!==id)}));
+  const toggle=id=>setData(d=>({...d,recurring:d.recurring.map(r=>r.id===id?{...r,active:!r.active}:r)}));
+  const generateNow=r=>{
+    const today=new Date().toISOString().slice(0,10);
+    const tx={id:uid(),date:today,type:r.type,category:r.category,desc:r.desc,amount:r.amount,month:today.slice(0,7),paymentMode:r.paymentMode||'',merchant:r.merchant||'',fromRecurring:r.id};
+    setData(d=>({...d,transactions:[...d.transactions,tx]}));
+    toast(`Generated: ${r.category} ${fmtINR(r.amount)}`,'g');
+  };
+  const today=new Date().toISOString().slice(0,10);
+  const RF=(
+    <>
+      <div className="f2 mb2">
+        <div className="fg"><label>Type</label><select value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value,category:''}))}>
+          <option value="expense">Expense</option><option value="income">Income</option>
+        </select></div>
+        <div className="fg"><label>Frequency</label><select value={form.frequency} onChange={e=>setForm(f=>({...f,frequency:e.target.value}))}>
+          {FREQ_OPTS.map(o=><option key={o} value={o}>{o.charAt(0).toUpperCase()+o.slice(1)}</option>)}
+        </select></div>
+        <div className="fg"><label>Category</label><select value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))}>
+          <option value="">– Select –</option>{cats.map(c=><option key={c} value={c}>{c}</option>)}
+        </select></div>
+        <div className="fg"><label>Amount ({CUR.sym})</label><input type="number" placeholder="0" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))}/></div>
+        <div className="fg"><label>Description</label><input placeholder="Details…" value={form.desc} onChange={e=>setForm(f=>({...f,desc:e.target.value}))}/></div>
+        <div className="fg"><label>Merchant / Vendor</label><input placeholder="e.g. Netflix, HDFC" value={form.merchant} onChange={e=>setForm(f=>({...f,merchant:e.target.value}))}/></div>
+        <div className="fg"><label>Payment Mode</label><select value={form.paymentMode} onChange={e=>setForm(f=>({...f,paymentMode:e.target.value}))}>
+          <option value="">– Mode –</option>{PAYMENT_MODES.map(m=><option key={m} value={m}>{m}</option>)}
+        </select></div>
+        <div className="fg"><label>Start / Next Date</label><input type="date" value={form.startDate} onChange={e=>setForm(f=>({...f,startDate:e.target.value}))}/></div>
+        <div className="fg"><label>🎯 Link to Savings Goal (optional)</label>
+          <select value={form.goalId||''} onChange={e=>setForm(f=>({...f,goalId:e.target.value}))}>
+            <option value="">No goal</option>
+            {goals.map(g=><option key={g.id} value={g.id}>{g.name} ({CUR.sym}{g.targetAmount?.toLocaleString(CUR.locale)})</option>)}
+          </select>
+        </div>
+        {form.goalId&&<div className="fg"><label>📈 Link to Instrument (optional)</label>
+          <select value={form.investmentId||''} onChange={e=>setForm(f=>({...f,investmentId:e.target.value}))}>
+            <option value="">No instrument</option>
+            {(goals.find(g=>g.id===form.goalId)?.instruments||[]).map(i=><option key={i.id} value={i.id}>{i.name} ({i.type})</option>)}
+          </select>
+        </div>}
+      </div>
+    </>
+  );
+  return(
+    <div className="page">
+      <div className="ph">
+        <div><div className="ptitle">Recurring Transactions</div><div className="psub">Auto-generated on next app open when due</div></div>
+        <button className="btn btn-p" onClick={open}><Ic n="plus" s={13} c="#fff"/>Add Rule</button>
+      </div>
+      <div className="g3 mb3">
+        <div className="card"><div className="cl">Total Rules</div><div className="cv b">{recurring.length}</div><div className="cm">{recurring.filter(r=>r.active).length} active</div></div>
+        <div className="card"><div className="cl">Monthly Recurring</div><div className="cv o">{fmtINR(recurring.filter(r=>r.active&&r.type==='expense'&&r.frequency==='monthly').reduce((s,r)=>s+r.amount,0),true)}</div><div className="cm">expense/month</div></div>
+        <div className="card"><div className="cl">Auto-Generated</div><div className="cv g">{transactions.filter(t=>t.fromRecurring).length}</div><div className="cm">transactions total</div></div>
+      </div>
+      {recurring.length===0?<div className="card" style={{textAlign:'center',padding:'32px',color:'var(--n400)'}}>
+        <div style={{fontSize:32,marginBottom:10}}>🔁</div>
+        <div style={{fontWeight:700,fontSize:14,marginBottom:6}}>No recurring rules yet</div>
+        <div style={{fontSize:12.5,marginBottom:16}}>Add rules for monthly salary, rent, subscriptions, EMIs. They auto-generate transactions on app open.</div>
+        <button className="btn btn-p" onClick={open}><Ic n="plus" s={13} c="#fff"/>Add First Rule</button>
+      </div>:(
+        <div className="tw">
+          <table>
+            <thead><tr><th>Type</th><th>Category</th><th>Description</th><th>Merchant</th><th>Frequency</th><th className="num">Amount</th><th>Next Date</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>
+              {recurring.map(r=>(
+                <tr key={r.id} style={{opacity:r.active?1:.5}}>
+                  <td><span className={`tag ${r.type==='income'?'tg':'tr'}`} style={{fontSize:10}}>{r.type}</span></td>
+                  <td style={{fontSize:12.5,fontWeight:600}}>{r.category}</td>
+                  <td style={{fontSize:12,color:'var(--n500)'}}>{r.desc||'–'}</td>
+                  <td style={{fontSize:11.5}}>{r.merchant||'–'}</td>
+                  <td><span className="tag tb" style={{fontSize:10}}>{r.frequency}</span></td>
+                  <td className={`num ${r.type==='income'?'pos':'neg'}`}>{fmtINR(r.amount)}</td>
+                  <td style={{fontFamily:'var(--m)',fontSize:11.5,color:r.nextDate<=today&&r.active?'var(--r)':'var(--n600)',fontWeight:r.nextDate<=today&&r.active?700:400}}>{fmtDate(r.nextDate)}{r.nextDate<=today&&r.active&&<span className="tag tr" style={{fontSize:9,marginLeft:4}}>Due</span>}</td>
+                  <td><button onClick={()=>toggle(r.id)} className={`tag ${r.active?'tg':'tx'}`} style={{fontSize:10,cursor:'pointer',border:'none',fontFamily:'var(--f)',padding:'2px 8px'}}>{r.active?'Active':'Paused'}</button></td>
+                  <td><div style={{display:'flex',gap:4}}>
+                    <button className="btn btn-g btn-sm" style={{fontSize:10,padding:'3px 7px'}} onClick={()=>generateNow(r)} title="Generate transaction now"><Ic n="plus" s={10}/>Now</button>
+                    <button className="bic" onClick={()=>openEdit(r)}><Ic n="edit" s={11}/></button>
+                    <button className="bic red" onClick={()=>del(r.id)}><Ic n="del" s={11}/></button>
+                  </div></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {modal&&<Modal title={modal==='add'?'Add Recurring Rule':'Edit Recurring Rule'} onClose={close} foot={<><button className="btn btn-s btn-sm" onClick={close}>Cancel</button><button className="btn btn-p btn-sm" onClick={save}><Ic n={modal==='add'?'plus':'ok'} s={12} c="#fff"/>{modal==='add'?'Add Rule':'Save'}</button></>}>{RF}</Modal>}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   QUICK ADD (floating bottom-sheet)
+══════════════════════════════════════ */
+function QuickAdd({data,setData,toast,onClose}){
+  const [type,setType]=useState('expense');
+  const [amount,setAmount]=useState('');
+  const [category,setCategory]=useState('');
+  const [date,setDate]=useState(new Date().toISOString().slice(0,10));
+  const [merchant,setMerchant]=useState('');
+  const [paymentMode,setPaymentMode]=useState('');
+  const [autoCat,setAutoCat]=useState('');   // which category we filled in for them
+  const [autoMode,setAutoMode]=useState(''); // ditto for payment mode
+  const [err,setErr]=useState('');
+  const cats=type==='expense'?data.expenseCategories:data.incomeCategories;
+  const amtRef=useRef();
+  const catRef=useRef();
+  useEffect(()=>{setTimeout(()=>amtRef.current&&amtRef.current.focus(),120);},[]);
+
+  // Merchant → category/mode, learned from history. Only ever fills a blank field,
+  // or replaces a value we ourselves auto-filled. Never overwrites a manual choice.
+  const onMerchant=v=>{
+    setMerchant(v);
+    const c=inferCategory(data.transactions,v,type);
+    if(c&&(!category||category===autoCat)){setCategory(c);setAutoCat(c);}
+    else if(!c&&category&&category===autoCat){setCategory('');setAutoCat('');}
+    const pm=inferPaymentMode(data.transactions,v,type);
+    if(pm&&(!paymentMode||paymentMode===autoMode)){setPaymentMode(pm);setAutoMode(pm);}
+    else if(!pm&&paymentMode&&paymentMode===autoMode){setPaymentMode('');setAutoMode('');}
+  };
+
+  const commit=()=>{
+    if(!amount||isNaN(+amount)||+amount<=0){setErr('Enter an amount');amtRef.current&&amtRef.current.focus();return null;}
+    if(!category){setErr('Pick a category');catRef.current&&catRef.current.focus();return null;}
+    setErr('');
+    setData(d=>({...d,transactions:[...d.transactions,{id:uid(),date,type,category,desc:'',amount:+amount,month:date.slice(0,7),paymentMode,merchant}]}));
+    toast(`${type==='expense'?'−':'+'}${fmtINR(+amount,true)} · ${category}`,type==='expense'?'x':'g');
+    return true;
+  };
+  const save=()=>{if(commit())onClose();};
+  // Ctrl/Cmd+Enter keeps the sheet open for the next entry, the fast path when
+  // logging a batch of receipts. Category/mode/date are deliberately retained.
+  const saveAndNext=()=>{
+    if(!commit())return;
+    setAmount('');setMerchant('');setAutoCat('');setAutoMode('');
+    amtRef.current&&amtRef.current.focus();
+  };
+  const handleKey=e=>{
+    if(e.key==='Escape'){e.preventDefault();onClose();return;}
+    if(e.key==='Enter'){
+      e.preventDefault();
+      (e.ctrlKey||e.metaKey)?saveAndNext():save();
+    }
+  };
+  return(<>
+    <div className="qa-overlay" onClick={onClose}/>
+    <div className="qa-sheet" onKeyDown={handleKey}>
+      <div className="qa-handle"/>
+      <div style={{padding:'0 20px'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
+          <div style={{fontSize:15,fontWeight:800,color:'var(--n900)'}}>Quick Add Transaction</div>
+          <button className="bic" onClick={onClose} style={{width:28,height:28}} aria-label="Close quick add"><Ic n="del" s={12}/></button>
+        </div>
+        {/* Type toggle */}
+        <div className="tgl mb3" style={{width:'100%',marginBottom:14}}>
+          <button className={`tgo${type==='expense'?' on':''}`} style={{flex:1}} onClick={()=>{setType('expense');setCategory('');}}>💸 Expense</button>
+          <button className={`tgo${type==='income'?' on':''}`} style={{flex:1}} onClick={()=>{setType('income');setCategory('');}}>💰 Income</button>
+        </div>
+        {/* Amount: big, prominent */}
+        <div style={{position:'relative',marginBottom:14}}>
+          <span style={{position:'absolute',left:14,top:'50%',transform:'translateY(-50%)',fontFamily:'var(--m)',fontSize:22,fontWeight:700,color:'var(--n400)',pointerEvents:'none'}}>{CUR.sym}</span>
+          <input ref={amtRef} type="number" placeholder="0" value={amount} onChange={e=>setAmount(e.target.value)}
+            style={{width:'100%',padding:'14px 14px 14px 38px',fontSize:26,fontWeight:800,fontFamily:'var(--m)',border:`2px solid ${type==='expense'?'var(--r)':'var(--g)'}`,borderRadius:12,color:'var(--n900)',background:'var(--W)',outline:'none',letterSpacing:-1}}/>
+        </div>
+        {/* Category */}
+        {/* Merchant first: typing it fills category and payment mode below */}
+        <div className="fg" style={{marginBottom:12}}>
+          <label>Merchant / Vendor <span style={{fontWeight:400,textTransform:'none',color:'var(--n400)'}}>optional · fills category</span></label>
+          <input list="qa-merchant-list" placeholder="e.g. Swiggy, DMart…" value={merchant} onChange={e=>onMerchant(e.target.value)}/>
+          <datalist id="qa-merchant-list">{[...new Set(data.transactions.filter(t=>t.merchant).map(t=>t.merchant))].map(m=><option key={m} value={m}/>)}</datalist>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
+          <div className="fg">
+            <label>Category {autoCat&&category===autoCat&&<span style={{fontWeight:700,textTransform:'none',color:'var(--g)'}}>· auto</span>}</label>
+            <select ref={catRef} value={category} onChange={e=>{setCategory(e.target.value);setAutoCat('');}}
+              style={autoCat&&category===autoCat?{borderColor:'var(--g)'}:{}}>
+              <option value="">– Select –</option>
+              {cats.map(c=><option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div className="fg">
+            <label>Date</label>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)}/>
+          </div>
+        </div>
+        <div className="fg" style={{marginBottom:14}}>
+          <label>Payment Mode <span style={{fontWeight:400,textTransform:'none',color:'var(--n400)'}}>optional</span></label>
+          <select value={paymentMode} onChange={e=>{setPaymentMode(e.target.value);setAutoMode('');}}
+            style={autoMode&&paymentMode===autoMode?{borderColor:'var(--g)'}:{}}>
+            <option value="">– Select –</option>
+            {PAYMENT_MODES.map(m=><option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+        {err&&<div style={{fontSize:12,color:'var(--r)',fontWeight:600,marginBottom:10}}>{err}</div>}
+        <div style={{display:'flex',gap:8,marginBottom:10}}>
+          <button className="btn btn-p" onClick={save} style={{flex:1,fontSize:14,padding:'12px',justifyContent:'center',borderRadius:10}}>
+            <Ic n="plus" s={14} c="#fff"/>Add {type==='expense'?'Expense':'Income'}
+          </button>
+          <button className="btn btn-s" onClick={saveAndNext} title="Save and keep this sheet open (Ctrl+Enter)"
+            style={{fontSize:13,padding:'12px 14px',justifyContent:'center',borderRadius:10,whiteSpace:'nowrap'}}>
+            Save &amp; Next
+          </button>
+        </div>
+        <div style={{fontSize:10.5,color:'var(--n400)',textAlign:'center',marginBottom:4}}>
+          <strong>Enter</strong> save · <strong>Ctrl+Enter</strong> save &amp; add another · <strong>Esc</strong> close
+        </div>
+      </div>
+    </div>
+  </>);
+}
+
+/* ══════════════════════════════════════
+   APP ROOT
+══════════════════════════════════════ */
+/* ══════════════════════════════════════
+   NAVIGATION
+   Nine destinations instead of twenty. Pages that answer the same
+   question are now tabs within one destination rather than separate
+   sidebar entries. The leaf page ids are unchanged, so every
+   setPage('cc') call elsewhere in the app still works.
+══════════════════════════════════════ */
+const NAV=[
+  {s:'Overview',items:[
+    {id:'dashboard',l:'Dashboard',n:'home'},
+    {id:'fund',l:'Bank Balance',n:'fund'},
+    {id:'expense',l:'Transactions',n:'exp'},
+  ]},
+  {s:'Manage',items:[
+    {id:'budget',l:'Budget',n:'budget'},
+    {id:'cc',l:'Liabilities',n:'cc'},
+    {id:'goals',l:'Plan',n:'cal'},
+  ]},
+  {s:'Insight',items:[
+    {id:'pnl',l:'Reports',n:'pnl'},
+    {id:'ai',l:'AI Insights',n:'ai'},
+    {id:'master',l:'Settings',n:'gear'},
+  ]},
+];
+
+// Leaf page id → the tabs it sits alongside. Order defines the tab strip.
+const TABS={
+  fund:      [{id:'fund',l:'Bank Balance'},{id:'reconcile',l:'Reconciliation'}],
+  expense:   [{id:'expense',l:'Expenses'},{id:'income',l:'Income'},{id:'invtracker',l:'Investments'}],
+  budget:    [{id:'budget',l:'Budget vs Actual'}],
+  cc:        [{id:'cc',l:'Credit Cards'},{id:'loan',l:'Loans'},{id:'debt',l:'Debt Optimizer'},{id:'provision',l:'Future Outflows'}],
+  goals:     [{id:'goals',l:'Savings Goals'},{id:'recurring',l:'Recurring'},{id:'forecast',l:'Forecast'}],
+  pnl:       [{id:'pnl',l:'P & L Statement'},{id:'cfo',l:'CFO Dashboard'}],
+  master:    [{id:'master',l:'Master Settings'},{id:'data',l:'Data Management'},{id:'drive',l:'Google Drive'},{id:'profile',l:'Profile & Period'}],
+};
+// Reverse index: leaf id → the nav item that owns it.
+const OWNER={};
+Object.entries(TABS).forEach(([root,tabs])=>tabs.forEach(t=>{OWNER[t.id]=root;}));
+
+const PT={dashboard:'Dashboard',fund:'Bank Balance Sheet',reconcile:'Reconciliation',pnl:'P & L Statement',expense:'Expense Tracker',invtracker:'Investment Tracker',income:'Income Tracker',budget:'Budget vs Actual',provision:'Expected Future Outflows',cc:'Credit Cards',loan:'Loan Tracker',cfo:'CFO Dashboard',forecast:'Financial Forecast',debt:'Debt Optimizer',ai:'AI Insights',master:'Master Settings',data:'Data Management',drive:'Google Drive Sync',profile:'Profile & Period',goals:'Savings Goals',recurring:'Recurring Transactions'};
+// Heading shown in the topbar for the whole destination (tabs name the leaf).
+const GROUP_TITLE={fund:'Bank Balance Sheet',expense:'Transactions',budget:'Budget',cc:'Liabilities',goals:'Plan',pnl:'Reports',master:'Settings'};
+
+function App(){
+  const [pg,setPg]=useState('dashboard');
+  const [data,setData]=useState(()=>{
+    try{
+      // Try current version first
+      let s=localStorage.getItem('ff_v5');
+      // Fallback to older versions
+      if(!s)s=localStorage.getItem('ff_v4');
+      if(!s)s=localStorage.getItem('ff_v3');
+      if(!s)s=localStorage.getItem('fundflow_data');
+      if(s){
+        const p=JSON.parse(s);
+        if(!p.profile)p.profile={name:'Your Name',email:'you@example.com',phone:'',pan:'',currency:'INR',city:'',avatar:'YN',periodStart:'2025-04',periodEnd:'2026-03'};
+        if(!p.profile.periodStart)p.profile={...p.profile,periodStart:'2025-04',periodEnd:'2026-03'};
+        if(!p.majorExpenseCategories)p.majorExpenseCategories=['House Rent','Insurance','Medical Expense'];
+        if(!p.emergencyFund)p.emergencyFund={accountIds:[],targetMonths:6};
+        if(!p.provisions)p.provisions=[];
+        if(!p.transactions)p.transactions=[];
+        if(!p.accounts)p.accounts=p.funds||[];
+        if(!p.creditCards)p.creditCards=[];
+        if(!p.loans)p.loans=[];
+        if(!p.incomeCategories)p.incomeCategories=['Salary / Consultancy','Freelance Income','Interest Income','Other Income'];
+        if(!p.expenseCategories)p.expenseCategories=['House Rent','Groceries & Food','Electricity','Insurance','Other Expense'];
+        if(!p.budgetLimits)p.budgetLimits={};
+        if(!p.goals)p.goals=[];
+        if(!p.recurring)p.recurring=[];
+        // Ensure transactions have paymentMode and merchant
+        p.transactions=p.transactions.map(t=>({...t,paymentMode:t.paymentMode||t.payment_mode||t.mode||'',month:t.month||(t.date?t.date.slice(0,7):''),merchant:t.merchant||''}));
+        return p;
+      }
+      return JSON.parse(JSON.stringify(SEED));
+    }catch{return JSON.parse(JSON.stringify(SEED));}
+  });
+  // ── ARCHITECTURE: save to localStorage on EVERY state change ──
+  useEffect(()=>{try{
+    const prev=JSON.parse(localStorage.getItem('ff_v5')||'{}');
+    const merged={...data};
+    if(prev.pfmModule) merged.pfmModule=prev.pfmModule;
+    if(prev.pfmUpdatedAt) merged.pfmUpdatedAt=prev.pfmUpdatedAt;
+    localStorage.setItem('ff_v5',JSON.stringify(merged));
+  }catch(e){};},[data]);
+
+  // ── AUTO BACKUP: write a JSON snapshot to Downloads when the app opens ──
+  // Modes: 'off' (default: MANUAL ONLY, no download on launch), 'daily', 'always'.
+  // Default is OFF: a first-time user must never see an unexpected download, which
+  // reads as malware. Auto-download happens only after they opt in from Settings.
+  const autoBackupRan=useRef(false);
+  useEffect(()=>{
+    if(autoBackupRan.current)return;autoBackupRan.current=true;
+    let mode,last;
+    try{
+      mode=localStorage.getItem('fm_autobackup')||'off';
+      last=localStorage.getItem('fm_autobackup_last')||'';
+    }catch{return;}
+    if(mode!=='daily'&&mode!=='always')return; // anything else = manual only
+    const today=new Date().toISOString().slice(0,10);
+    if(mode==='daily'&&last===today)return;
+    // Wait for first paint so the download doesn't compete with app start-up.
+    const t=setTimeout(()=>{
+      try{
+        const snapshot=JSON.parse(localStorage.getItem('ff_v5')||'null')||dataRef.current;
+        if(!snapshot||!(snapshot.transactions||[]).length&&!(snapshot.accounts||[]).length)return; // nothing worth saving
+        const b=new Blob([JSON.stringify({...snapshot,_version:'v6',_autoBackupAt:new Date().toISOString()},null,2)],{type:'application/json'});
+        const url=URL.createObjectURL(b);
+        const a=document.createElement('a');
+        a.href=url;a.download=`miyeecfo-autobackup-${today}.json`;
+        document.body.appendChild(a);a.click();a.remove();
+        setTimeout(()=>URL.revokeObjectURL(url),4000);
+        localStorage.setItem('fm_autobackup_last',today);
+        showToast('Auto-backup saved to Downloads','g');
+      }catch(e){/* a blocked download must never break app start-up */}
+    },1500);
+    return()=>clearTimeout(t);
+  },[]);
+
+  // ── RECURRING TRANSACTIONS: back-fill every missed occurrence on mount ──
+  // Previously this posted a single transaction per rule and advanced the schedule
+  // once, so not opening the app for three months lost two of the three occurrences
+  // and dated the survivor wrongly. Now each missed occurrence is posted at its own
+  // correct date, and the schedule advances past today.
+  useEffect(()=>{
+    const today=new Date().toISOString().slice(0,10);
+    const advanceDate=(dateStr,freq)=>{
+      const d=new Date(dateStr);
+      if(freq==='weekly')d.setDate(d.getDate()+7);
+      else if(freq==='monthly')d.setMonth(d.getMonth()+1);
+      else if(freq==='quarterly')d.setMonth(d.getMonth()+3);
+      else d.setFullYear(d.getFullYear()+1);
+      return d.toISOString().slice(0,10);
+    };
+    const MAX_PER_RULE=120; // guard against a corrupt far-past nextDate spinning forever
+    const newTxs=[];
+    const nextDates={};
+    let rulesFired=0;
+    for(const r of (data.recurring||[])){
+      if(!r.active||!r.nextDate||r.nextDate>today)continue;
+      let cursor=r.nextDate,made=0;
+      while(cursor<=today&&made<MAX_PER_RULE){
+        newTxs.push({
+          id:uid(),date:cursor,type:r.type,category:r.category,
+          desc:r.desc,amount:r.amount,month:cursor.slice(0,7),
+          paymentMode:r.paymentMode||'',merchant:r.merchant||'',fromRecurring:r.id,
+        });
+        cursor=advanceDate(cursor,r.frequency);made++;
+      }
+      if(made){nextDates[r.id]=cursor;rulesFired++;}
+    }
+    if(!newTxs.length)return;
+    setData(d=>({
+      ...d,
+      transactions:[...d.transactions,...newTxs],
+      recurring:d.recurring.map(r=>nextDates[r.id]?{...r,nextDate:nextDates[r.id]}:r),
+    }));
+    const back=newTxs.length-rulesFired;
+    showToast(
+      `${newTxs.length} recurring transaction${newTxs.length>1?'s':''} posted from ${rulesFired} rule${rulesFired>1?'s':''}`
+        +(back>0?` · ${back} back-filled`:''),
+      'g');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
+  // ── SMART SYNC to Google Drive ──
+  const [driveAutoStatus,setDriveAutoStatus]=useState('idle');
+  const [syncMode,setSyncMode]=useState(()=>{try{return localStorage.getItem('fm_sync_mode')||'manual';}catch{return 'manual';}});
+  const dataRef=useRef(data);
+  const lastSyncedRef=useRef(null);
+  dataRef.current=data;
+
+  const toggleSyncMode=(mode)=>{setSyncMode(mode);try{localStorage.setItem('fm_sync_mode',mode);}catch{}};
+
+  const driveSyncNow=useCallback(async(silent=false)=>{
+    if(!DriveService._token)return;
+    const currentJson=JSON.stringify(dataRef.current);
+    if(currentJson===lastSyncedRef.current)return;
+    try{
+      if(!silent)setDriveAutoStatus('saving');
+      await DriveService.save(dataRef.current);
+      lastSyncedRef.current=currentJson;
+      if(!silent){setDriveAutoStatus('saved');setTimeout(()=>setDriveAutoStatus('idle'),3000);}
+    }catch(e){
+      if(!silent){setDriveAutoStatus('error');setTimeout(()=>setDriveAutoStatus('idle'),5000);}
+    }
+  },[]);
+
+  useEffect(()=>{
+    if(syncMode!=='auto')return; // Only run timers in auto mode
+    const handleUnload=()=>{if(DriveService._token)driveSyncNow(true);};
+    window.addEventListener('beforeunload',handleUnload);
+    const interval=setInterval(()=>{driveSyncNow(false);},5*60*1000);
+    return()=>{window.removeEventListener('beforeunload',handleUnload);clearInterval(interval);};
+  },[driveSyncNow,syncMode]);
+  const [toast,setToast]=useState(null);
+  // 4th arg turns the toast into an undoable one: showToast(msg,type,'Undo',fn)
+  const showToast=(msg,type,action,onAction)=>setToast({msg,type,action,onAction,k:Date.now()});
+  // Restore a previous `data` snapshot. The generic undo used by every delete.
+  const undoTo=snapshot=>()=>{setData(snapshot);showToast('Restored','g');};
+  const [mobMenu,setMobMenu]=useState(false);
+  const [quickAdd,setQuickAdd]=useState(false);
+  const [isMobile,setIsMobile]=useState(()=>window.innerWidth<=768);
+  useEffect(()=>{
+    const onResize=()=>setIsMobile(window.innerWidth<=768);
+    window.addEventListener('resize',onResize);
+    return()=>window.removeEventListener('resize',onResize);
+  },[]);
+
+  // ── Global keyboard shortcuts ──────────────────
+  // Ignored while typing, so they never hijack a form field.
+  useEffect(()=>{
+    const onKey=e=>{
+      const el=document.activeElement;
+      const typing=el&&(/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)||el.isContentEditable);
+      if(typing||e.ctrlKey||e.metaKey||e.altKey)return;
+      const k=e.key.toLowerCase();
+      if(k==='n'){e.preventDefault();setQuickAdd(true);}
+      else if(k==='/'){e.preventDefault();setQuickAdd(true);}
+      else if(k==='d'){e.preventDefault();setPg('dashboard');}
+      else if(k==='?'){e.preventDefault();setShowKeys(v=>!v);}
+      else if(e.key==='Escape'){setMobMenu(false);setShowKeys(false);}
+    };
+    window.addEventListener('keydown',onKey);
+    return()=>window.removeEventListener('keydown',onKey);
+  },[]);
+  const [showKeys,setShowKeys]=useState(false);
+
+  // ── Dark Mode ──────────────────────────────────
+  const [darkMode,setDarkMode]=useState(()=>localStorage.getItem('dm')==='1');
+  useEffect(()=>{
+    document.documentElement.setAttribute('data-theme',darkMode?'dark':'light');
+    localStorage.setItem('dm',darkMode?'1':'0');
+  },[darkMode]);
+
+  const ccAlerts=data.creditCards.filter(c=>{const d=daysDiff(c.dueDate);return d!==null&&d<=3&&d>=0&&c.payable>0;}).length;
+  const recurringDue=(data.recurring||[]).filter(r=>r.active&&r.nextDate&&r.nextDate<=new Date().toISOString().slice(0,10)).length;
+  const months=useMemo(()=>getPeriodMonths(data.profile.periodStart,data.profile.periodEnd),[data.profile.periodStart,data.profile.periodEnd]);
+
+  // ── Budget Alerts ──────────────────────────────
+  // Spend-to-date is measured against budget-to-date (elapsed months only). Comparing
+  // part-year spend against a full-year allowance meant alerts effectively never fired.
+  const budgetAlertRef=useRef(new Set());
+  const budgetPcts=useMemo(()=>{
+    const nowKey=`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+    const elapsed=Math.min(months.length,Math.max(1,months.filter(m=>m.key<=nowKey).length));
+    const mSet=new Set(months.map(m=>m.key));
+    const spentBy={};
+    for(const t of data.transactions){
+      if(t.type!=='expense'||!mSet.has(t.month))continue;
+      spentBy[t.category]=(spentBy[t.category]||0)+t.amount;
+    }
+    const out={};
+    data.expenseCategories.forEach(cat=>{
+      const lim=data.budgetLimits[cat];if(!lim)return;
+      const allowed=lim*elapsed;
+      if(allowed>0)out[cat]=(spentBy[cat]||0)/allowed*100;
+    });
+    return out;
+  },[data.transactions,data.budgetLimits,data.expenseCategories,months]);
+  const budgetAlerts=useMemo(()=>Object.values(budgetPcts).filter(p=>p>=80).length,[budgetPcts]);
+  useEffect(()=>{
+    Object.entries(budgetPcts).forEach(([cat,pct])=>{
+      const key100=`${cat}-100`,key80=`${cat}-80`;
+      if(pct>=100&&!budgetAlertRef.current.has(key100)){budgetAlertRef.current.add(key100);showToast(`🚨 Budget exceeded: ${cat}`,'r');}
+      else if(pct>=80&&!budgetAlertRef.current.has(key80)){budgetAlertRef.current.add(key80);showToast(`⚠️ Budget at ${pct.toFixed(0)}%: ${cat}`,'x');}
+    });
+  },[budgetPcts]);
+
+  const rp=()=>{
+    const p={data,setData,toast:showToast,setPage:setPg};
+    switch(pg){
+      case 'dashboard': return <PageDashboard {...p}/>;
+      case 'reconcile': return <PageReconcile {...p}/>;
+      case 'fund': return <PageFund {...p}/>;
+      case 'pnl': return <PagePnL {...p}/>;
+      case 'expense': return <PageTx {...p} type="expense"/>;
+      case 'invtracker': return <PageInvestmentTracker {...p}/>;
+      case 'income': return <PageTx {...p} type="income"/>;
+      case 'budget': return <PageBudget {...p}/>;
+      case 'provision': return <PageProvision {...p}/>;
+      case 'cc': return <PageCC {...p}/>;
+      case 'loan': return <PageLoans {...p}/>;
+      case 'master': return <PageMaster {...p}/>;
+      case 'data': return <PageData {...p}/>;
+      case 'drive': return <PageDriveSync {...p} syncMode={syncMode} toggleSyncMode={toggleSyncMode}/>;
+      case 'profile': return <PageProfile {...p}/>;
+      case 'cfo': return <PageCFO {...p}/>;
+      case 'forecast': return <PageForecast {...p}/>;
+      case 'debt': return <PageDebtOptimizer {...p}/>;
+      case 'ai': return <PageAI {...p}/>;
+      case 'goals': return <PageGoals {...p}/>;
+      case 'recurring': return <PageRecurring {...p}/>;
+      default: return <PageDashboard {...p}/>;
+    }
+  };
+
+  // ── Currency ──
+  // Set during render (not in an effect) so it is already correct for this pass
+  // when the page components below format their figures.
+  setCurrency(data.profile.currency);
+
+  // ── Feature gating ──
+  const invEnabled=data.profile.features?.investmentTracker!==false;
+  const GATED=['goals','invtracker','forecast'];
+  const isGated=id=>GATED.includes(id)&&!invEnabled;
+  const tabsFor=root=>(TABS[root]||[]).filter(t=>!isGated(t.id));
+  const activeRoot=OWNER[pg]||pg;
+  const curTabs=tabsFor(activeRoot);
+
+  // Navigating to a destination lands on its first available tab.
+  const goto=(rootId)=>{
+    const t=tabsFor(rootId);
+    if(TABS[rootId]&&t.length===0){
+      showToast('Enable Investment Tracker in Profile → Feature Modules','o');
+      setPg('profile');return;
+    }
+    setPg(TABS[rootId]?t[0].id:rootId);
+  };
+
+  const badgeFor=id=>{
+    if(id==='cc'&&ccAlerts>0)return{n:ccAlerts,c:'var(--r)'};
+    if(id==='budget'&&budgetAlerts>0)return{n:budgetAlerts,c:'var(--o)'};
+    if(id==='goals'&&recurringDue>0)return{n:recurringDue,c:'var(--g)'};
+    return null;
+  };
+
+  const setPeriod=(field,val)=>{
+    if(!val)return;
+    setData(d=>({...d,profile:{...d.profile,[field]:val}}));
+  };
+
+  return(
+    <>
+      <aside className="sb" style={isMobile?{display:'none'}:{}}>
+        <div className="sb-head">
+          <div className="sb-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg></div>
+          <div>
+            <div className="sb-app" style={{fontSize:12}}>MiyeeCFO</div>
+            <div className="sb-period">by Vipin Nair · {periodLabel(data.profile.periodStart,data.profile.periodEnd)}</div>
+          </div>
+        </div>
+        <nav className="sb-nav" aria-label="Main navigation">
+          {NAV.map(g=>(
+            <div key={g.s}>
+              <div className="sb-group">{g.s}</div>
+              {g.items.map(item=>{
+                const on=activeRoot===item.id;
+                const locked=TABS[item.id]?tabsFor(item.id).length===0:isGated(item.id);
+                const b=badgeFor(item.id);
+                return(
+                  <div key={item.id} role="link" tabIndex={0}
+                    aria-current={on?'page':undefined}
+                    aria-label={locked?`${item.l} (locked: enable Investment Tracker)`:item.l}
+                    className={`sb-item ${on&&!locked?'on':''} ${locked?'sb-disabled':''}`}
+                    style={locked?{opacity:.45,cursor:'not-allowed'}:{}}
+                    onClick={()=>locked?goto(item.id):goto(item.id)}
+                    onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();goto(item.id);}}}>
+                    <span className="sb-ic"><Ic n={item.n} s={14}/></span>
+                    {item.l}
+                    {locked&&<span style={{marginLeft:'auto',fontSize:9,opacity:.8}} aria-hidden="true">🔒</span>}
+                    {!locked&&b&&<span className="sb-badge" style={{background:b.c}}>{b.n}</span>}
+                    {!locked&&item.id==='ai'&&<span style={{marginLeft:'auto',fontSize:8,fontWeight:800,background:'linear-gradient(135deg,#7c3aed,#0d9488)',color:'#fff',padding:'2px 6px',borderRadius:99,letterSpacing:.3}}>AI</span>}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </nav>
+        <div className="sb-foot">
+          <div className="sb-user" role="link" tabIndex={0} aria-label="Open profile and period settings"
+            onClick={()=>setPg('profile')}
+            onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();setPg('profile');}}}>
+            <div className="sb-av" aria-hidden="true">{data.profile.avatar||data.profile.name[0]}</div>
+            <div><div className="sb-uname">{data.profile.name}</div><div className="sb-uemail">{data.profile.email}</div></div>
+          </div>
+        </div>
+      </aside>
+
+      <main className="main" style={isMobile?{marginLeft:0,maxWidth:'100vw'}:{}}>
+        <div className="topbar">
+          <div className="tb-left">
+            <div className="tb-title">{GROUP_TITLE[activeRoot]||PT[pg]}</div>
+            {/* Period is changed here, where it is read, not buried in a settings page. */}
+            {!isMobile&&(
+              <div className="per-pick" title="Reporting period">
+                <input type="month" value={data.profile.periodStart} max={data.profile.periodEnd}
+                  aria-label="Period start month"
+                  onChange={e=>setPeriod('periodStart',e.target.value)}/>
+                <span>→</span>
+                <input type="month" value={data.profile.periodEnd} min={data.profile.periodStart}
+                  aria-label="Period end month"
+                  onChange={e=>setPeriod('periodEnd',e.target.value)}/>
+              </div>
+            )}
+          </div>
+          <div className="tb-right">
+            {!isMobile&&<span className="tag tg" style={{fontSize:10}} id="tb-live">● Live</span>}
+            {DriveService._token&&(
+              <div style={{display:'flex',alignItems:'center',gap:3}} className="tb-desktop">
+                <button onClick={()=>toggleSyncMode(syncMode==='auto'?'manual':'auto')} className={`tag ${syncMode==='auto'?'tg':'tx'}`} style={{fontSize:9.5,cursor:'pointer',border:'none',fontFamily:'var(--f)',padding:'2px 7px'}}
+                  aria-label={syncMode==='auto'?'Auto-sync is on. Switch to manual sync':'Manual sync. Switch to auto-sync'}
+                  title={syncMode==='auto'?'Auto-sync ON (click to switch to manual)':'Manual sync (click to enable auto)'}>
+                  {syncMode==='auto'?'⟳ Auto':'⏸ Manual'}
+                </button>
+                <button onClick={()=>driveSyncNow(false)} className={`tag ${driveAutoStatus==='saving'?'to':driveAutoStatus==='saved'?'tg':driveAutoStatus==='error'?'tr':'tb'}`} style={{fontSize:9.5,cursor:'pointer',border:'none',fontFamily:'var(--f)',padding:'2px 7px'}}
+                  aria-label="Sync now to Google Drive" title="Sync now to Google Drive">
+                  {driveAutoStatus==='saving'?'↑ Syncing':driveAutoStatus==='saved'?'☁ Synced':driveAutoStatus==='error'?'☁ Retry':'☁ Sync'}
+                </button>
+              </div>
+            )}
+            <span className="tag tx tb-desktop" style={{fontSize:10}}>{fmtDate(new Date().toISOString().slice(0,10))}</span>
+            <button onClick={()=>setDarkMode(d=>!d)}
+              aria-label={darkMode?'Switch to light mode':'Switch to dark mode'}
+              title={darkMode?'Switch to Light Mode':'Switch to Dark Mode'}
+              style={{background:'none',border:'1.5px solid var(--n200)',borderRadius:8,cursor:'pointer',padding:'5px 9px',display:'flex',alignItems:'center',gap:5,color:'var(--n600)',fontSize:11.5,fontWeight:600,fontFamily:'var(--f)',transition:'all .13s'}}
+              onMouseEnter={e=>e.currentTarget.style.borderColor='var(--g)'} onMouseLeave={e=>e.currentTarget.style.borderColor='var(--n200)'}>
+              <span aria-hidden="true">{darkMode?'☀':'🌙'}</span>
+            </button>
+            {budgetAlerts>0&&(
+              <button onClick={()=>setPg('budget')}
+                aria-label={`${budgetAlerts} categor${budgetAlerts===1?'y':'ies'} near or over budget`}
+                title={`${budgetAlerts} over budget`}
+                style={{position:'relative',background:'none',border:'none',cursor:'pointer',padding:5,display:'flex',alignItems:'center'}}>
+                <Ic n="bell" s={16} c="var(--o)"/>
+                <span aria-hidden="true" style={{position:'absolute',top:-2,right:-2,background:'var(--o)',color:'#fff',borderRadius:'50%',width:14,height:14,fontSize:8,fontWeight:700,display:'grid',placeItems:'center'}}>{budgetAlerts}</span>
+              </button>
+            )}
+            {ccAlerts>0&&(
+              <button onClick={()=>setPg('cc')}
+                aria-label={`${ccAlerts} credit card payment${ccAlerts===1?'':'s'} due soon`}
+                title="Credit card dues"
+                style={{position:'relative',background:'none',border:'none',cursor:'pointer',padding:5,display:'flex'}}>
+                <Ic n="bell" s={16} c="var(--r)"/>
+                <span aria-hidden="true" style={{position:'absolute',top:-2,right:-2,background:'var(--r)',color:'#fff',borderRadius:'50%',width:13,height:13,fontSize:8,fontWeight:700,display:'grid',placeItems:'center'}}>{ccAlerts}</span>
+              </button>
+            )}
+            <a href="https://calendar.google.com/calendar/r/eventedit?text=MiyeeCFO+Consultation+with+Vipin+Nair&details=Consultation+request+via+MiyeeCFO.&location=Google+Meet" target="_blank" rel="noopener noreferrer" style={{textDecoration:'none'}} className="tb-desktop">
+              <button className="btn btn-sm" aria-label="Book a consultation" style={{background:'linear-gradient(135deg,#1a73e8,#1557b0)',color:'#fff',border:'none',display:'flex',alignItems:'center',gap:5}}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                Book Consultation
+              </button>
+            </a>
+            <button className="btn btn-p btn-sm" onClick={()=>setPg('data')} aria-label="Backup and export data"><Ic n="dl" s={12} c="#fff"/>{!isMobile&&'Backup'}</button>
+          </div>
+        </div>
+
+        {/* Sub-page tabs: only where a destination actually has more than one view */}
+        {curTabs.length>1&&(
+          <div className="tabs" role="tablist" aria-label={`${GROUP_TITLE[activeRoot]||''} sections`}>
+            {curTabs.map(t=>(
+              <button key={t.id} role="tab" aria-selected={pg===t.id}
+                className={`tab ${pg===t.id?'on':''}`} onClick={()=>setPg(t.id)}>
+                {t.l}
+                {badgeFor(t.id)&&<span style={{marginLeft:6,fontSize:9,fontWeight:800,color:'#fff',background:badgeFor(t.id).c,borderRadius:99,padding:'1px 5px'}}>{badgeFor(t.id).n}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+        {rp()}
+      </main>
+
+      {toast&&<Toast key={toast.k} msg={toast.msg} type={toast.type} action={toast.action} onAction={toast.onAction} onClose={()=>setToast(null)}/>}
+
+      {/* Floating Quick-Add button */}
+      {!quickAdd&&<button className="qa-btn" onClick={()=>setQuickAdd(true)} aria-label="Quick add a transaction" title="Quick Add Transaction">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>}
+
+      {quickAdd&&<QuickAdd data={data} setData={setData} toast={showToast} onClose={()=>setQuickAdd(false)}/>}
+
+      {/* Shortcut cheat-sheet: press ? */}
+      {showKeys&&(
+        <div className="ov" onClick={()=>setShowKeys(false)}>
+          <div className="modal" style={{maxWidth:380}} onClick={e=>e.stopPropagation()}>
+            <div className="mh"><div className="mt">Keyboard Shortcuts</div>
+              <button className="bic" onClick={()=>setShowKeys(false)} aria-label="Close shortcuts"><Ic n="x" s={13}/></button></div>
+            <div className="mb">
+              {[
+                ['N','Quick add a transaction'],
+                ['D','Go to Dashboard'],
+                ['Enter','Save (inside Quick Add)'],
+                ['Ctrl+Enter','Save and add another'],
+                ['Esc','Close any sheet or dialog'],
+                ['?','Show this list'],
+              ].map(([k,d])=>(
+                <div key={k} style={{display:'flex',alignItems:'center',gap:12,padding:'7px 0',borderBottom:'1px solid var(--n100)'}}>
+                  <kbd style={{fontFamily:'var(--m)',fontSize:11,fontWeight:700,background:'var(--n50)',border:'1.5px solid var(--n200)',borderRadius:5,padding:'3px 8px',minWidth:78,textAlign:'center'}}>{k}</kbd>
+                  <span style={{fontSize:12.5,color:'var(--n600)'}}>{d}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Mobile More Drawer + Bottom Nav ── */}
+      {isMobile&&<><div className={`mob-drawer-overlay${mobMenu?' open':''}`} onClick={()=>setMobMenu(false)}/>
+      <div className={`mob-drawer${mobMenu?' open':''}`} role="dialog" aria-label="All sections" aria-hidden={!mobMenu}>
+        <div className="mob-drawer-handle"/>
+        {/* Built from NAV + TABS so mobile can never drift out of sync with desktop
+            (Master Settings and Drive Sync were previously unreachable on mobile). */}
+        {NAV.map(g=>(
+          <div key={g.s} className="mob-drawer-section">
+            <div className="mob-drawer-label">{g.s}</div>
+            {g.items.map(item=>{
+              const leaves=TABS[item.id]?tabsFor(item.id):(isGated(item.id)?[]:[{id:item.id,l:item.l}]);
+              if(leaves.length===0)return null;
+              return leaves.map(leaf=>(
+                <button key={leaf.id} className={`mob-drawer-item${pg===leaf.id?' on':''}`}
+                  aria-current={pg===leaf.id?'page':undefined}
+                  onClick={()=>{setPg(leaf.id);setMobMenu(false);}}>
+                  <span className="di" aria-hidden="true"><Ic n={item.n} s={14}/></span>
+                  {TABS[item.id]&&leaves.length>1?`${item.l} · ${leaf.l}`:(PT[leaf.id]||leaf.l)}
+                </button>
+              ));
+            })}
+          </div>
+        ))}
+      </div>
+
+      <nav aria-label="Primary" style={{display:'flex',position:'fixed',bottom:0,left:0,right:0,height:58,
+        background:'var(--W)',borderTop:'1.5px solid var(--n200)',zIndex:300,
+        alignItems:'stretch',boxShadow:'0 -2px 10px rgba(0,0,0,.07)'}}>
+        {[
+          {id:'dashboard',icon:'🏠',l:'Home'},
+          {id:'expense',icon:'↓',l:'Money'},
+          {id:'budget',icon:'📊',l:'Budget'},
+          {id:'pnl',icon:'📈',l:'Reports'},
+          {id:'_more',icon:'☰',l:'More'},
+        ].map(item=>{
+          const sel=(item.id==='_more'&&mobMenu)||(item.id!=='_more'&&activeRoot===item.id&&!mobMenu);
+          return(
+            <button key={item.id} aria-label={item.l} aria-current={sel&&item.id!=='_more'?'page':undefined}
+              style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',
+                justifyContent:'center',gap:3,fontSize:9,fontWeight:600,
+                color:sel?'var(--g)':'var(--n400)',
+                cursor:'pointer',border:'none',background:'none',padding:0,fontFamily:'var(--f)'}}
+              onClick={()=>item.id==='_more'?setMobMenu(v=>!v):(setMobMenu(false),goto(item.id))}>
+              <span style={{fontSize:18,lineHeight:1}} aria-hidden="true">{item.icon}</span>
+              {item.l}
+            </button>
+          );
+        })}
+      </nav></>}
+    </>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);

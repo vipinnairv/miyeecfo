@@ -1,0 +1,11 @@
+{
+  "name": "miyeecfo",
+  "private": true,
+  "description": "MiyeeCFO personal finance workspace. UI source is src/app.jsx; run the build to regenerate index.html.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "@babel/standalone": "^7.23.2"
+  }
+}
