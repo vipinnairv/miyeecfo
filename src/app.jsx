@@ -5430,6 +5430,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
     paymentMode:'NEFT/Bank Transfer',units:'',nav:'',notes:''};
   const [form,setForm]=useState(EF);
   const [modal,setModal]=useState(false);
+  const [editId,setEditId]=useState(null);
   const [selGoalFilter,setSelGoalFilter]=useState('all');
   const ff=v=>setForm(f=>({...f,...v}));
 
@@ -5439,7 +5440,15 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
   const isNAV=selInstr&&isUnitType(selInstr.type);
 
   const openAdd=(gId,iId)=>{
+    setEditId(null);
     setForm({...EF,goalId:gId||goals[0]?.id||'',instrumentId:iId||''});
+    setModal(true);
+  };
+  const openEdit=(tx)=>{
+    setEditId(tx.id);
+    setForm({goalId:tx.goalId,instrumentId:tx.instrumentId,amount:String(tx.amount||''),
+      date:tx.date,paymentMode:tx.paymentMode||'NEFT/Bank Transfer',
+      units:tx.units?String(tx.units):'',nav:tx.nav?String(tx.nav):'',notes:tx.notes||''});
     setModal(true);
   };
 
@@ -5457,6 +5466,30 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
 
   const save=()=>{
     if(!form.goalId||!form.instrumentId||!form.amount){toast('Select goal, instrument & amount','r');return;}
+    if(editId){
+      const oldTx=itxs.find(t=>t.id===editId)||{};
+      const newAmt=+form.amount, dAmt=newAmt-(oldTx.amount||0);
+      const newUnits=isNAV&&form.units?+form.units:0, dUnits=newUnits-(oldTx.units||0);
+      const newNav=isNAV&&form.nav?+form.nav:(oldTx.nav||null);
+      const updated={...oldTx,amount:newAmt,date:form.date,month:form.date.slice(0,7),
+        notes:form.notes||'',paymentMode:form.paymentMode||'NEFT/Bank Transfer',units:newUnits,nav:newNav};
+      setData(d=>({...d,
+        investmentTxs:d.investmentTxs.map(t=>t.id===editId?updated:t),
+        goals:d.goals.map(g=>{
+          if(g.id!==form.goalId)return g;
+          const instruments=(g.instruments||[]).map(i=>{
+            if(i.id!==form.instrumentId)return i;
+            return{...i,units:isNAV?(i.units||0)+dUnits:i.units,
+              currentNAV:isNAV&&newNav?newNav:i.currentNAV,
+              lastBuyNAV:isNAV&&newNav?newNav:i.lastBuyNAV};
+          });
+          return{...g,currentAmount:Math.max(0,(g.currentAmount||0)+dAmt),instruments};
+        })
+      }));
+      setModal(false);setEditId(null);
+      toast('Contribution updated ✓','g');
+      return;
+    }
     const tx={id:uid(),goalId:form.goalId,instrumentId:form.instrumentId,amount:+form.amount,
       date:form.date,month:form.date.slice(0,7),notes:form.notes||'',
       paymentMode:form.paymentMode||'NEFT/Bank Transfer',
@@ -5730,7 +5763,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
           ):(
             <div className="tw">
               <table>
-                <thead><tr><th>Date</th><th>Goal</th><th>Instrument</th><th className="num">Amount</th><th className="num">Corpus (now)</th><th>Notes</th><th style={{width:40}}>Del</th></tr></thead>
+                <thead><tr><th>Date</th><th>Goal</th><th>Instrument</th><th className="num">Amount</th><th className="num">Corpus (now)</th><th>Notes</th><th style={{width:72}}>Actions</th></tr></thead>
                 <tbody>
                   {filtTxs.map(tx=>{
                     const gObj=allGoals.find(g=>g.id===tx.goalId);
@@ -5746,7 +5779,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                         <td className="num" style={{fontFamily:'var(--m)',fontWeight:700}}>{fmtINR(tx.amount,true)}</td>
                         <td className="num" style={{fontFamily:'var(--m)',color:'var(--g)',fontWeight:700}}>{fmtINR(txCorpus,true)}</td>
                         <td style={{color:'var(--n400)',fontSize:11}}>{tx.notes||'–'}</td>
-                        <td><button className="bic red" onClick={()=>delTx(tx.id)}><Ic n="del" s={11}/></button></td>
+                        <td><div style={{display:'flex',gap:4}}><button className="bic" onClick={()=>openEdit(tx)} aria-label="Edit contribution"><Ic n="edit" s={11}/></button><button className="bic red" onClick={()=>delTx(tx.id)} aria-label="Delete contribution"><Ic n="del" s={11}/></button></div></td>
                       </tr>
                     );
                   })}
@@ -5762,17 +5795,17 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
       {modal&&(
         <div className="ov" onClick={()=>setModal(false)}>
           <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:480}}>
-            <div className="mh"><div style={{fontWeight:700,fontSize:15}}>Log Contribution</div><button className="xb" onClick={()=>setModal(false)}>×</button></div>
+            <div className="mh"><div style={{fontWeight:700,fontSize:15}}>{editId?'Edit Contribution':'Log Contribution'}</div><button className="xb" onClick={()=>setModal(false)}>×</button></div>
             <div style={{padding:'16px 20px 20px'}}>
               <div className="f2 mb2">
                 <div className="fg fg-full"><label>Goal *</label>
-                  <select value={form.goalId} onChange={e=>ff({goalId:e.target.value,instrumentId:''})}>
+                  <select value={form.goalId} disabled={!!editId} onChange={e=>ff({goalId:e.target.value,instrumentId:''})}>
                     <option value="">Select Goal…</option>
                     {allGoals.filter(g=>(g.instruments||[]).length>0).map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
                   </select>
                 </div>
                 <div className="fg fg-full"><label>Instrument *</label>
-                  <select value={form.instrumentId} onChange={e=>ff({instrumentId:e.target.value,amount:String(selInstrList.find(i=>i.id===e.target.value)?.amount||'')})}>
+                  <select value={form.instrumentId} disabled={!!editId} onChange={e=>ff({instrumentId:e.target.value,amount:String(selInstrList.find(i=>i.id===e.target.value)?.amount||'')})}>
                     <option value="">Select Instrument…</option>
                     {selInstrList.map(i=><option key={i.id} value={i.id}>{i.name} ({i.type} · {fmtINR(i.amount,true)}/mo)</option>)}
                   </select>
@@ -5795,7 +5828,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
               </div>}
               <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
                 <button className="btn" onClick={()=>setModal(false)}>Cancel</button>
-                <button className="btn btn-p" onClick={save}>Log Contribution</button>
+                <button className="btn btn-p" onClick={save}>{editId?'Save Changes':'Log Contribution'}</button>
               </div>
             </div>
           </div>
