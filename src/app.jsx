@@ -583,12 +583,10 @@ const instrPrice=i=>i&&(i.currentNAV||i.lastBuyNAV)||0;
    was used. */
 function instrValueFromTxs(instr,txs){
   const invested=txs.reduce((s,t)=>s+(t.amount||0),0);
-  // Prefer units recorded per contribution; otherwise fall back to the units
-  // held on the instrument itself, so a holding entered directly (units + latest
-  // price, no logged contributions) and a price update both value at market and
-  // flow into net worth.
-  let units=txs.reduce((s,t)=>s+(t.units||0),0);
-  if(units<=0&&instr&&(instr.units||0)>0)units=instr.units;
+  // Units come only from what you actually logged as contributions. A plan's
+  // "units held" field never creates value on its own, so an instrument you have
+  // not funded is worth nothing here.
+  const units=txs.reduce((s,t)=>s+(t.units||0),0);
   const px=instrPrice(instr);
   if(instr&&isUnitType(instr.type)&&px>0&&units>0){
     return{value:units*px,invested,units,priced:true};
@@ -690,15 +688,9 @@ function computeFin(data,months){
     if(mSet.has(k)){invPeriod+=amt;invByMonth[k]=(invByMonth[k]||0)+amt;}
     (txsByInstr[t.instrumentId||'?']=txsByInstr[t.instrumentId||'?']||[]).push(t);
   }
-  // Value EVERY instrument, whether or not it has logged contributions, so a
-  // holding entered directly (units + latest price) still counts towards net
-  // worth. See instrValueFromTxs for the exact rule.
-  const seen={};
-  for(const g of goals)for(const i of (g.instruments||[])){
-    seen[i.id]=1;invCorpus+=instrValueFromTxs(i,txsByInstr[i.id]||[]).value;
-  }
-  // Contributions whose instrument no longer exists still hold value.
-  for(const id in txsByInstr)if(!seen[id])invCorpus+=instrValueFromTxs(instrById[id],txsByInstr[id]).value;
+  // Value only instruments you have actually funded (a logged contribution).
+  // See instrValueFromTxs for the exact rule.
+  for(const id in txsByInstr)invCorpus+=instrValueFromTxs(instrById[id],txsByInstr[id]).value;
   const invGain=invCorpus-invTotal;
   const mInv=months.map(m=>invByMonth[m.key]||0);
   // What is genuinely left over once the money you committed to investing is set aside.
