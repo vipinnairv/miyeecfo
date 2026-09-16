@@ -3243,6 +3243,62 @@ function PageData({data,setData,toast}){
   return(
     <div className="page">
       <div className="ph"><div><div className="ptitle">Data Management</div><div className="psub">Export · Import · Restore · Reset</div></div></div>
+
+      {/* Integrity. Every money bug this app has had took one shape: a stored
+          running total drifting from the entries meant to add up to it. So the
+          totals are recomputed and compared rather than trusted. A number that
+          can be checked stops being able to lie quietly. */}
+      {(()=>{
+        const chk=integrityCheck(data);
+        const heal=()=>{
+          setData(d=>{
+            const emiIds=new Set(d.transactions.filter(t=>t.type==='emi').map(t=>t.id));
+            return{...d,
+              goals:d.goals.map(g=>({...g,currentAmount:goalSaved(g,d.investmentTxs||[])})),
+              // A payment whose ledger entry was deleted is no longer evidence
+              // of a payment, so it stops counting as one.
+              loans:d.loans.map(l=>({...l,paidEmis:(l.paidEmis||[]).filter(p=>!p.txId||emiIds.has(p.txId))})),
+              transactions:d.transactions.filter(t=>!t.accountId||d.accounts.some(a=>a.id===t.accountId)),
+              investmentTxs:(d.investmentTxs||[]).filter(t=>!t.goalId||d.goals.some(g=>g.id===t.goalId))};
+          });
+          toast('Totals rebuilt from your entries','g');
+        };
+        return(
+          <div className="card mb3" style={{borderLeft:`3px solid ${chk.clean?'var(--g)':'var(--o)'}`}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+              <div>
+                <div style={{fontWeight:800,fontSize:13.5}}>Books integrity
+                  <span className={`tag ${chk.clean?'tg':'to'}`} style={{marginLeft:7,fontSize:10}}>{chk.score}%</span></div>
+                <div style={{fontSize:11.5,color:'var(--n500)',marginTop:2}}>
+                  {chk.clean
+                    ? 'Every stored total matches the entries behind it.'
+                    : `${chk.issues.length} figure${chk.issues.length===1?'':'s'} no longer match the entries behind them.`}
+                </div>
+              </div>
+              {chk.fixable>0&&<button className="btn btn-p btn-sm" onClick={heal}><Ic n="ok" s={12} c="#fff"/>Rebuild from entries</button>}
+            </div>
+            {!chk.clean&&(
+              <div className="tw mt2">
+                <table>
+                  <thead><tr><th>What</th><th className="num">Stored</th><th className="num">Actual</th><th className="num">Drift</th><th>Why it matters</th></tr></thead>
+                  <tbody>
+                    {chk.issues.map((i,n)=>(
+                      <tr key={n}>
+                        <td style={{fontWeight:600}}>{i.name}<div style={{fontSize:10,color:'var(--n400)'}}>{i.kind}</div></td>
+                        <td className="num">{i.kind==='goal'?fmtINR(i.stored):i.stored}</td>
+                        <td className="num">{i.kind==='goal'?fmtINR(i.derived):i.derived}</td>
+                        <td className="num neg" style={{fontWeight:700}}>{i.kind==='goal'?fmtINR(i.diff):i.diff}</td>
+                        <td style={{fontSize:11,color:'var(--n500)'}}>{i.detail}
+                          {!i.fixable&&<div style={{fontSize:10,color:'var(--o)',marginTop:2}}>Needs a look from you; a rebuild cannot decide this one.</div>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })()}
       <input type="file" ref={fileRef} accept=".json" style={{display:'none'}} onChange={himp}/>
       <input type="file" ref={legacyRef} accept=".json" style={{display:'none'}} onChange={himpLegacy}/>
       <input type="file" ref={mergeRef} accept=".json" style={{display:'none'}} onChange={himpMerge}/>
@@ -3843,6 +3899,378 @@ function ScoreBar({label,val,max,color}){
 /* ══════════════════════════════════════
    CFO DASHBOARD
 ══════════════════════════════════════ */
+
+/* ══════════════════════════════════════
+   IDLE CAPITAL
+   Assets earning less than debt costs. The spread is a fee you pay for
+   the comfort of a larger balance, and nothing else in the app names it.
+══════════════════════════════════════ */
+function PageCarry({data,setData,toast}){
+  const c=useMemo(()=>computeCarry(data),[data]);
+  const [edit,setEdit]=useState(null);
+  const saveRate=()=>{
+    setData(d=>({...d,accounts:d.accounts.map(a=>a.id===edit.id?{...a,rate:edit.rate===''?null:+edit.rate}:a)}));
+    toast('Yield updated','g');setEdit(null);
+  };
+  return(
+    <div className="page">
+      <div className="ph mb3">
+        <div><div className="ptitle">Idle Capital</div>
+        <div className="psub">What your money earns against what your debt costs</div></div>
+      </div>
+
+      {c.debts.length===0
+        ? <div className="alert ai"><Ic n="prov" s={13}/><span>No outstanding loans, so there is nothing to arbitrage. Every rupee is free to earn.</span></div>
+        : c.worthDoing
+        ? <div className="card mb3" style={{border:'2px solid var(--o)',background:'linear-gradient(135deg,rgba(245,158,11,.06),rgba(245,158,11,.02))'}}>
+            <div style={{fontSize:11,textTransform:'uppercase',fontWeight:700,color:'var(--o)',letterSpacing:.4}}>You are paying to hold cash</div>
+            <div style={{fontFamily:'var(--m)',fontSize:30,fontWeight:800,margin:'6px 0 4px'}}>{fmtINR(c.annualGain)}<span style={{fontSize:14,fontWeight:600,color:'var(--n400)'}}> / year</span></div>
+            <div style={{fontSize:12.5,color:'var(--n600)',lineHeight:1.5}}>
+              Using {fmtINR(c.deployed,true)} of your lowest-earning money to clear your dearest debt would save that much every year,
+              at no risk. That is {fmtINR(c.monthlyGain)} a month you are currently handing to a lender for the comfort of a bigger balance.
+            </div>
+          </div>
+        : <div className="alert ag"><Ic n="ok" s={13}/><span>Your assets out-earn your debt. Holding the cash is the right call.</span></div>}
+
+      {c.pairs.length>0&&(
+        <div className="card mb3">
+          <div className="ptitle" style={{fontSize:14,marginBottom:2}}>Where to move it</div>
+          <div className="psub" style={{marginBottom:10}}>Cheapest money first, against the most expensive debt. This is the best case available to you.</div>
+          <div className="tw">
+            <table>
+              <thead><tr><th>Take from</th><th className="num">Earns</th><th>Put against</th><th className="num">Costs</th><th className="num">Amount</th><th className="num">Spread</th><th className="num">Saved / year</th></tr></thead>
+              <tbody>
+                {c.pairs.map((p,i)=>(
+                  <tr key={i}>
+                    <td style={{fontWeight:600}}>{p.from}{p.assumed&&<span className="tag tx" style={{marginLeft:5,fontSize:9}} title="No yield entered. An assumed rate is used until you set one.">assumed</span>}</td>
+                    <td className="num" style={{fontFamily:'var(--m)'}}>{p.fromRate}%</td>
+                    <td style={{fontWeight:600}}>{p.to}</td>
+                    <td className="num" style={{fontFamily:'var(--m)',color:'var(--r)'}}>{p.toRate}%</td>
+                    <td className="num">{fmtINR(p.amount)}</td>
+                    <td className="num"><span className="tag to" style={{fontSize:10}}>{p.spread}%</span></td>
+                    <td className="num pos" style={{fontWeight:700}}>{fmtINR(p.annualGain)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot><tr className="tft"><td colSpan={4} style={{fontWeight:700}}>Total</td>
+                <td className="num" style={{fontWeight:700}}>{fmtINR(c.deployed)}</td><td/>
+                <td className="num pos" style={{fontWeight:800}}>{fmtINR(c.annualGain)}</td></tr></tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="g4 mb3" style={{gap:12}}>
+        {[{l:'Assets in play',v:fmtINR(c.liquidAssets,true)},
+          {l:'Debt outstanding',v:fmtINR(c.totalDebt,true),c:'var(--r)'},
+          {l:'Still idle after',v:fmtINR(c.idle,true),c:'var(--o)'},
+          {l:'Unused credit line',v:fmtINR(c.unusedCredit,true),c:'var(--b)'}].map(x=>(
+          <div className="card" key={x.l} style={{padding:'12px 14px'}}>
+            <div style={{fontSize:9.5,color:'var(--n400)',textTransform:'uppercase',fontWeight:700}}>{x.l}</div>
+            <div style={{fontFamily:'var(--m)',fontSize:17,fontWeight:700,color:x.c||'',marginTop:3}}>{x.v}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        <div className="ptitle" style={{fontSize:14,marginBottom:2}}>Your yields</div>
+        <div className="psub" style={{marginBottom:10}}>An assumed rate is a guess. Enter the real one and this analysis sharpens.</div>
+        <div className="tw">
+          <table>
+            <thead><tr><th>Account</th><th>Type</th><th className="num">Balance</th><th className="num">Yield</th><th/></tr></thead>
+            <tbody>
+              {c.assets.map(a=>(
+                <tr key={a.id}>
+                  <td style={{fontWeight:600}}>{a.name}</td>
+                  <td><span className="tag tx" style={{fontSize:9.5}}>{a.type}</span></td>
+                  <td className="num">{fmtINR(a.amount)}</td>
+                  <td className="num" style={{fontFamily:'var(--m)',color:a.assumed?'var(--n400)':''}}>{a.rate}%{a.assumed&&' *'}</td>
+                  <td style={{width:36}}><button className="bic" onClick={()=>setEdit({id:a.id,name:a.name,rate:a.assumed?'':String(a.rate)})}><Ic n="edit" s={11}/></button></td>
+                </tr>
+              ))}
+              {c.overdrafts.map(o=>(
+                <tr key={o.id} style={{opacity:.75}}>
+                  <td style={{fontWeight:600}}>{o.name}</td>
+                  <td><span className="tag tr" style={{fontSize:9.5}}>overdrawn</span></td>
+                  <td className="num neg">{fmtINR(-o.amount)}</td>
+                  <td className="num" style={{color:'var(--n400)'}}>debt</td><td/>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{fontSize:10.5,color:'var(--n400)',marginTop:8}}>* Assumed, not entered. Deliberately conservative: overstating what an asset earns would hide exactly the gap this page exists to find.</div>
+      </div>
+
+      {edit&&<Modal title={`Yield on ${edit.name}`} onClose={()=>setEdit(null)}
+        foot={<><button className="btn btn-s btn-sm" onClick={()=>setEdit(null)}>Cancel</button>
+          <button className="btn btn-p btn-sm" onClick={saveRate}><Ic n="ok" s={12} c="#fff"/>Save</button></>}>
+        <div className="fg"><label>Annual yield (%)</label>
+          <input type="number" step="0.01" value={edit.rate} placeholder="leave blank to assume"
+            onChange={e=>setEdit(x=>({...x,rate:e.target.value}))}/>
+        </div>
+      </Modal>}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   SURVIVAL
+   "Runway: 8 months" assumes one undifferentiated pot. Money actually runs
+   out in an order, on dates. This shows those.
+══════════════════════════════════════ */
+function PageSurvival({data}){
+  const {profile}=data;
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const f=useFin(data,months);
+  const [incomeMode,setIncomeMode]=useState('zero');
+  const income=incomeMode==='zero'?0:incomeMode==='half'?Math.round(f.avgMonthlyInc/2):f.avgMonthlyInc;
+  const s=useMemo(()=>survivalTimeline(data,f,{monthlyIncome:income}),[data,f,income]);
+  const sev=s.monthsLeft<3?'var(--r)':s.monthsLeft<6?'var(--o)':'var(--g)';
+
+  return(
+    <div className="page">
+      <div className="ph mb3">
+        <div><div className="ptitle">Survival</div>
+        <div className="psub">If the money stopped, what goes first and when</div></div>
+        <div style={{display:'flex',gap:6}}>
+          {[['zero','Income stops'],['half','Halved'],['full','Unchanged']].map(([k,l])=>(
+            <button key={k} className={`btn btn-sm ${incomeMode===k?'btn-p':'btn-s'}`} onClick={()=>setIncomeMode(k)}>{l}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="card mb3" style={{border:`2px solid ${sev}`}}>
+        <div className="g4" style={{gap:14}}>
+          <div><div style={{fontSize:9.5,color:'var(--n400)',textTransform:'uppercase',fontWeight:700}}>Money in</div>
+            <div style={{fontFamily:'var(--m)',fontSize:17,fontWeight:700}}>{fmtINR(s.monthlyIn)}<span style={{fontSize:11,color:'var(--n400)'}}>/mo</span></div></div>
+          <div><div style={{fontSize:9.5,color:'var(--n400)',textTransform:'uppercase',fontWeight:700}}>Money out</div>
+            <div style={{fontFamily:'var(--m)',fontSize:17,fontWeight:700,color:'var(--r)'}}>{fmtINR(s.monthlyOut)}<span style={{fontSize:11,color:'var(--n400)'}}>/mo</span></div>
+            <div style={{fontSize:10,color:'var(--n400)'}}>expenses plus EMIs</div></div>
+          <div><div style={{fontSize:9.5,color:'var(--n400)',textTransform:'uppercase',fontWeight:700}}>Net</div>
+            <div style={{fontFamily:'var(--m)',fontSize:17,fontWeight:700,color:s.net>=0?'var(--g)':'var(--r)'}}>{s.net>=0?'+':''}{fmtINR(s.net)}</div></div>
+          <div><div style={{fontSize:9.5,color:'var(--n400)',textTransform:'uppercase',fontWeight:700}}>You last</div>
+            <div style={{fontFamily:'var(--m)',fontSize:17,fontWeight:800,color:sev}}>{s.solvent?'indefinitely':`${s.monthsLeft} months`}</div>
+            {!s.solvent&&<div style={{fontSize:10,color:'var(--n400)'}}>zero on {fmtDate(s.zeroDate)}</div>}</div>
+        </div>
+      </div>
+
+      {s.solvent
+        ? <div className="alert ag"><Ic n="ok" s={13}/><span>You take in more than you spend, so nothing depletes. The timeline only appears when you are running a deficit.</span></div>
+        : (
+        <div className="card">
+          <div className="ptitle" style={{fontSize:14,marginBottom:2}}>The order it goes</div>
+          <div className="psub" style={{marginBottom:12}}>Spending money first, deposits last. Burning {fmtINR(s.burn)} a month.</div>
+          {s.events.map((e,i)=>{
+            const pct=s.total>0?e.cumulative/s.total*100:0;
+            return(
+              <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 0',borderTop:i?'1px solid var(--n100)':'none'}}>
+                <div style={{width:26,height:26,borderRadius:8,display:'grid',placeItems:'center',flexShrink:0,
+                  background:e.monthsOut<3?'rgba(239,68,68,.12)':e.monthsOut<6?'rgba(245,158,11,.12)':'rgba(0,179,134,.1)',
+                  color:e.monthsOut<3?'var(--r)':e.monthsOut<6?'var(--o)':'var(--g)',fontWeight:800,fontSize:11}}>{i+1}</div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:12.5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                    {e.name} <span className="tag tx" style={{fontSize:9,marginLeft:4}}>{e.type}</span></div>
+                  <div className="prog" style={{height:5,marginTop:4}}><div className="pf" style={{width:`${pct}%`,background:sev}}/></div>
+                </div>
+                <div style={{textAlign:'right',flexShrink:0}}>
+                  <div style={{fontFamily:'var(--m)',fontSize:12.5,fontWeight:700}}>{fmtINR(e.amount,true)}</div>
+                  <div style={{fontSize:10.5,color:'var(--n400)'}}>gone {fmtDate(e.date)}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   SCENARIOS
+   computeFin is pure, so a hypothetical is just the same engine run on a
+   copy. No second projection model to drift out of step with the real one.
+══════════════════════════════════════ */
+function PageScenario({data}){
+  const {profile,loans,accounts,goals}=data;
+  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
+  const [sc,setSc]=useState({prepay:{loanId:(loans[0]||{}).id||'',accountId:'',amount:''},
+    incomeDelta:'',expenseDelta:'',extraSip:'',goalId:(goals[0]||{}).id||''});
+  const clean=useMemo(()=>({
+    prepay:sc.prepay.amount?{...sc.prepay,amount:+sc.prepay.amount}:null,
+    incomeDelta:+sc.incomeDelta||0,expenseDelta:+sc.expenseDelta||0,
+    extraSip:+sc.extraSip||0,goalId:sc.goalId}),[sc]);
+  const base=useFin(data,months);
+  const alt=useMemo(()=>computeFin(applyScenario(data,clean),months),[data,clean,months]);
+  const diff=useMemo(()=>scenarioDiff(base,alt),[base,alt]);
+  const touched=clean.prepay||clean.incomeDelta||clean.expenseDelta||clean.extraSip;
+
+  const ROWS=[
+    {k:'netWorth',l:'Net worth',good:1},
+    {k:'liquidNetWorth',l:'Liquid net worth',good:1},
+    {k:'loanOS',l:'Debt outstanding',good:-1},
+    {k:'monthlyInterestCost',l:'Interest cost / month',good:-1},
+    {k:'totalExp',l:'Expenses',good:-1},
+    {k:'surplus',l:'Surplus',good:1},
+    {k:'cashBalance',l:'Balance cash',good:1},
+    {k:'fundRunway',l:'Runway (months)',good:1,mo:true},
+  ];
+  return(
+    <div className="page">
+      <div className="ph mb3">
+        <div><div className="ptitle">Scenarios</div>
+        <div className="psub">Change one thing and see the whole picture move</div></div>
+        <button className="btn btn-s btn-sm" onClick={()=>setSc({prepay:{loanId:(loans[0]||{}).id||'',accountId:'',amount:''},incomeDelta:'',expenseDelta:'',extraSip:'',goalId:(goals[0]||{}).id||''})}>Reset</button>
+      </div>
+
+      <div className="alert ai mb3"><Ic n="prov" s={13}/><span>
+        Nothing here touches your books. Each figure is your real data with one change applied, run through the same engine that produces your dashboard.
+      </span></div>
+
+      <div className="card mb3">
+        <div className="ptitle" style={{fontSize:14,marginBottom:10}}>What if</div>
+        <div className="f2 mb2">
+          <div className="fg"><label>Prepay a loan ({CUR.sym})</label>
+            <input type="number" min="0" value={sc.prepay.amount} placeholder="0"
+              onChange={e=>setSc(x=>({...x,prepay:{...x.prepay,amount:e.target.value}}))}/></div>
+          <div className="fg"><label>Which loan</label>
+            <select value={sc.prepay.loanId} onChange={e=>setSc(x=>({...x,prepay:{...x.prepay,loanId:e.target.value}}))}>
+              {loans.map(l=><option key={l.id} value={l.id}>{l.bank} {l.type} ({fmtINR(l.outstanding,true)} @ {l.roi}%)</option>)}
+            </select></div>
+          <div className="fg fg-full"><label>Paid from</label>
+            <select value={sc.prepay.accountId} onChange={e=>setSc(x=>({...x,prepay:{...x.prepay,accountId:e.target.value}}))}>
+              <option value="">auto: first account with enough</option>
+              {accounts.map(a=><option key={a.id} value={a.id}>{a.name} ({fmtINR(a.balance,true)})</option>)}
+            </select></div>
+        </div>
+        <div className="f2">
+          <div className="fg"><label>Income change ({CUR.sym}/mo)</label>
+            <input type="number" value={sc.incomeDelta} placeholder="0, or -20000"
+              onChange={e=>setSc(x=>({...x,incomeDelta:e.target.value}))}/></div>
+          <div className="fg"><label>Expense change ({CUR.sym}/mo)</label>
+            <input type="number" value={sc.expenseDelta} placeholder="0, or -5000"
+              onChange={e=>setSc(x=>({...x,expenseDelta:e.target.value}))}/></div>
+          <div className="fg"><label>Extra invested ({CUR.sym})</label>
+            <input type="number" min="0" value={sc.extraSip} placeholder="0"
+              onChange={e=>setSc(x=>({...x,extraSip:e.target.value}))}/></div>
+          {goals.length>0&&<div className="fg"><label>Into goal</label>
+            <select value={sc.goalId} onChange={e=>setSc(x=>({...x,goalId:e.target.value}))}>
+              {goals.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
+            </select></div>}
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="ptitle" style={{fontSize:14,marginBottom:2}}>Then versus now</div>
+        <div className="psub" style={{marginBottom:10}}>{touched?'Green is better off, red is worse off.':'Change something above to see the difference.'}</div>
+        <div className="tw">
+          <table>
+            <thead><tr><th>Measure</th><th className="num">Now</th><th className="num">After</th><th className="num">Change</th></tr></thead>
+            <tbody>
+              {ROWS.map(r=>{
+                const d=diff[r.k];const delta=d.delta;
+                const better=delta*r.good>0;
+                const col=Math.abs(delta)<0.5?'':better?'var(--g)':'var(--r)';
+                const fmt=v=>r.mo?(isFinite(v)?v.toFixed(1):'∞'):fmtINR(v);
+                return(
+                  <tr key={r.k}>
+                    <td style={{fontWeight:600}}>{r.l}</td>
+                    <td className="num">{fmt(d.base)}</td>
+                    <td className="num" style={{fontWeight:700}}>{fmt(d.alt)}</td>
+                    <td className="num" style={{color:col,fontWeight:700}}>
+                      {Math.abs(delta)<0.5?'no change':`${delta>0?'+':'−'}${r.mo?Math.abs(delta).toFixed(1):fmtINR(Math.abs(delta))}`}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {clean.prepay&&<div style={{fontSize:11,color:'var(--n500)',marginTop:10,lineHeight:1.5}}>
+          A prepayment leaves net worth unchanged on the day you make it: cash falls, debt falls by the same amount.
+          What you buy is the interest you no longer pay, which shows up as a lower monthly interest cost above.
+        </div>}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   COMMITMENTS
+   Subscriptions do not announce themselves. They just arrive every month.
+══════════════════════════════════════ */
+function PageCommit({data,setData,toast}){
+  const r=useMemo(()=>detectRecurring(data.transactions),[data.transactions]);
+  const existing=new Set((data.recurring||[]).map(x=>(x.merchant||'').toLowerCase()));
+  const add=f=>{
+    setData(d=>({...d,recurring:[...(d.recurring||[]),{
+      id:uid(),active:true,type:'expense',merchant:f.merchant,amount:f.avg,
+      category:f.category||'Other Expense',paymentMode:f.paymentMode||'UPI',
+      desc:f.merchant,freq:'monthly',
+      nextDate:new Date(new Date().setMonth(new Date().getMonth()+1)).toISOString().slice(0,10)}]}));
+    toast(`${f.merchant} added as recurring`,'g');
+  };
+  const KIND={
+    subscription:{l:'Subscription',c:'tr',d:'Same amount, every month. The kind you can cancel.'},
+    variable:{l:'Monthly bill',c:'to',d:'Arrives every month, amount varies. Committed, not cancellable.'},
+    regular:{l:'Regular',c:'tb',d:'Steady amount, but not every month.'},
+    habit:{l:'Habit',c:'tx',d:'Repeated, but irregular. A choice rather than a commitment.'},
+  };
+  return(
+    <div className="page">
+      <div className="ph mb3">
+        <div><div className="ptitle">Commitments</div>
+        <div className="psub">What leaves every month whether you decide on it or not</div></div>
+      </div>
+
+      <div className="card mb3" style={{border:'2px solid var(--o)'}}>
+        <div style={{fontSize:11,textTransform:'uppercase',fontWeight:700,color:'var(--o)',letterSpacing:.4}}>Committed every year</div>
+        <div style={{fontFamily:'var(--m)',fontSize:30,fontWeight:800,margin:'6px 0 4px'}}>{fmtINR(r.annualCommitted)}</div>
+        <div style={{fontSize:12.5,color:'var(--n600)',lineHeight:1.5}}>
+          Found in your own ledger, not entered by you: {r.subscriptions.length} subscription{r.subscriptions.length===1?'':'s'} ({fmtINR(r.annualSubscriptions,true)} a year)
+          and {r.variable.length} monthly bill{r.variable.length===1?'':'s'}. Priced per year, because people decide differently about
+          {' '}{fmtINR(r.annualCommitted/12,true)} a month than about {fmtINR(r.annualCommitted,true)}.
+        </div>
+      </div>
+
+      {r.found.length===0
+        ? <div className="alert ai"><Ic n="prov" s={13}/><span>Nothing repeats often enough to call a commitment yet. Entries need a merchant name to be recognised, so filling those in makes this page work.</span></div>
+        : (
+        <div className="card">
+          <div className="ptitle" style={{fontSize:14,marginBottom:10}}>Found in your ledger</div>
+          <div className="tw">
+            <table>
+              <thead><tr><th>Merchant</th><th>Kind</th><th className="num">Seen</th><th className="num">Typical</th><th className="num">Per year</th><th/></tr></thead>
+              <tbody>
+                {r.found.map(f=>{
+                  const k=KIND[f.kind];
+                  const already=existing.has(f.merchant.toLowerCase());
+                  return(
+                    <tr key={f.merchant}>
+                      <td style={{fontWeight:600}}>{f.merchant}
+                        <div style={{fontSize:10,color:'var(--n400)'}}>{f.category}</div></td>
+                      <td><span className={`tag ${k.c}`} style={{fontSize:9.5}} title={k.d}>{k.l}</span></td>
+                      <td className="num" style={{fontSize:11}}>{f.count}x · {f.months} mo</td>
+                      <td className="num">{fmtINR(f.avg)}</td>
+                      <td className="num" style={{fontWeight:700,color:f.annual>=10000?'var(--r)':''}}>{fmtINR(f.annual)}</td>
+                      <td style={{width:96}}>
+                        {already?<span className="tag tg" style={{fontSize:9.5}}>tracked</span>
+                          :<button className="btn btn-s btn-sm" style={{fontSize:10.5,padding:'3px 8px'}} onClick={()=>add(f)}>Track</button>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{fontSize:10.5,color:'var(--n400)',marginTop:8}}>
+            Entries without a merchant name cannot be matched, so they never appear here.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PageCFO({data}){
   const {transactions,accounts,creditCards,loans,budgetLimits,expenseCategories,profile}=data;
   const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
@@ -5754,6 +6182,36 @@ function PageGoals({data,setData,toast}){
                 {!done&&monthsLeft&&<span style={{fontSize:11,color:'var(--o)',fontWeight:600}}>{fmtINR(Math.round(needed||0),true)}/mo needed</span>}
               </div>
               {g.targetDate&&<div style={{fontSize:11,color:'var(--n400)',marginBottom:8}}>🗓 {fmtDate(g.targetDate)}{monthsLeft&&` · ${Math.ceil(monthsLeft)} mo left`}</div>}
+              {/* Reality check. A bar creeping from 0.2% to 0.3% is a lie of
+                  omission, so the arithmetic is inverted and stated plainly:
+                  what you actually contribute against what this goal needs. */}
+              {(()=>{
+                const r=goalReality(g,data.investmentTxs||[]);
+                if(!r.target)return null;
+                const bad=r.requiredMonthly!==null&&!r.onTrack;
+                return(
+                  <div style={{background:bad?'rgba(239,68,68,.06)':'rgba(0,179,134,.06)',
+                    border:`1px solid ${bad?'rgba(239,68,68,.2)':'rgba(0,179,134,.2)'}`,
+                    borderRadius:8,padding:'8px 10px',marginBottom:8}}>
+                    <div style={{fontSize:9.5,fontWeight:800,textTransform:'uppercase',letterSpacing:.4,
+                      color:bad?'var(--r)':'var(--g)',marginBottom:5}}>Reality check</div>
+                    {!r.enoughHistory
+                      ? <div style={{fontSize:11.5,color:'var(--n600)',lineHeight:1.45}}>
+                          {r.contributions===0?'Nothing contributed yet.':`Only ${r.contributions} contribution${r.contributions===1?'':'s'}, all in one month.`}
+                          {r.requiredMonthly!==null&&<> This goal needs <strong style={{fontFamily:'var(--m)'}}>{fmtINR(r.requiredMonthly)}</strong> every month to arrive on time.</>}
+                          <div style={{fontSize:10.5,color:'var(--n400)',marginTop:3}}>Two months of contributions are needed before a pace can be read.</div>
+                        </div>
+                      : <div style={{fontSize:11.5,color:'var(--n600)',lineHeight:1.45}}>
+                          You contribute <strong style={{fontFamily:'var(--m)'}}>{fmtINR(r.actualMonthly)}</strong>/mo.
+                          {r.requiredMonthly!==null&&<> This goal needs <strong style={{fontFamily:'var(--m)',color:bad?'var(--r)':'var(--g)'}}>{fmtINR(r.requiredMonthly)}</strong>/mo.</>}
+                          {bad&&r.shortfall>0&&<> Short by <strong style={{fontFamily:'var(--m)'}}>{fmtINR(r.shortfall)}</strong> a month.</>}
+                          {r.arrivalYear&&<div style={{fontSize:10.5,color:'var(--n400)',marginTop:3}}>
+                            At this pace you arrive in <strong>{r.arrivalYear}</strong>.</div>}
+                          {r.onTrack&&<div style={{fontSize:10.5,color:'var(--g)',marginTop:3}}>On track.</div>}
+                        </div>}
+                  </div>
+                );
+              })()}
               {g.notes&&<div style={{fontSize:11,color:'var(--n500)',background:'var(--n50)',borderRadius:6,padding:'5px 9px',marginBottom:8}}>{g.notes}</div>}
               {/* Instruments */}
               {instrs.length>0&&<div style={{background:'var(--bl)',borderRadius:8,padding:'8px 10px',border:'1px solid rgba(37,99,235,.13)'}}>
@@ -6088,14 +6546,14 @@ const TABS={
   budget:    [{id:'budget',l:'Budget vs Actual'}],
   cc:        [{id:'cc',l:'Credit Cards'},{id:'loan',l:'Loans'},{id:'debt',l:'Debt Optimizer'},{id:'provision',l:'Future Outflows'}],
   goals:     [{id:'goals',l:'Savings Goals'},{id:'recurring',l:'Recurring'},{id:'forecast',l:'Forecast'}],
-  pnl:       [{id:'pnl',l:'P & L Statement'},{id:'cfo',l:'CFO Dashboard'}],
+  pnl:       [{id:'pnl',l:'P & L Statement'},{id:'cfo',l:'CFO Dashboard'},{id:'carry',l:'Idle Capital'},{id:'survival',l:'Survival'},{id:'scenario',l:'Scenarios'},{id:'commit',l:'Commitments'}],
   master:    [{id:'master',l:'Master Settings'},{id:'data',l:'Data Management'},{id:'drive',l:'Google Drive'},{id:'profile',l:'Profile & Period'}],
 };
 // Reverse index: leaf id → the nav item that owns it.
 const OWNER={};
 Object.entries(TABS).forEach(([root,tabs])=>tabs.forEach(t=>{OWNER[t.id]=root;}));
 
-const PT={dashboard:'Dashboard',fund:'Bank Balance Sheet',pnl:'P & L Statement',expense:'Expense Tracker',invtracker:'Investment Tracker',income:'Income Tracker',budget:'Budget vs Actual',provision:'Expected Future Outflows',cc:'Credit Cards',loan:'Loan Tracker',cfo:'CFO Dashboard',forecast:'Financial Forecast',debt:'Debt Optimizer',ai:'AI Insights',master:'Master Settings',data:'Data Management',drive:'Google Drive Sync',profile:'Profile & Period',goals:'Savings Goals',recurring:'Recurring Transactions'};
+const PT={dashboard:'Dashboard',fund:'Bank Balance Sheet',pnl:'P & L Statement',expense:'Expense Tracker',invtracker:'Investment Tracker',income:'Income Tracker',budget:'Budget vs Actual',provision:'Expected Future Outflows',cc:'Credit Cards',loan:'Loan Tracker',cfo:'CFO Dashboard',carry:'Idle Capital',survival:'Survival',scenario:'Scenarios',commit:'Commitments',forecast:'Financial Forecast',debt:'Debt Optimizer',ai:'AI Insights',master:'Master Settings',data:'Data Management',drive:'Google Drive Sync',profile:'Profile & Period',goals:'Savings Goals',recurring:'Recurring Transactions'};
 // Heading shown in the topbar for the whole destination (tabs name the leaf).
 const GROUP_TITLE={fund:'Bank Balance Sheet',expense:'Transactions',budget:'Budget',cc:'Liabilities',goals:'Plan',pnl:'Reports',master:'Settings'};
 
@@ -6408,6 +6866,10 @@ function App(){
       case 'drive': return <PageDriveSync {...p} syncMode={syncMode} toggleSyncMode={toggleSyncMode}/>;
       case 'profile': return <PageProfile {...p}/>;
       case 'cfo': return <PageCFO {...p}/>;
+      case 'carry': return <PageCarry {...p}/>;
+      case 'survival': return <PageSurvival {...p}/>;
+      case 'scenario': return <PageScenario {...p}/>;
+      case 'commit': return <PageCommit {...p}/>;
       case 'forecast': return <PageForecast {...p}/>;
       case 'debt': return <PageDebtOptimizer {...p}/>;
       case 'ai': return <PageAI {...p}/>;

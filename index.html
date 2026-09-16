@@ -955,6 +955,459 @@ function computeFin(data, months) {
 }
 // Memoised so a keystroke elsewhere doesn't re-run every reduce on the dashboard.
 
+/* ══════════════════════════════════════
+   CFO ENGINE
+   Five questions a finance app usually leaves you to work out yourself.
+   All pure functions of `data`, so the UI can run them on a hypothetical
+   copy just as easily as on your real books.
+══════════════════════════════════════ */
+
+// Assumed yields when you have not entered one. Deliberately conservative:
+// overstating what an asset earns would hide a negative carry, which is the
+// one thing this analysis exists to find.
+const DEFAULT_YIELD = {
+  fd: 7,
+  bank: 3,
+  cash: 0,
+  wallet: 0
+};
+
+/* ── 1. NEGATIVE CARRY ──────────────────────────────────────────────
+   Money that earns less than your debt costs is money you are paying to
+   keep. Holding a deposit at 7% against a loan at 12.36% is not caution,
+   it is a 5.36% annual fee for the comfort of a bigger balance. This ranks
+   every asset against every debt and prices the overlap. */
+function computeCarry(data) {
+  const {
+    accounts = [],
+    loans = [],
+    creditCards = []
+  } = data;
+  const assets = accounts.filter(a => (a.balance || 0) > 0).map(a => ({
+    id: a.id,
+    name: a.name,
+    type: a.type,
+    amount: a.balance,
+    rate: a.rate === null || a.rate === undefined || a.rate === '' ? DEFAULT_YIELD[a.type] || 0 : +a.rate,
+    assumed: a.rate === null || a.rate === undefined || a.rate === ''
+  })).sort((x, y) => x.rate - y.rate); // cheapest money to redeploy first
+  // Overdrafts are debt wearing an account's clothes. Rate unknown, so they
+  // are listed but never priced, rather than silently valued at zero.
+  const overdrafts = accounts.filter(a => (a.balance || 0) < 0).map(a => ({
+    id: a.id,
+    name: a.name,
+    amount: -a.balance
+  }));
+  const debts = loans.filter(l => (l.outstanding || 0) > 0).map(l => ({
+    id: l.id,
+    name: `${l.bank} ${l.type}`,
+    amount: l.outstanding,
+    rate: +l.roi || 0,
+    kind: 'loan'
+  })).sort((x, y) => y.rate - x.rate); // most expensive debt killed first
+
+  const liquidAssets = assets.reduce((s, a) => s + a.amount, 0);
+  const totalDebt = debts.reduce((s, d) => s + d.amount, 0);
+
+  // Greedy match: cheapest-yielding rupee against dearest debt. That pairing
+  // maximises the spread, so it is the best case available to you.
+  const pool = assets.map(a => ({
+    ...a,
+    left: a.amount
+  }));
+  const pairs = [];
+  let annualGain = 0,
+    deployed = 0;
+  for (const d of debts) {
+    let need = d.amount;
+    for (const a of pool) {
+      if (need <= 0) break;
+      if (a.left <= 0 || a.rate >= d.rate) continue; // no spread, no gain
+      const use = Math.min(a.left, need);
+      const spread = d.rate - a.rate;
+      const gain = use * spread / 100;
+      pairs.push({
+        from: a.name,
+        fromRate: a.rate,
+        assumed: a.assumed,
+        to: d.name,
+        toRate: d.rate,
+        amount: use,
+        spread: +spread.toFixed(2),
+        annualGain: Math.round(gain)
+      });
+      a.left -= use;
+      need -= use;
+      annualGain += gain;
+      deployed += use;
+    }
+  }
+  const idle = pool.reduce((s, a) => s + a.left, 0);
+  // Credit limit you are not using. Not an asset, but it is liquidity you can
+  // reach in a day, which changes how much cash you need to sit on.
+  const unusedCredit = creditCards.reduce((s, c) => s + Math.max(0, (c.limit || 0) - (c.payable || 0) - (c.provision || 0)), 0);
+  return {
+    assets,
+    debts,
+    overdrafts,
+    pairs,
+    annualGain: Math.round(annualGain),
+    monthlyGain: Math.round(annualGain / 12),
+    deployed,
+    idle,
+    liquidAssets,
+    totalDebt,
+    unusedCredit,
+    worthDoing: annualGain >= 1000
+  };
+}
+
+/* ── 2. SURVIVAL TIMELINE ───────────────────────────────────────────
+   "Runway: 8 months" assumes one undifferentiated pot. Real money runs out
+   in an order: spending cash, then current accounts, then deposits you have
+   to break. This walks the calendar forward and dates each of those. */
+function survivalTimeline(data, fin, opts) {
+  const o = opts || {};
+  const monthlyIn = o.monthlyIncome !== undefined ? o.monthlyIncome : fin.avgMonthlyInc || 0;
+  const monthlyOut = (o.monthlyExpense !== undefined ? o.monthlyExpense : fin.avgMonthlyExp || 0) + (fin.totalEmi || 0);
+  const net = monthlyIn - monthlyOut;
+  const {
+    accounts = []
+  } = data;
+  // Liquidation order: what you would actually spend first.
+  const rank = {
+    cash: 0,
+    wallet: 1,
+    bank: 2,
+    fd: 3
+  };
+  const tiers = accounts.filter(a => (a.balance || 0) > 0).map(a => ({
+    name: a.name,
+    type: a.type,
+    amount: a.balance,
+    rank: rank[a.type] === undefined ? 2 : rank[a.type]
+  })).sort((x, y) => x.rank - y.rank || x.amount - y.amount);
+  const total = tiers.reduce((s, t) => s + t.amount, 0);
+  const events = [];
+  if (net >= 0) return {
+    net,
+    monthlyIn,
+    monthlyOut,
+    total,
+    events,
+    monthsLeft: Infinity,
+    solvent: true
+  };
+  const burn = -net;
+  const start = new Date();
+  let spent = 0;
+  for (const t of tiers) {
+    spent += t.amount;
+    const months = spent / burn;
+    const d = new Date(start);
+    d.setMonth(d.getMonth() + Math.floor(months));
+    events.push({
+      name: t.name,
+      type: t.type,
+      amount: t.amount,
+      monthsOut: +months.toFixed(1),
+      date: d.toISOString().slice(0, 10),
+      cumulative: spent
+    });
+  }
+  return {
+    net,
+    monthlyIn,
+    monthlyOut,
+    burn,
+    total,
+    events,
+    monthsLeft: +(total / burn).toFixed(1),
+    zeroDate: events.length ? events[events.length - 1].date : null,
+    solvent: false
+  };
+}
+
+/* ── 3. GOAL REALITY ────────────────────────────────────────────────
+   A progress bar creeping from 0.2% to 0.3% is a lie of omission. This
+   inverts the arithmetic: at what you actually contribute, when do you
+   arrive, and what would it take to arrive on time. */
+function goalReality(goal, txs, nowRef) {
+  const saved = goalSaved(goal, txs);
+  const target = +goal.targetAmount || 0;
+  const mine = (txs || []).filter(t => t.goalId === goal.id);
+  // Actual run rate, measured from your own contributions rather than from
+  // the amount you once said you would invest.
+  const dates = mine.map(t => t.date).filter(Boolean).sort();
+  const monthsSeen = [...new Set(mine.map(t => t.month || (t.date || '').slice(0, 7)))].filter(Boolean);
+  // One contribution in one month is not a run rate. Dividing by a single
+  // month would read a lump sum as a monthly habit and call a hopeless goal
+  // comfortably on track, which is exactly the flattery this is meant to end.
+  const enoughHistory = monthsSeen.length >= 2;
+  let monthsActive = 1;
+  if (dates.length > 1) {
+    const a = new Date(dates[0]),
+      b = new Date(dates[dates.length - 1]);
+    monthsActive = Math.max(1, (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth()) + 1);
+  }
+  const actualMonthly = enoughHistory ? mine.reduce((s, t) => s + (t.amount || 0), 0) / monthsActive : 0;
+  const rate = (goal.instruments || []).length ? goal.instruments.reduce((s, i) => s + (+i.returnRate || 0), 0) / goal.instruments.length : 0;
+  const r = rate / 100 / 12;
+  const gap = Math.max(0, target - saved);
+  const now = nowRef || new Date();
+  const targetDate = goal.targetDate ? new Date(goal.targetDate) : null;
+  const monthsToTarget = targetDate && isFinite(targetDate) ? Math.max(0, (targetDate.getFullYear() - now.getFullYear()) * 12 + (targetDate.getMonth() - now.getMonth())) : null;
+
+  // Monthly contribution needed to close the gap by the target date, given
+  // compounding. Falls back to plain division at a zero return rate.
+  let requiredMonthly = null;
+  if (monthsToTarget && monthsToTarget > 0) {
+    const grown = saved * Math.pow(1 + r, monthsToTarget);
+    const need = Math.max(0, target - grown);
+    requiredMonthly = r > 0 ? need * r / (Math.pow(1 + r, monthsToTarget) - 1) : need / monthsToTarget;
+    requiredMonthly = Math.round(requiredMonthly);
+  }
+  // At your real pace, how long until you get there.
+  let monthsAtCurrent = null;
+  if (enoughHistory && actualMonthly > 0 && gap > 0) {
+    if (r > 0) {
+      const num = Math.log((target * r + actualMonthly) / (saved * r + actualMonthly));
+      monthsAtCurrent = num > 0 ? Math.round(num / Math.log(1 + r)) : 0;
+    } else monthsAtCurrent = Math.round(gap / actualMonthly);
+  }
+  const arrivalYear = monthsAtCurrent !== null && isFinite(monthsAtCurrent) ? now.getFullYear() + Math.floor((now.getMonth() + monthsAtCurrent) / 12) : null;
+  const shortfall = requiredMonthly !== null ? Math.round(requiredMonthly - actualMonthly) : null;
+  return {
+    saved,
+    target,
+    gap,
+    pct: target > 0 ? saved / target * 100 : 0,
+    actualMonthly: Math.round(actualMonthly),
+    rate,
+    requiredMonthly,
+    shortfall,
+    monthsToTarget,
+    monthsAtCurrent,
+    arrivalYear,
+    enoughHistory,
+    contributions: mine.length,
+    onTrack: enoughHistory && requiredMonthly !== null && actualMonthly >= requiredMonthly,
+    stalled: enoughHistory && actualMonthly <= 0 && gap > 0
+  };
+}
+
+/* ── 4. RECURRING RADAR ─────────────────────────────────────────────
+   Subscriptions do not announce themselves; they just show up every month
+   at roughly the same price. This finds them in the ledger you already
+   have, and prices them per YEAR, because people decide differently about
+   "₹750" than about "₹9,000 a year". */
+function detectRecurring(transactions, opts) {
+  const o = opts || {};
+  const minHits = o.minHits || 3;
+  const byMerchant = {};
+  for (const t of transactions || []) {
+    if (t.type !== 'expense') continue;
+    const key = (t.merchant || '').trim();
+    if (!key || key.toUpperCase() === 'NA') continue; // unlabelled, nothing to learn
+    (byMerchant[key] = byMerchant[key] || []).push(t);
+  }
+  const found = [];
+  for (const name in byMerchant) {
+    const txs = byMerchant[name].slice().sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    if (txs.length < minHits) continue;
+    const months = [...new Set(txs.map(t => t.month || (t.date || '').slice(0, 7)))].sort();
+    if (months.length < minHits) continue; // three charges in one month is a habit, not a subscription
+    const amts = txs.map(t => t.amount || 0);
+    const total = amts.reduce((s, x) => s + x, 0);
+    const avg = total / amts.length;
+    const spread = Math.max(...amts) - Math.min(...amts);
+    // A steady price every month is a subscription. A bill that arrives every
+    // month for a different amount (electricity, gas) is just as committed but
+    // cannot be cancelled the same way, so it is labelled apart from both.
+    const steady = avg > 0 && spread / avg <= 0.25;
+    // Consecutive months is the other subscription tell.
+    let consecutive = 1,
+      best = 1;
+    for (let i = 1; i < months.length; i++) {
+      const [y1, m1] = months[i - 1].split('-').map(Number),
+        [y2, m2] = months[i].split('-').map(Number);
+      if ((y2 - y1) * 12 + (m2 - m1) === 1) {
+        consecutive++;
+        best = Math.max(best, consecutive);
+      } else consecutive = 1;
+    }
+    found.push({
+      merchant: name,
+      count: txs.length,
+      months: months.length,
+      monthsRun: best,
+      avg: Math.round(avg),
+      total,
+      annual: Math.round(avg * 12),
+      category: txs[txs.length - 1].category || '',
+      paymentMode: txs[txs.length - 1].paymentMode || '',
+      kind: steady && best >= minHits ? 'subscription' : best >= minHits ? 'variable' : steady ? 'regular' : 'habit',
+      steady,
+      lastDate: txs[txs.length - 1].date
+    });
+  }
+  found.sort((a, b) => b.annual - a.annual);
+  const subs = found.filter(f => f.kind === 'subscription');
+  const variable = found.filter(f => f.kind === 'variable');
+  return {
+    found,
+    subscriptions: subs,
+    variable,
+    habits: found.filter(f => f.kind === 'habit'),
+    // Everything that arrives every month whether you decide on it or not.
+    annualCommitted: subs.concat(variable).reduce((s, f) => s + f.annual, 0),
+    annualSubscriptions: subs.reduce((s, f) => s + f.annual, 0)
+  };
+}
+
+/* ── 5. INTEGRITY ───────────────────────────────────────────────────
+   Every money bug in this app has had one shape: a stored running total
+   drifting from the entries that are supposed to add up to it. Rather than
+   trust them, recompute each one and report the difference. A number that
+   can be checked stops being able to lie quietly. */
+function integrityCheck(data) {
+  const {
+    goals = [],
+    investmentTxs = [],
+    loans = [],
+    transactions = [],
+    accounts = []
+  } = data;
+  const issues = [];
+  for (const g of goals) {
+    const derived = goalSaved(g, investmentTxs);
+    const stored = +g.currentAmount || 0;
+    if (Math.abs(derived - stored) > 1) issues.push({
+      kind: 'goal',
+      name: g.name,
+      stored,
+      derived,
+      diff: stored - derived,
+      fixable: true,
+      detail: 'Saved amount does not match its logged contributions.'
+    });
+  }
+  for (const l of loans) {
+    // Only a BROKEN LINK is drift. Instalments recorded before the ledger
+    // existed carry no txId and are simply history, not corruption: counting
+    // them would cry wolf on every older book and, worse, offer a repair that
+    // cannot repair them.
+    const linked = (l.paidEmis || []).filter(p => p.txId);
+    const txIds = new Set(transactions.filter(t => t.type === 'emi').map(t => t.id));
+    const dangling = linked.filter(p => !txIds.has(p.txId)).length;
+    if (dangling) issues.push({
+      kind: 'loan',
+      name: `${l.bank} ${l.type}`,
+      stored: linked.length,
+      derived: linked.length - dangling,
+      diff: dangling,
+      fixable: true,
+      detail: 'Instalments marked paid whose ledger entry has been deleted.'
+    });
+    const emiTx = transactions.filter(t => t.type === 'emi' && t.loanId === l.id);
+    const paidTxIds = new Set((l.paidEmis || []).map(p => p.txId).filter(Boolean));
+    const stray = emiTx.filter(t => !paidTxIds.has(t.id)).length;
+    if (stray && linked.length) issues.push({
+      kind: 'loan',
+      name: `${l.bank} ${l.type}`,
+      stored: emiTx.length,
+      derived: emiTx.length - stray,
+      diff: stray,
+      fixable: false,
+      detail: 'Ledger entries for instalments the loan no longer lists as paid.'
+    });
+  }
+  // Entries pointing at something that no longer exists.
+  const accIds = new Set(accounts.map(a => a.id));
+  const orphanTx = transactions.filter(t => t.accountId && !accIds.has(t.accountId)).length;
+  if (orphanTx) issues.push({
+    kind: 'orphan',
+    name: 'Transactions',
+    stored: orphanTx,
+    derived: 0,
+    diff: orphanTx,
+    fixable: true,
+    detail: 'Entries reference an account that has been deleted.'
+  });
+  const goalIds = new Set(goals.map(g => g.id));
+  const orphanInv = investmentTxs.filter(t => t.goalId && !goalIds.has(t.goalId)).length;
+  if (orphanInv) issues.push({
+    kind: 'orphan',
+    name: 'Contributions',
+    stored: orphanInv,
+    derived: 0,
+    diff: orphanInv,
+    fixable: true,
+    detail: 'Contributions reference a goal that has been deleted.'
+  });
+  const checked = goals.length + loans.length + 2;
+  return {
+    issues,
+    clean: issues.length === 0,
+    checked,
+    // Only claim a repair when one exists. An unfixable finding is still worth
+    // showing; offering a button that cannot help would be worse than silence.
+    fixable: issues.filter(i => i.fixable).length,
+    score: checked > 0 ? Math.round((checked - issues.length) / checked * 100) : 100
+  };
+}
+
+/* ── 6. SCENARIOS ───────────────────────────────────────────────────
+   computeFin is a pure function of `data`, so a hypothetical costs nothing
+   more than a copy. This is the whole "what if" feature: mutate a clone,
+   run the same engine, diff the answers. No separate projection code to
+   drift out of step with the real one. */
+function applyScenario(data, sc) {
+  const d = JSON.parse(JSON.stringify(data));
+  if (!sc) return d;
+  if (sc.prepay && sc.prepay.amount > 0) {
+    const amt = +sc.prepay.amount;
+    const loan = d.loans.find(l => l.id === sc.prepay.loanId) || d.loans[0];
+    const acct = d.accounts.find(a => a.id === sc.prepay.accountId) || d.accounts.find(a => a.balance >= amt);
+    if (loan) loan.outstanding = Math.max(0, loan.outstanding - amt);
+    if (acct) acct.balance -= amt;
+  }
+  if (sc.incomeDelta) for (const t of d.transactions) if (t.type === 'income') t.amount += sc.incomeDelta;
+  if (sc.expenseDelta) {
+    // Spread proportionally so one category does not absorb the whole change.
+    const exp = d.transactions.filter(t => t.type === 'expense');
+    const tot = exp.reduce((s, t) => s + t.amount, 0);
+    if (tot > 0) for (const t of exp) t.amount = Math.max(0, t.amount + sc.expenseDelta * (t.amount / tot));
+  }
+  if (sc.extraSip && sc.extraSip > 0 && d.goals.length) {
+    const g = d.goals.find(x => x.id === sc.goalId) || d.goals[0];
+    const inst = (g.instruments || [])[0];
+    if (inst) d.investmentTxs.push({
+      id: 'sc_' + Math.random().toString(36).slice(2),
+      goalId: g.id,
+      instrumentId: inst.id,
+      amount: sc.extraSip,
+      date: new Date().toISOString().slice(0, 10),
+      month: monthKey(new Date()),
+      paymentMode: 'NEFT/Bank Transfer',
+      units: 0
+    });
+  }
+  return d;
+}
+
+// What changed, and did it help. Signed so the UI never has to guess.
+function scenarioDiff(base, alt) {
+  const keys = ['netWorth', 'liquidNetWorth', 'totalExp', 'surplus', 'cashBalance', 'liabilities', 'loanOS', 'totalEmi', 'monthlyInterestCost', 'liquidRunway', 'fundRunway'];
+  const out = {};
+  for (const k of keys) out[k] = {
+    base: base[k],
+    alt: alt[k],
+    delta: (alt[k] || 0) - (base[k] || 0)
+  };
+  return out;
+}
+
 /* Node test hook. In the browser `module` is undefined, so this is skipped and
    the file behaves as a plain concatenated script. */
 if (typeof module !== 'undefined' && module.exports) {
@@ -969,7 +1422,15 @@ if (typeof module !== 'undefined' && module.exports) {
     isUnitType,
     instrPrice,
     monthKey,
-    UNIT_TYPES
+    UNIT_TYPES,
+    computeCarry,
+    survivalTimeline,
+    goalReality,
+    detectRecurring,
+    integrityCheck,
+    applyScenario,
+    scenarioDiff,
+    DEFAULT_YIELD
   };
 }
 const {
@@ -9983,7 +10444,107 @@ function PageData({
     className: "ptitle"
   }, "Data Management"), /*#__PURE__*/React.createElement("div", {
     className: "psub"
-  }, "Export \xB7 Import \xB7 Restore \xB7 Reset"))), /*#__PURE__*/React.createElement("input", {
+  }, "Export \xB7 Import \xB7 Restore \xB7 Reset"))), (() => {
+    const chk = integrityCheck(data);
+    const heal = () => {
+      setData(d => {
+        const emiIds = new Set(d.transactions.filter(t => t.type === 'emi').map(t => t.id));
+        return {
+          ...d,
+          goals: d.goals.map(g => ({
+            ...g,
+            currentAmount: goalSaved(g, d.investmentTxs || [])
+          })),
+          // A payment whose ledger entry was deleted is no longer evidence
+          // of a payment, so it stops counting as one.
+          loans: d.loans.map(l => ({
+            ...l,
+            paidEmis: (l.paidEmis || []).filter(p => !p.txId || emiIds.has(p.txId))
+          })),
+          transactions: d.transactions.filter(t => !t.accountId || d.accounts.some(a => a.id === t.accountId)),
+          investmentTxs: (d.investmentTxs || []).filter(t => !t.goalId || d.goals.some(g => g.id === t.goalId))
+        };
+      });
+      toast('Totals rebuilt from your entries', 'g');
+    };
+    return /*#__PURE__*/React.createElement("div", {
+      className: "card mb3",
+      style: {
+        borderLeft: `3px solid ${chk.clean ? 'var(--g)' : 'var(--o)'}`
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 800,
+        fontSize: 13.5
+      }
+    }, "Books integrity", /*#__PURE__*/React.createElement("span", {
+      className: `tag ${chk.clean ? 'tg' : 'to'}`,
+      style: {
+        marginLeft: 7,
+        fontSize: 10
+      }
+    }, chk.score, "%")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11.5,
+        color: 'var(--n500)',
+        marginTop: 2
+      }
+    }, chk.clean ? 'Every stored total matches the entries behind it.' : `${chk.issues.length} figure${chk.issues.length === 1 ? '' : 's'} no longer match the entries behind them.`)), chk.fixable > 0 && /*#__PURE__*/React.createElement("button", {
+      className: "btn btn-p btn-sm",
+      onClick: heal
+    }, /*#__PURE__*/React.createElement(Ic, {
+      n: "ok",
+      s: 12,
+      c: "#fff"
+    }), "Rebuild from entries")), !chk.clean && /*#__PURE__*/React.createElement("div", {
+      className: "tw mt2"
+    }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "What"), /*#__PURE__*/React.createElement("th", {
+      className: "num"
+    }, "Stored"), /*#__PURE__*/React.createElement("th", {
+      className: "num"
+    }, "Actual"), /*#__PURE__*/React.createElement("th", {
+      className: "num"
+    }, "Drift"), /*#__PURE__*/React.createElement("th", null, "Why it matters"))), /*#__PURE__*/React.createElement("tbody", null, chk.issues.map((i, n) => /*#__PURE__*/React.createElement("tr", {
+      key: n
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        fontWeight: 600
+      }
+    }, i.name, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10,
+        color: 'var(--n400)'
+      }
+    }, i.kind)), /*#__PURE__*/React.createElement("td", {
+      className: "num"
+    }, i.kind === 'goal' ? fmtINR(i.stored) : i.stored), /*#__PURE__*/React.createElement("td", {
+      className: "num"
+    }, i.kind === 'goal' ? fmtINR(i.derived) : i.derived), /*#__PURE__*/React.createElement("td", {
+      className: "num neg",
+      style: {
+        fontWeight: 700
+      }
+    }, i.kind === 'goal' ? fmtINR(i.diff) : i.diff), /*#__PURE__*/React.createElement("td", {
+      style: {
+        fontSize: 11,
+        color: 'var(--n500)'
+      }
+    }, i.detail, !i.fixable && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10,
+        color: 'var(--o)',
+        marginTop: 2
+      }
+    }, "Needs a look from you; a rebuild cannot decide this one."))))))));
+  })(), /*#__PURE__*/React.createElement("input", {
     type: "file",
     ref: fileRef,
     accept: ".json",
@@ -11531,6 +12092,946 @@ function ScoreBar({
 /* ══════════════════════════════════════
    CFO DASHBOARD
 ══════════════════════════════════════ */
+
+/* ══════════════════════════════════════
+   IDLE CAPITAL
+   Assets earning less than debt costs. The spread is a fee you pay for
+   the comfort of a larger balance, and nothing else in the app names it.
+══════════════════════════════════════ */
+function PageCarry({
+  data,
+  setData,
+  toast
+}) {
+  const c = useMemo(() => computeCarry(data), [data]);
+  const [edit, setEdit] = useState(null);
+  const saveRate = () => {
+    setData(d => ({
+      ...d,
+      accounts: d.accounts.map(a => a.id === edit.id ? {
+        ...a,
+        rate: edit.rate === '' ? null : +edit.rate
+      } : a)
+    }));
+    toast('Yield updated', 'g');
+    setEdit(null);
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "page"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ph mb3"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ptitle"
+  }, "Idle Capital"), /*#__PURE__*/React.createElement("div", {
+    className: "psub"
+  }, "What your money earns against what your debt costs"))), c.debts.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "alert ai"
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "prov",
+    s: 13
+  }), /*#__PURE__*/React.createElement("span", null, "No outstanding loans, so there is nothing to arbitrage. Every rupee is free to earn.")) : c.worthDoing ? /*#__PURE__*/React.createElement("div", {
+    className: "card mb3",
+    style: {
+      border: '2px solid var(--o)',
+      background: 'linear-gradient(135deg,rgba(245,158,11,.06),rgba(245,158,11,.02))'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      textTransform: 'uppercase',
+      fontWeight: 700,
+      color: 'var(--o)',
+      letterSpacing: .4
+    }
+  }, "You are paying to hold cash"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: 'var(--m)',
+      fontSize: 30,
+      fontWeight: 800,
+      margin: '6px 0 4px'
+    }
+  }, fmtINR(c.annualGain), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 14,
+      fontWeight: 600,
+      color: 'var(--n400)'
+    }
+  }, " / year")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: 'var(--n600)',
+      lineHeight: 1.5
+    }
+  }, "Using ", fmtINR(c.deployed, true), " of your lowest-earning money to clear your dearest debt would save that much every year, at no risk. That is ", fmtINR(c.monthlyGain), " a month you are currently handing to a lender for the comfort of a bigger balance.")) : /*#__PURE__*/React.createElement("div", {
+    className: "alert ag"
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "ok",
+    s: 13
+  }), /*#__PURE__*/React.createElement("span", null, "Your assets out-earn your debt. Holding the cash is the right call.")), c.pairs.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "card mb3"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ptitle",
+    style: {
+      fontSize: 14,
+      marginBottom: 2
+    }
+  }, "Where to move it"), /*#__PURE__*/React.createElement("div", {
+    className: "psub",
+    style: {
+      marginBottom: 10
+    }
+  }, "Cheapest money first, against the most expensive debt. This is the best case available to you."), /*#__PURE__*/React.createElement("div", {
+    className: "tw"
+  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "Take from"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Earns"), /*#__PURE__*/React.createElement("th", null, "Put against"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Costs"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Amount"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Spread"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Saved / year"))), /*#__PURE__*/React.createElement("tbody", null, c.pairs.map((p, i) => /*#__PURE__*/React.createElement("tr", {
+    key: i
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      fontWeight: 600
+    }
+  }, p.from, p.assumed && /*#__PURE__*/React.createElement("span", {
+    className: "tag tx",
+    style: {
+      marginLeft: 5,
+      fontSize: 9
+    },
+    title: "No yield entered. An assumed rate is used until you set one."
+  }, "assumed")), /*#__PURE__*/React.createElement("td", {
+    className: "num",
+    style: {
+      fontFamily: 'var(--m)'
+    }
+  }, p.fromRate, "%"), /*#__PURE__*/React.createElement("td", {
+    style: {
+      fontWeight: 600
+    }
+  }, p.to), /*#__PURE__*/React.createElement("td", {
+    className: "num",
+    style: {
+      fontFamily: 'var(--m)',
+      color: 'var(--r)'
+    }
+  }, p.toRate, "%"), /*#__PURE__*/React.createElement("td", {
+    className: "num"
+  }, fmtINR(p.amount)), /*#__PURE__*/React.createElement("td", {
+    className: "num"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "tag to",
+    style: {
+      fontSize: 10
+    }
+  }, p.spread, "%")), /*#__PURE__*/React.createElement("td", {
+    className: "num pos",
+    style: {
+      fontWeight: 700
+    }
+  }, fmtINR(p.annualGain))))), /*#__PURE__*/React.createElement("tfoot", null, /*#__PURE__*/React.createElement("tr", {
+    className: "tft"
+  }, /*#__PURE__*/React.createElement("td", {
+    colSpan: 4,
+    style: {
+      fontWeight: 700
+    }
+  }, "Total"), /*#__PURE__*/React.createElement("td", {
+    className: "num",
+    style: {
+      fontWeight: 700
+    }
+  }, fmtINR(c.deployed)), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", {
+    className: "num pos",
+    style: {
+      fontWeight: 800
+    }
+  }, fmtINR(c.annualGain))))))), /*#__PURE__*/React.createElement("div", {
+    className: "g4 mb3",
+    style: {
+      gap: 12
+    }
+  }, [{
+    l: 'Assets in play',
+    v: fmtINR(c.liquidAssets, true)
+  }, {
+    l: 'Debt outstanding',
+    v: fmtINR(c.totalDebt, true),
+    c: 'var(--r)'
+  }, {
+    l: 'Still idle after',
+    v: fmtINR(c.idle, true),
+    c: 'var(--o)'
+  }, {
+    l: 'Unused credit line',
+    v: fmtINR(c.unusedCredit, true),
+    c: 'var(--b)'
+  }].map(x => /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    key: x.l,
+    style: {
+      padding: '12px 14px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 9.5,
+      color: 'var(--n400)',
+      textTransform: 'uppercase',
+      fontWeight: 700
+    }
+  }, x.l), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: 'var(--m)',
+      fontSize: 17,
+      fontWeight: 700,
+      color: x.c || '',
+      marginTop: 3
+    }
+  }, x.v)))), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ptitle",
+    style: {
+      fontSize: 14,
+      marginBottom: 2
+    }
+  }, "Your yields"), /*#__PURE__*/React.createElement("div", {
+    className: "psub",
+    style: {
+      marginBottom: 10
+    }
+  }, "An assumed rate is a guess. Enter the real one and this analysis sharpens."), /*#__PURE__*/React.createElement("div", {
+    className: "tw"
+  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "Account"), /*#__PURE__*/React.createElement("th", null, "Type"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Balance"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Yield"), /*#__PURE__*/React.createElement("th", null))), /*#__PURE__*/React.createElement("tbody", null, c.assets.map(a => /*#__PURE__*/React.createElement("tr", {
+    key: a.id
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      fontWeight: 600
+    }
+  }, a.name), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("span", {
+    className: "tag tx",
+    style: {
+      fontSize: 9.5
+    }
+  }, a.type)), /*#__PURE__*/React.createElement("td", {
+    className: "num"
+  }, fmtINR(a.amount)), /*#__PURE__*/React.createElement("td", {
+    className: "num",
+    style: {
+      fontFamily: 'var(--m)',
+      color: a.assumed ? 'var(--n400)' : ''
+    }
+  }, a.rate, "%", a.assumed && ' *'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      width: 36
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "bic",
+    onClick: () => setEdit({
+      id: a.id,
+      name: a.name,
+      rate: a.assumed ? '' : String(a.rate)
+    })
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "edit",
+    s: 11
+  }))))), c.overdrafts.map(o => /*#__PURE__*/React.createElement("tr", {
+    key: o.id,
+    style: {
+      opacity: .75
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      fontWeight: 600
+    }
+  }, o.name), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("span", {
+    className: "tag tr",
+    style: {
+      fontSize: 9.5
+    }
+  }, "overdrawn")), /*#__PURE__*/React.createElement("td", {
+    className: "num neg"
+  }, fmtINR(-o.amount)), /*#__PURE__*/React.createElement("td", {
+    className: "num",
+    style: {
+      color: 'var(--n400)'
+    }
+  }, "debt"), /*#__PURE__*/React.createElement("td", null)))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: 'var(--n400)',
+      marginTop: 8
+    }
+  }, "* Assumed, not entered. Deliberately conservative: overstating what an asset earns would hide exactly the gap this page exists to find.")), edit && /*#__PURE__*/React.createElement(Modal, {
+    title: `Yield on ${edit.name}`,
+    onClose: () => setEdit(null),
+    foot: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+      className: "btn btn-s btn-sm",
+      onClick: () => setEdit(null)
+    }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+      className: "btn btn-p btn-sm",
+      onClick: saveRate
+    }, /*#__PURE__*/React.createElement(Ic, {
+      n: "ok",
+      s: 12,
+      c: "#fff"
+    }), "Save"))
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "Annual yield (%)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    step: "0.01",
+    value: edit.rate,
+    placeholder: "leave blank to assume",
+    onChange: e => setEdit(x => ({
+      ...x,
+      rate: e.target.value
+    }))
+  }))));
+}
+
+/* ══════════════════════════════════════
+   SURVIVAL
+   "Runway: 8 months" assumes one undifferentiated pot. Money actually runs
+   out in an order, on dates. This shows those.
+══════════════════════════════════════ */
+function PageSurvival({
+  data
+}) {
+  const {
+    profile
+  } = data;
+  const months = useMemo(() => getPeriodMonths(profile.periodStart, profile.periodEnd), [profile.periodStart, profile.periodEnd]);
+  const f = useFin(data, months);
+  const [incomeMode, setIncomeMode] = useState('zero');
+  const income = incomeMode === 'zero' ? 0 : incomeMode === 'half' ? Math.round(f.avgMonthlyInc / 2) : f.avgMonthlyInc;
+  const s = useMemo(() => survivalTimeline(data, f, {
+    monthlyIncome: income
+  }), [data, f, income]);
+  const sev = s.monthsLeft < 3 ? 'var(--r)' : s.monthsLeft < 6 ? 'var(--o)' : 'var(--g)';
+  return /*#__PURE__*/React.createElement("div", {
+    className: "page"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ph mb3"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ptitle"
+  }, "Survival"), /*#__PURE__*/React.createElement("div", {
+    className: "psub"
+  }, "If the money stopped, what goes first and when")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6
+    }
+  }, [['zero', 'Income stops'], ['half', 'Halved'], ['full', 'Unchanged']].map(([k, l]) => /*#__PURE__*/React.createElement("button", {
+    key: k,
+    className: `btn btn-sm ${incomeMode === k ? 'btn-p' : 'btn-s'}`,
+    onClick: () => setIncomeMode(k)
+  }, l)))), /*#__PURE__*/React.createElement("div", {
+    className: "card mb3",
+    style: {
+      border: `2px solid ${sev}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "g4",
+    style: {
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 9.5,
+      color: 'var(--n400)',
+      textTransform: 'uppercase',
+      fontWeight: 700
+    }
+  }, "Money in"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: 'var(--m)',
+      fontSize: 17,
+      fontWeight: 700
+    }
+  }, fmtINR(s.monthlyIn), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: 'var(--n400)'
+    }
+  }, "/mo"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 9.5,
+      color: 'var(--n400)',
+      textTransform: 'uppercase',
+      fontWeight: 700
+    }
+  }, "Money out"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: 'var(--m)',
+      fontSize: 17,
+      fontWeight: 700,
+      color: 'var(--r)'
+    }
+  }, fmtINR(s.monthlyOut), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: 'var(--n400)'
+    }
+  }, "/mo")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: 'var(--n400)'
+    }
+  }, "expenses plus EMIs")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 9.5,
+      color: 'var(--n400)',
+      textTransform: 'uppercase',
+      fontWeight: 700
+    }
+  }, "Net"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: 'var(--m)',
+      fontSize: 17,
+      fontWeight: 700,
+      color: s.net >= 0 ? 'var(--g)' : 'var(--r)'
+    }
+  }, s.net >= 0 ? '+' : '', fmtINR(s.net))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 9.5,
+      color: 'var(--n400)',
+      textTransform: 'uppercase',
+      fontWeight: 700
+    }
+  }, "You last"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: 'var(--m)',
+      fontSize: 17,
+      fontWeight: 800,
+      color: sev
+    }
+  }, s.solvent ? 'indefinitely' : `${s.monthsLeft} months`), !s.solvent && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: 'var(--n400)'
+    }
+  }, "zero on ", fmtDate(s.zeroDate))))), s.solvent ? /*#__PURE__*/React.createElement("div", {
+    className: "alert ag"
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "ok",
+    s: 13
+  }), /*#__PURE__*/React.createElement("span", null, "You take in more than you spend, so nothing depletes. The timeline only appears when you are running a deficit.")) : /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ptitle",
+    style: {
+      fontSize: 14,
+      marginBottom: 2
+    }
+  }, "The order it goes"), /*#__PURE__*/React.createElement("div", {
+    className: "psub",
+    style: {
+      marginBottom: 12
+    }
+  }, "Spending money first, deposits last. Burning ", fmtINR(s.burn), " a month."), s.events.map((e, i) => {
+    const pct = s.total > 0 ? e.cumulative / s.total * 100 : 0;
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '8px 0',
+        borderTop: i ? '1px solid var(--n100)' : 'none'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 26,
+        height: 26,
+        borderRadius: 8,
+        display: 'grid',
+        placeItems: 'center',
+        flexShrink: 0,
+        background: e.monthsOut < 3 ? 'rgba(239,68,68,.12)' : e.monthsOut < 6 ? 'rgba(245,158,11,.12)' : 'rgba(0,179,134,.1)',
+        color: e.monthsOut < 3 ? 'var(--r)' : e.monthsOut < 6 ? 'var(--o)' : 'var(--g)',
+        fontWeight: 800,
+        fontSize: 11
+      }
+    }, i + 1), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 700,
+        fontSize: 12.5,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, e.name, " ", /*#__PURE__*/React.createElement("span", {
+      className: "tag tx",
+      style: {
+        fontSize: 9,
+        marginLeft: 4
+      }
+    }, e.type)), /*#__PURE__*/React.createElement("div", {
+      className: "prog",
+      style: {
+        height: 5,
+        marginTop: 4
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "pf",
+      style: {
+        width: `${pct}%`,
+        background: sev
+      }
+    }))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        textAlign: 'right',
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: 'var(--m)',
+        fontSize: 12.5,
+        fontWeight: 700
+      }
+    }, fmtINR(e.amount, true)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10.5,
+        color: 'var(--n400)'
+      }
+    }, "gone ", fmtDate(e.date))));
+  })));
+}
+
+/* ══════════════════════════════════════
+   SCENARIOS
+   computeFin is pure, so a hypothetical is just the same engine run on a
+   copy. No second projection model to drift out of step with the real one.
+══════════════════════════════════════ */
+function PageScenario({
+  data
+}) {
+  const {
+    profile,
+    loans,
+    accounts,
+    goals
+  } = data;
+  const months = useMemo(() => getPeriodMonths(profile.periodStart, profile.periodEnd), [profile.periodStart, profile.periodEnd]);
+  const [sc, setSc] = useState({
+    prepay: {
+      loanId: (loans[0] || {}).id || '',
+      accountId: '',
+      amount: ''
+    },
+    incomeDelta: '',
+    expenseDelta: '',
+    extraSip: '',
+    goalId: (goals[0] || {}).id || ''
+  });
+  const clean = useMemo(() => ({
+    prepay: sc.prepay.amount ? {
+      ...sc.prepay,
+      amount: +sc.prepay.amount
+    } : null,
+    incomeDelta: +sc.incomeDelta || 0,
+    expenseDelta: +sc.expenseDelta || 0,
+    extraSip: +sc.extraSip || 0,
+    goalId: sc.goalId
+  }), [sc]);
+  const base = useFin(data, months);
+  const alt = useMemo(() => computeFin(applyScenario(data, clean), months), [data, clean, months]);
+  const diff = useMemo(() => scenarioDiff(base, alt), [base, alt]);
+  const touched = clean.prepay || clean.incomeDelta || clean.expenseDelta || clean.extraSip;
+  const ROWS = [{
+    k: 'netWorth',
+    l: 'Net worth',
+    good: 1
+  }, {
+    k: 'liquidNetWorth',
+    l: 'Liquid net worth',
+    good: 1
+  }, {
+    k: 'loanOS',
+    l: 'Debt outstanding',
+    good: -1
+  }, {
+    k: 'monthlyInterestCost',
+    l: 'Interest cost / month',
+    good: -1
+  }, {
+    k: 'totalExp',
+    l: 'Expenses',
+    good: -1
+  }, {
+    k: 'surplus',
+    l: 'Surplus',
+    good: 1
+  }, {
+    k: 'cashBalance',
+    l: 'Balance cash',
+    good: 1
+  }, {
+    k: 'fundRunway',
+    l: 'Runway (months)',
+    good: 1,
+    mo: true
+  }];
+  return /*#__PURE__*/React.createElement("div", {
+    className: "page"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ph mb3"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ptitle"
+  }, "Scenarios"), /*#__PURE__*/React.createElement("div", {
+    className: "psub"
+  }, "Change one thing and see the whole picture move")), /*#__PURE__*/React.createElement("button", {
+    className: "btn btn-s btn-sm",
+    onClick: () => setSc({
+      prepay: {
+        loanId: (loans[0] || {}).id || '',
+        accountId: '',
+        amount: ''
+      },
+      incomeDelta: '',
+      expenseDelta: '',
+      extraSip: '',
+      goalId: (goals[0] || {}).id || ''
+    })
+  }, "Reset")), /*#__PURE__*/React.createElement("div", {
+    className: "alert ai mb3"
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "prov",
+    s: 13
+  }), /*#__PURE__*/React.createElement("span", null, "Nothing here touches your books. Each figure is your real data with one change applied, run through the same engine that produces your dashboard.")), /*#__PURE__*/React.createElement("div", {
+    className: "card mb3"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ptitle",
+    style: {
+      fontSize: 14,
+      marginBottom: 10
+    }
+  }, "What if"), /*#__PURE__*/React.createElement("div", {
+    className: "f2 mb2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "Prepay a loan (", CUR.sym, ")"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "0",
+    value: sc.prepay.amount,
+    placeholder: "0",
+    onChange: e => setSc(x => ({
+      ...x,
+      prepay: {
+        ...x.prepay,
+        amount: e.target.value
+      }
+    }))
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "Which loan"), /*#__PURE__*/React.createElement("select", {
+    value: sc.prepay.loanId,
+    onChange: e => setSc(x => ({
+      ...x,
+      prepay: {
+        ...x.prepay,
+        loanId: e.target.value
+      }
+    }))
+  }, loans.map(l => /*#__PURE__*/React.createElement("option", {
+    key: l.id,
+    value: l.id
+  }, l.bank, " ", l.type, " (", fmtINR(l.outstanding, true), " @ ", l.roi, "%)")))), /*#__PURE__*/React.createElement("div", {
+    className: "fg fg-full"
+  }, /*#__PURE__*/React.createElement("label", null, "Paid from"), /*#__PURE__*/React.createElement("select", {
+    value: sc.prepay.accountId,
+    onChange: e => setSc(x => ({
+      ...x,
+      prepay: {
+        ...x.prepay,
+        accountId: e.target.value
+      }
+    }))
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "auto: first account with enough"), accounts.map(a => /*#__PURE__*/React.createElement("option", {
+    key: a.id,
+    value: a.id
+  }, a.name, " (", fmtINR(a.balance, true), ")"))))), /*#__PURE__*/React.createElement("div", {
+    className: "f2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "Income change (", CUR.sym, "/mo)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: sc.incomeDelta,
+    placeholder: "0, or -20000",
+    onChange: e => setSc(x => ({
+      ...x,
+      incomeDelta: e.target.value
+    }))
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "Expense change (", CUR.sym, "/mo)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: sc.expenseDelta,
+    placeholder: "0, or -5000",
+    onChange: e => setSc(x => ({
+      ...x,
+      expenseDelta: e.target.value
+    }))
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "Extra invested (", CUR.sym, ")"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "0",
+    value: sc.extraSip,
+    placeholder: "0",
+    onChange: e => setSc(x => ({
+      ...x,
+      extraSip: e.target.value
+    }))
+  })), goals.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "Into goal"), /*#__PURE__*/React.createElement("select", {
+    value: sc.goalId,
+    onChange: e => setSc(x => ({
+      ...x,
+      goalId: e.target.value
+    }))
+  }, goals.map(g => /*#__PURE__*/React.createElement("option", {
+    key: g.id,
+    value: g.id
+  }, g.name)))))), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ptitle",
+    style: {
+      fontSize: 14,
+      marginBottom: 2
+    }
+  }, "Then versus now"), /*#__PURE__*/React.createElement("div", {
+    className: "psub",
+    style: {
+      marginBottom: 10
+    }
+  }, touched ? 'Green is better off, red is worse off.' : 'Change something above to see the difference.'), /*#__PURE__*/React.createElement("div", {
+    className: "tw"
+  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "Measure"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Now"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "After"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Change"))), /*#__PURE__*/React.createElement("tbody", null, ROWS.map(r => {
+    const d = diff[r.k];
+    const delta = d.delta;
+    const better = delta * r.good > 0;
+    const col = Math.abs(delta) < 0.5 ? '' : better ? 'var(--g)' : 'var(--r)';
+    const fmt = v => r.mo ? isFinite(v) ? v.toFixed(1) : '∞' : fmtINR(v);
+    return /*#__PURE__*/React.createElement("tr", {
+      key: r.k
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        fontWeight: 600
+      }
+    }, r.l), /*#__PURE__*/React.createElement("td", {
+      className: "num"
+    }, fmt(d.base)), /*#__PURE__*/React.createElement("td", {
+      className: "num",
+      style: {
+        fontWeight: 700
+      }
+    }, fmt(d.alt)), /*#__PURE__*/React.createElement("td", {
+      className: "num",
+      style: {
+        color: col,
+        fontWeight: 700
+      }
+    }, Math.abs(delta) < 0.5 ? 'no change' : `${delta > 0 ? '+' : '−'}${r.mo ? Math.abs(delta).toFixed(1) : fmtINR(Math.abs(delta))}`));
+  })))), clean.prepay && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: 'var(--n500)',
+      marginTop: 10,
+      lineHeight: 1.5
+    }
+  }, "A prepayment leaves net worth unchanged on the day you make it: cash falls, debt falls by the same amount. What you buy is the interest you no longer pay, which shows up as a lower monthly interest cost above.")));
+}
+
+/* ══════════════════════════════════════
+   COMMITMENTS
+   Subscriptions do not announce themselves. They just arrive every month.
+══════════════════════════════════════ */
+function PageCommit({
+  data,
+  setData,
+  toast
+}) {
+  const r = useMemo(() => detectRecurring(data.transactions), [data.transactions]);
+  const existing = new Set((data.recurring || []).map(x => (x.merchant || '').toLowerCase()));
+  const add = f => {
+    setData(d => ({
+      ...d,
+      recurring: [...(d.recurring || []), {
+        id: uid(),
+        active: true,
+        type: 'expense',
+        merchant: f.merchant,
+        amount: f.avg,
+        category: f.category || 'Other Expense',
+        paymentMode: f.paymentMode || 'UPI',
+        desc: f.merchant,
+        freq: 'monthly',
+        nextDate: new Date(new Date().setMonth(new Date().getMonth() + 1)).toISOString().slice(0, 10)
+      }]
+    }));
+    toast(`${f.merchant} added as recurring`, 'g');
+  };
+  const KIND = {
+    subscription: {
+      l: 'Subscription',
+      c: 'tr',
+      d: 'Same amount, every month. The kind you can cancel.'
+    },
+    variable: {
+      l: 'Monthly bill',
+      c: 'to',
+      d: 'Arrives every month, amount varies. Committed, not cancellable.'
+    },
+    regular: {
+      l: 'Regular',
+      c: 'tb',
+      d: 'Steady amount, but not every month.'
+    },
+    habit: {
+      l: 'Habit',
+      c: 'tx',
+      d: 'Repeated, but irregular. A choice rather than a commitment.'
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "page"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ph mb3"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ptitle"
+  }, "Commitments"), /*#__PURE__*/React.createElement("div", {
+    className: "psub"
+  }, "What leaves every month whether you decide on it or not"))), /*#__PURE__*/React.createElement("div", {
+    className: "card mb3",
+    style: {
+      border: '2px solid var(--o)'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      textTransform: 'uppercase',
+      fontWeight: 700,
+      color: 'var(--o)',
+      letterSpacing: .4
+    }
+  }, "Committed every year"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: 'var(--m)',
+      fontSize: 30,
+      fontWeight: 800,
+      margin: '6px 0 4px'
+    }
+  }, fmtINR(r.annualCommitted)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: 'var(--n600)',
+      lineHeight: 1.5
+    }
+  }, "Found in your own ledger, not entered by you: ", r.subscriptions.length, " subscription", r.subscriptions.length === 1 ? '' : 's', " (", fmtINR(r.annualSubscriptions, true), " a year) and ", r.variable.length, " monthly bill", r.variable.length === 1 ? '' : 's', ". Priced per year, because people decide differently about", ' ', fmtINR(r.annualCommitted / 12, true), " a month than about ", fmtINR(r.annualCommitted, true), ".")), r.found.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "alert ai"
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "prov",
+    s: 13
+  }), /*#__PURE__*/React.createElement("span", null, "Nothing repeats often enough to call a commitment yet. Entries need a merchant name to be recognised, so filling those in makes this page work.")) : /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ptitle",
+    style: {
+      fontSize: 14,
+      marginBottom: 10
+    }
+  }, "Found in your ledger"), /*#__PURE__*/React.createElement("div", {
+    className: "tw"
+  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "Merchant"), /*#__PURE__*/React.createElement("th", null, "Kind"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Seen"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Typical"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Per year"), /*#__PURE__*/React.createElement("th", null))), /*#__PURE__*/React.createElement("tbody", null, r.found.map(f => {
+    const k = KIND[f.kind];
+    const already = existing.has(f.merchant.toLowerCase());
+    return /*#__PURE__*/React.createElement("tr", {
+      key: f.merchant
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        fontWeight: 600
+      }
+    }, f.merchant, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10,
+        color: 'var(--n400)'
+      }
+    }, f.category)), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("span", {
+      className: `tag ${k.c}`,
+      style: {
+        fontSize: 9.5
+      },
+      title: k.d
+    }, k.l)), /*#__PURE__*/React.createElement("td", {
+      className: "num",
+      style: {
+        fontSize: 11
+      }
+    }, f.count, "x \xB7 ", f.months, " mo"), /*#__PURE__*/React.createElement("td", {
+      className: "num"
+    }, fmtINR(f.avg)), /*#__PURE__*/React.createElement("td", {
+      className: "num",
+      style: {
+        fontWeight: 700,
+        color: f.annual >= 10000 ? 'var(--r)' : ''
+      }
+    }, fmtINR(f.annual)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        width: 96
+      }
+    }, already ? /*#__PURE__*/React.createElement("span", {
+      className: "tag tg",
+      style: {
+        fontSize: 9.5
+      }
+    }, "tracked") : /*#__PURE__*/React.createElement("button", {
+      className: "btn btn-s btn-sm",
+      style: {
+        fontSize: 10.5,
+        padding: '3px 8px'
+      },
+      onClick: () => add(f)
+    }, "Track")));
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: 'var(--n400)',
+      marginTop: 8
+    }
+  }, "Entries without a merchant name cannot be matched, so they never appear here.")));
+}
 function PageCFO({
   data
 }) {
@@ -16503,7 +18004,76 @@ function PageGoals({
         color: 'var(--n400)',
         marginBottom: 8
       }
-    }, "\uD83D\uDDD3 ", fmtDate(g.targetDate), monthsLeft && ` · ${Math.ceil(monthsLeft)} mo left`), g.notes && /*#__PURE__*/React.createElement("div", {
+    }, "\uD83D\uDDD3 ", fmtDate(g.targetDate), monthsLeft && ` · ${Math.ceil(monthsLeft)} mo left`), (() => {
+      const r = goalReality(g, data.investmentTxs || []);
+      if (!r.target) return null;
+      const bad = r.requiredMonthly !== null && !r.onTrack;
+      return /*#__PURE__*/React.createElement("div", {
+        style: {
+          background: bad ? 'rgba(239,68,68,.06)' : 'rgba(0,179,134,.06)',
+          border: `1px solid ${bad ? 'rgba(239,68,68,.2)' : 'rgba(0,179,134,.2)'}`,
+          borderRadius: 8,
+          padding: '8px 10px',
+          marginBottom: 8
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 9.5,
+          fontWeight: 800,
+          textTransform: 'uppercase',
+          letterSpacing: .4,
+          color: bad ? 'var(--r)' : 'var(--g)',
+          marginBottom: 5
+        }
+      }, "Reality check"), !r.enoughHistory ? /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 11.5,
+          color: 'var(--n600)',
+          lineHeight: 1.45
+        }
+      }, r.contributions === 0 ? 'Nothing contributed yet.' : `Only ${r.contributions} contribution${r.contributions === 1 ? '' : 's'}, all in one month.`, r.requiredMonthly !== null && /*#__PURE__*/React.createElement(React.Fragment, null, " This goal needs ", /*#__PURE__*/React.createElement("strong", {
+        style: {
+          fontFamily: 'var(--m)'
+        }
+      }, fmtINR(r.requiredMonthly)), " every month to arrive on time."), /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 10.5,
+          color: 'var(--n400)',
+          marginTop: 3
+        }
+      }, "Two months of contributions are needed before a pace can be read.")) : /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 11.5,
+          color: 'var(--n600)',
+          lineHeight: 1.45
+        }
+      }, "You contribute ", /*#__PURE__*/React.createElement("strong", {
+        style: {
+          fontFamily: 'var(--m)'
+        }
+      }, fmtINR(r.actualMonthly)), "/mo.", r.requiredMonthly !== null && /*#__PURE__*/React.createElement(React.Fragment, null, " This goal needs ", /*#__PURE__*/React.createElement("strong", {
+        style: {
+          fontFamily: 'var(--m)',
+          color: bad ? 'var(--r)' : 'var(--g)'
+        }
+      }, fmtINR(r.requiredMonthly)), "/mo."), bad && r.shortfall > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, " Short by ", /*#__PURE__*/React.createElement("strong", {
+        style: {
+          fontFamily: 'var(--m)'
+        }
+      }, fmtINR(r.shortfall)), " a month."), r.arrivalYear && /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 10.5,
+          color: 'var(--n400)',
+          marginTop: 3
+        }
+      }, "At this pace you arrive in ", /*#__PURE__*/React.createElement("strong", null, r.arrivalYear), "."), r.onTrack && /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 10.5,
+          color: 'var(--g)',
+          marginTop: 3
+        }
+      }, "On track.")));
+    })(), g.notes && /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11,
         color: 'var(--n500)',
@@ -17595,6 +19165,18 @@ const TABS = {
   }, {
     id: 'cfo',
     l: 'CFO Dashboard'
+  }, {
+    id: 'carry',
+    l: 'Idle Capital'
+  }, {
+    id: 'survival',
+    l: 'Survival'
+  }, {
+    id: 'scenario',
+    l: 'Scenarios'
+  }, {
+    id: 'commit',
+    l: 'Commitments'
   }],
   master: [{
     id: 'master',
@@ -17627,6 +19209,10 @@ const PT = {
   cc: 'Credit Cards',
   loan: 'Loan Tracker',
   cfo: 'CFO Dashboard',
+  carry: 'Idle Capital',
+  survival: 'Survival',
+  scenario: 'Scenarios',
+  commit: 'Commitments',
   forecast: 'Financial Forecast',
   debt: 'Debt Optimizer',
   ai: 'AI Insights',
@@ -18177,6 +19763,14 @@ function App() {
         return /*#__PURE__*/React.createElement(PageProfile, p);
       case 'cfo':
         return /*#__PURE__*/React.createElement(PageCFO, p);
+      case 'carry':
+        return /*#__PURE__*/React.createElement(PageCarry, p);
+      case 'survival':
+        return /*#__PURE__*/React.createElement(PageSurvival, p);
+      case 'scenario':
+        return /*#__PURE__*/React.createElement(PageScenario, p);
+      case 'commit':
+        return /*#__PURE__*/React.createElement(PageCommit, p);
       case 'forecast':
         return /*#__PURE__*/React.createElement(PageForecast, p);
       case 'debt':
