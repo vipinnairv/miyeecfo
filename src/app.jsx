@@ -2229,6 +2229,66 @@ function PageCC({data,setData,toast}){
 }
 
 /* ══════════════════════════════════════
+   LOAN SCHEDULE CSV
+   Shared by both import paths, so a file that works in one works in the other.
+══════════════════════════════════════ */
+const scheduleHeaders=text=>{
+  const first=(text||'').replace(/\r/g,'').split('\n').find(l=>l.trim())||'';
+  const h=parseCSVLine(first).map(x=>x.replace(/"/g,'').trim().toLowerCase().replace(/[\s_\-.]/g,''));
+  return h;
+};
+// A schedule lists instalments; a loan list names lenders. The presence of an
+// interest column with no bank column is what separates them.
+const looksLikeSchedule=text=>{
+  const h=scheduleHeaders(text);
+  const has=(...n)=>n.some(x=>h.indexOf(x)>=0);
+  return has('interest','interestcomponent')&&has('emi','instalment','installment','payment')
+    &&!has('bank','lender','bankname','financier');
+};
+const parseScheduleCSV=(text,fallbackRoi)=>{
+  const lines=(text||'').replace(/\r/g,'').split('\n').filter(x=>x.trim());
+  if(lines.length<2)return{rows:[],error:'That file has no rows'};
+  const hdr=scheduleHeaders(text);
+  const at=(...names)=>{for(const n of names){const i=hdr.indexOf(n);if(i>=0)return i;}return -1;};
+  const iN=at('installmentno','instalmentno','no','sno','installment','month','n');
+  const iD=at('date','duedate','paymentdate');
+  const iO=at('opening','openingbalance','principaloutstanding','balance');
+  const iE=at('emi','instalment','installment','payment','amount');
+  const iP=at('principal','principalcomponent');
+  const iI=at('interest','interestcomponent');
+  const iC=at('closing','closingbalance');
+  const iR=at('roi','rate','interestrate');
+  if(iE<0||iI<0)return{rows:[],error:'Need at least EMI and Interest columns'};
+  const num=v=>{const x=parseFloat(String(v==null?'':v).replace(/[^0-9.\-]/g,''));return isFinite(x)?x:0;};
+  const rows=[];
+  lines.slice(1).forEach((ln,k)=>{
+    const c=parseCSVLine(ln);
+    if(!c.length||!String(c[iE]||'').trim())return;
+    const emi=num(c[iE]),interest=num(c[iI]);
+    const principal=iP>=0?num(c[iP]):emi-interest;
+    const opening=iO>=0?num(c[iO]):0;
+    const closing=iC>=0?num(c[iC]):Math.max(0,opening-principal);
+    // A rate written as 0.1236 means the same as 12.36; both are accepted.
+    let roi=iR>=0?num(c[iR]):(fallbackRoi||0);if(roi>0&&roi<1)roi*=100;
+    let date=iD>=0?String(c[iD]||'').trim():'';
+    const dm=date.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if(dm)date=`${dm[3]}-${String(dm[2]).padStart(2,'0')}-${String(dm[1]).padStart(2,'0')}`;
+    else if(date&&!/^\d{4}-\d{2}-\d{2}/.test(date)){
+      const d2=new Date(date);date=isFinite(d2)?d2.toISOString().slice(0,10):'';
+    }else date=date.slice(0,10);
+    rows.push({n:iN>=0?(parseInt(num(c[iN]),10)||k+1):k+1,
+      date,opening,emi,principal,interest,closing,roi});
+  });
+  rows.sort((a,b)=>a.n-b.n);
+  return rows.length?{rows}:{rows:[],error:'No instalment rows found'};
+};
+// Attaching a schedule makes it the authority, so the fields it implies follow.
+const attachSchedule=(loan,rows)=>({...loan,schedule:rows,
+  tenure:rows[rows.length-1].n,
+  endDate:rows[rows.length-1].date||loan.endDate,
+  phases:[]});
+
+/* ══════════════════════════════════════
    LOANS
 ══════════════════════════════════════ */
 /* ── LoanCard: extracted so useState(showAmort) is at component top-level (Rules of Hooks) ── */
@@ -2252,50 +2312,10 @@ function LoanCard({l,accounts,buildAmort,openEdit,del,setData,toast}){
     const f=e.target.files[0];if(!f)return;
     const r=new FileReader();
     r.onload=ev=>{
-      try{
-        const lines=ev.target.result.replace(/\r/g,'').split('\n').filter(x=>x.trim());
-        if(lines.length<2){toast('That file has no rows','r');return;}
-        const hdr=parseCSVLine(lines[0]).map(h=>h.replace(/"/g,'').trim().toLowerCase().replace(/[\s_\-.]/g,''));
-        const at=(...names)=>{for(const n of names){const i=hdr.indexOf(n);if(i>=0)return i;}return -1;};
-        const iN=at('installmentno','instalmentno','no','sno','installment','month','n');
-        const iD=at('date','duedate','paymentdate');
-        const iO=at('opening','openingbalance','principaloutstanding','balance');
-        const iE=at('emi','instalment','installment','payment','amount');
-        const iP=at('principal','principalcomponent');
-        const iI=at('interest','interestcomponent');
-        const iC=at('closing','closingbalance');
-        const iR=at('roi','rate','interestrate');
-        if(iE<0||iI<0){toast('Need at least EMI and Interest columns','r');return;}
-        const num=v=>{const x=parseFloat(String(v==null?'':v).replace(/[^0-9.\-]/g,''));return isFinite(x)?x:0;};
-        const rows=[];
-        lines.slice(1).forEach((ln,k)=>{
-          const c=parseCSVLine(ln);
-          if(!c.length||!String(c[iE]||'').trim())return;
-          const emi=num(c[iE]),interest=num(c[iI]);
-          const principal=iP>=0?num(c[iP]):emi-interest;
-          const opening=iO>=0?num(c[iO]):0;
-          const closing=iC>=0?num(c[iC]):Math.max(0,opening-principal);
-          // A rate written as 0.1236 means the same as 12.36; both are accepted.
-          let roi=iR>=0?num(c[iR]):l.roi;if(roi>0&&roi<1)roi*=100;
-          let date=iD>=0?String(c[iD]||'').trim():'';
-          const dm=date.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
-          if(dm)date=`${dm[3]}-${dm[2]}-${dm[1]}`;             // dd/mm/yyyy
-          else if(date&&!/^\d{4}-\d{2}-\d{2}/.test(date)){
-            const d2=new Date(date);date=isFinite(d2)?d2.toISOString().slice(0,10):'';
-          }else date=date.slice(0,10);
-          rows.push({n:iN>=0?(parseInt(num(c[iN]),10)||k+1):k+1,
-            date,opening,emi,principal,interest,closing,roi});
-        });
-        if(!rows.length){toast('No instalment rows found','r');return;}
-        rows.sort((a,b)=>a.n-b.n);
-        setData(d=>({...d,loans:d.loans.map(lo=>lo.id!==l.id?lo:{...lo,
-          schedule:rows,
-          // The schedule is now the authority, so the fields derived from it follow.
-          tenure:rows[rows.length-1].n,
-          endDate:rows[rows.length-1].date||lo.endDate,
-          phases:[]})}));
-        toast(`Schedule imported: ${rows.length} instalments`,'g');
-      }catch(err){toast('Could not read that file','r');}
+      const {rows,error}=parseScheduleCSV(ev.target.result,l.roi);
+      if(error){toast(error,'r');return;}
+      setData(d=>({...d,loans:d.loans.map(lo=>lo.id!==l.id?lo:attachSchedule(lo,rows))}));
+      toast(`Schedule imported: ${rows.length} instalments`,'g');
     };
     r.readAsText(f);
     e.target.value='';
@@ -2401,8 +2421,9 @@ function LoanCard({l,accounts,buildAmort,openEdit,del,setData,toast}){
             <div style={{fontFamily:'var(--m)',fontSize:16,fontWeight:700,color:isFullyPaid?'var(--g)':'var(--r)'}}>{fmtINR(l.outstanding)}</div>
           </div>
           <input type="file" accept=".csv" ref={schedRef} style={{display:'none'}} onChange={importSchedule}/>
-          <button className="bic" title={l.schedule?'Replace the imported schedule':'Import the lender\'s schedule (CSV)'}
-            onClick={()=>schedRef.current.click()}><Ic n="up" s={11}/></button>
+          <button className="btn btn-s btn-sm" style={{fontSize:10.5,padding:'3px 9px',whiteSpace:'nowrap'}}
+            title={l.schedule?'Replace the imported schedule':'Attach the lender\'s own instalment schedule (CSV)'}
+            onClick={()=>schedRef.current.click()}><Ic n="up" s={11}/>{l.schedule?'Schedule':'Add schedule'}</button>
           {l.schedule&&<button className="bic" title="Remove the imported schedule" onClick={dropSchedule}><Ic n="x" s={11}/></button>}
           <button className="bic" title="Schedule CSV template" onClick={schedTemplate}><Ic n="dl" s={11}/></button>
           <button className="bic" onClick={()=>openEdit(l)}><Ic n="edit" s={11}/></button>
@@ -2595,6 +2616,7 @@ function PageLoans({data,setData,toast}){
   const {loans,accounts}=data;
   const ef={bank:'',accNo:'XXXX-0000',type:'Personal Loan',original:'',outstanding:'',emi:'',roi:'',startDate:'',endDate:'',tenure:'60',phases:[]};
   const [modal,setModal]=useState(null);const [form,setForm]=useState(ef);
+  const [schedPick,setSchedPick]=useState(null);
   // Amortization engine: builds schedule from current outstanding using phases
   const buildAmort=(l)=>{
     const now=new Date(),start=new Date(l.startDate||new Date());
@@ -2648,6 +2670,16 @@ function PageLoans({data,setData,toast}){
       const raw=ev.target.result.replace(/\r/g,'');
       const lines=raw.split('\n').filter(l=>l.trim());
       if(lines.length<2){toast('CSV empty','r');return;}
+      /* An amortisation schedule dropped on the loan-list importer used to
+         report "Imported 0 loans" and stop there, which says nothing about what
+         went wrong. Recognise it instead and ask which loan it belongs to. */
+      if(looksLikeSchedule(raw)){
+        const {rows,error}=parseScheduleCSV(raw,0);
+        if(error){toast(error,'r');return;}
+        if(!loans.length){toast('Add the loan first, then attach its schedule','r');return;}
+        setSchedPick({rows,loanId:loans[0].id});
+        return;
+      }
       const hdr=parseCSVLine(lines[0]).map(h=>h.replace(/"/g,'').trim().toLowerCase().replace(/[\s_\-]/g,''));
       const ca=(...aliases)=>(cols)=>{for(const a of aliases){const i=hdr.indexOf(a.toLowerCase().replace(/[\s_\-]/g,''));if(i>=0&&cols[i])return cols[i];}return'';};
       const getBank=ca('bank','lender','bankname','financier');
@@ -2673,6 +2705,7 @@ function PageLoans({data,setData,toast}){
         const ed=normalizeDate(getED(cols))||calcEnd(sd,ten);
         return{id:uid(),bank,accNo:getAccNo(cols)||'XXXX-0000',type:getType(cols)||'Personal Loan',original:orig,outstanding:os,emi,roi,startDate:sd||null,endDate:ed||null,tenure:ten,phases:[],remaining:calcRem(ed,sd,ten)};
       }).filter(Boolean);
+      if(!lns.length){toast('No loans found. Every row needs a bank or lender name.','r');return;}
       setData(d=>({...d,loans:[...d.loans,...lns]}));
       toast(`Imported ${lns.length} loans`,'g');
     };
@@ -2792,6 +2825,33 @@ function PageLoans({data,setData,toast}){
         </div>
       </div>
       {loans.map(l=><LoanCard key={l.id} l={l} accounts={accounts} buildAmort={buildAmort} openEdit={openEdit} del={del} setData={setData} toast={toast}/>)}
+      {schedPick&&(()=>{
+        const rows=schedPick.rows;const tgt=loans.find(l=>l.id===schedPick.loanId)||loans[0];
+        const emis=[...new Set(rows.map(r=>r.emi))];
+        return(
+        <Modal title="Attach this schedule" onClose={()=>setSchedPick(null)}
+          foot={<><button className="btn btn-s btn-sm" onClick={()=>setSchedPick(null)}>Cancel</button>
+            <button className="btn btn-p btn-sm" onClick={()=>{
+              setData(d=>({...d,loans:d.loans.map(lo=>lo.id!==schedPick.loanId?lo:attachSchedule(lo,rows))}));
+              toast(`Schedule attached to ${tgt.bank} ${tgt.type}: ${rows.length} instalments`,'g');
+              setSchedPick(null);
+            }}><Ic n="ok" s={12} c="#fff"/>Attach</button></>}>
+          <div className="alert ai mb2"><Ic n="prov" s={13}/><span>
+            That file is an instalment schedule, not a list of loans, so it belongs to one loan rather than creating new ones.
+          </span></div>
+          <div className="fg mb2"><label>Attach to</label>
+            <select value={schedPick.loanId} onChange={e=>setSchedPick(x=>({...x,loanId:e.target.value}))}>
+              {loans.map(l=><option key={l.id} value={l.id}>{l.bank} {l.type} ({fmtINR(l.outstanding,true)})</option>)}
+            </select>
+          </div>
+          <div style={{fontSize:11.5,color:'var(--n600)',lineHeight:1.6,background:'var(--n50)',borderRadius:8,padding:'9px 11px'}}>
+            <strong>{rows.length}</strong> instalments, {fmtDate(rows[0].date)} to {fmtDate(rows[rows.length-1].date)}.<br/>
+            EMI {fmtINR(rows[0].emi)}{emis.length>1&&<> stepping down to {fmtINR(emis[emis.length-1])}</>}.<br/>
+            Total payable {fmtINR(rows.reduce((a,r)=>a+r.emi,0))}, of which {fmtINR(rows.reduce((a,r)=>a+r.interest,0))} is interest.
+            {tgt&&<><br/>This sets {tgt.bank}'s tenure to {rows[rows.length-1].n} and its end date to {fmtDate(rows[rows.length-1].date)}.</>}
+          </div>
+        </Modal>);
+      })()}
       {modal&&<Modal title={modal==='add'?'Add Loan':'Edit Loan'} onClose={close} foot={<><button className="btn btn-s btn-sm" onClick={close}>Cancel</button><button className="btn btn-p btn-sm" onClick={save}><Ic n={modal==='add'?'plus':'ok'} s={12} c="#fff"/>{modal==='add'?'Add':'Save'}</button></>}>{LF}</Modal>}
     </div>
   );
