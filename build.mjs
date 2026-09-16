@@ -7,10 +7,13 @@
 import {transform} from '@babel/standalone';
 import fs from 'node:fs';
 
-const jsx=fs.readFileSync('src/app.jsx','utf8');
+// The pure engine (plain JS) is concatenated ahead of the JSX UI so both ship
+// as one inline script, and the engine stays independently testable.
+const engine=fs.readFileSync('src/engine.js','utf8');
+const jsx=engine+'\n'+fs.readFileSync('src/app.jsx','utf8');
 const t=Date.now();
 const code=transform(jsx,{presets:['react'],compact:false}).code;
-console.log(`Transpiled src/app.jsx in ${Date.now()-t}ms (${code.length} chars)`);
+console.log(`Transpiled src/engine.js + src/app.jsx in ${Date.now()-t}ms (${code.length} chars)`);
 
 let html=fs.readFileSync('index.html','utf8');
 const START='/*__APP_START__*/',END='/*__APP_END__*/';
