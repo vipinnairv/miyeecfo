@@ -508,8 +508,8 @@ function EfCard({data,accounts,avgMonthlyExp:fallbackExp,setPage}){
       </div>
       <div style={{marginTop:8,position:'relative',zIndex:1,fontSize:10,opacity:.6}}>
         {majorCats.length>0
-          ?`Based on \u2605 Major categories budget: ${fmtINR(majorMonthlyBudget,true)}/mo (${majorCats.join(', ')})`
-          :'No \u2605 Major categories set. Using avg monthly expense as fallback. Mark categories as Major in Master Settings.'}
+          ?`Based on ★ Major categories budget: ${fmtINR(majorMonthlyBudget,true)}/mo (${majorCats.join(', ')})`
+          :'No ★ Major categories set. Using avg monthly expense as fallback. Mark categories as Major in Master Settings.'}
       </div>
       <div style={{marginTop:8,position:'relative',zIndex:1}}>
         <div style={{height:6,background:'rgba(255,255,255,.15)',borderRadius:99,overflow:'hidden'}}>
@@ -552,11 +552,12 @@ function PmCard({pmMap,totalExp}){
 }
 
 const PAYMENT_MODES=['Credit Card','UPI','NEFT/Bank Transfer','Cash','Debit Card','Wallet'];
+// Which payment mode a debit from this kind of account is recorded as.
+const MODE_OF_ACCT={bank:'NEFT/Bank Transfer',fd:'NEFT/Bank Transfer',cash:'Cash',wallet:'Wallet'};
 const pmClass=m=>{if(!m)return'tx';const l=m.toLowerCase();if(l.includes('credit'))return'pm-cc';if(l.includes('upi'))return'pm-upi';if(l.includes('neft')||l.includes('bank'))return'pm-neft';if(l.includes('cash'))return'pm-cash';if(l.includes('debit'))return'pm-dc';if(l.includes('wallet'))return'pm-wallet';return'tx';};
 /* The pure financial engine lives in src/engine.js and is concatenated ahead
    of this file by the build. These two hooks memoise it for React. */
 const useFin=(data,months)=>useMemo(()=>computeFin(data,months),[data,months]);
-const useReconciliation=(data,months)=>useMemo(()=>computeReconciliation(data,months),[data,months]);
 
 
 /* ══════════════════════════════════════
@@ -617,19 +618,6 @@ function buildActions(data,fin,months){
       push(2,`${fmtINR(fin.surplus,true)} surplus is sitting idle`,
         'Nothing logged as invested this period. Money put to work moves from cash into net worth as an asset.',
         'Open Investment Tracker','invtracker');
-  }
-
-  // 6c. Reconciliation: a balance your ledger cannot explain is worth knowing about
-  const rec=computeReconciliation(data,months);
-  if(rec.hasOpenings&&!rec.balanced){
-    const off=Math.abs(rec.totals.diff);
-    push(1,`Your funds are off by ${fmtINR(off,true)}`,
-      `Recorded transactions do not explain the balance you hold. Usually a missing entry or a credit card bill payment.`,
-      'Open Reconciliation','reconcile');
-  }else if(rec.unclassified.length>0){
-    push(2,`${rec.unclassified.length} transaction${rec.unclassified.length>1?'s':''} without a payment mode`,
-      'These cannot be traced to a bank, cash or wallet balance until a mode is set.',
-      'Open Reconciliation','reconcile');
   }
 
   // 7. Recurring transactions waiting
@@ -1271,7 +1259,7 @@ function PageFund({data,setData,toast}){
         <label>Opening Balance ({CUR.sym}) – optional</label>
         <input type="number" value={form.opening} onChange={e=>setForm(f=>({...f,opening:e.target.value}))} placeholder="Leave blank to infer it"/>
         <div style={{fontSize:10.5,color:'var(--n400)',marginTop:4}}>
-          What this account held on the first day of your reporting period. Reconciliation uses it to check
+          What this account held on the first day of your reporting period. Used to check
           your ledger against this balance. Leave it blank and the page will work out what it must have been.
         </div>
       </div>
@@ -1337,340 +1325,6 @@ function PageFund({data,setData,toast}){
   );
 }
 
-/* ══════════════════════════════════════
-   RECONCILIATION
-   Book balance vs the balance you actually hold, per fund type.
-══════════════════════════════════════ */
-function PageReconcile({data,setData,toast,setPage}){
-  const {profile,accounts}=data;
-  const months=useMemo(()=>getPeriodMonths(profile.periodStart,profile.periodEnd),[profile.periodStart,profile.periodEnd]);
-  const r=useReconciliation(data,months);
-  const [showModes,setShowModes]=useState(false);
-  // ── Record a self-transfer between two of your own funds ──
-  const BUCKET_MODE={bank:'NEFT/Bank Transfer',cash:'Cash',wallet:'Wallet'};
-  const tef={from:'bank',to:'cash',amount:'',date:new Date().toISOString().slice(0,10),notes:''};
-  const [xfer,setXfer]=useState(null);
-  const saveXfer=()=>{
-    if(!xfer.amount||+xfer.amount<=0){toast('Enter an amount','r');return;}
-    if(xfer.from===xfer.to){toast('Pick two different funds','r');return;}
-    const tx={id:uid(),type:'transfer',amount:+xfer.amount,date:xfer.date,month:xfer.date.slice(0,7),
-      category:'Self-transfer',desc:xfer.notes||`Transfer ${xfer.from} → ${xfer.to}`,
-      paymentMode:BUCKET_MODE[xfer.from],transferTo:BUCKET_MODE[xfer.to],merchant:''};
-    setData(d=>({...d,transactions:[...d.transactions,tx]}));
-    toast('Transfer recorded','g');setXfer(null);
-  };
-
-  const setOpening=(id,val)=>setData(d=>({...d,
-    accounts:d.accounts.map(a=>a.id===id?{...a,opening:val===''||val===null?null:+val}:a)}));
-
-  // Adopting the implied opening makes a bucket balance by construction. It is
-  // the right move only when the ledger is complete and the balance is trusted.
-  const adoptImplied=row=>{
-    if(!row.accounts.length)return;
-    // One account: it takes the whole figure. Several: only meaningful if the
-    // rest already have openings, so the remainder lands on the odd one out.
-    const missing=row.accountsWithout;
-    if(missing.length!==1){
-      toast(missing.length===0?'Every account here already has an opening balance':'Set openings on all but one account first','r');
-      return;
-    }
-    const known=row.accounts.filter(a=>a.opening!==null&&a.opening!==undefined)
-      .reduce((s,a)=>s+(a.opening||0),0);
-    setOpening(missing[0].id,row.impliedOpening-known);
-    toast(`Opening balance set on ${missing[0].name}`,'g');
-  };
-
-  const Diff=({v})=>{
-    const ok=Math.abs(v)<=r.tolerance;
-    return<span className={`tag ${ok?'tg':'tr'}`}>{ok?'✓ Reconciled':`${v>0?'+':'−'}${fmtINR(Math.abs(v),true)}`}</span>;
-  };
-
-  const noAccounts=r.tracked.length===0;
-
-  return(
-    <div className="page">
-      <div className="ph mb3">
-        <div>
-          <div className="ptitle">Reconciliation</div>
-          <div className="psub">
-            Does what you recorded moving agree with what you say you hold? · {periodLabel(profile.periodStart,profile.periodEnd)}
-          </div>
-        </div>
-        <div style={{display:'flex',gap:6}}>
-          <button className="btn btn-s btn-sm" onClick={()=>setXfer(tef)}><Ic n="refresh" s={12}/>Record transfer</button>
-          <button className="btn btn-s btn-sm" onClick={()=>setPage('fund')}><Ic n="bank" s={12}/>Edit accounts</button>
-        </div>
-      </div>
-      {xfer&&<Modal title="Record a self-transfer" onClose={()=>setXfer(null)}
-        foot={<><button className="btn btn-s btn-sm" onClick={()=>setXfer(null)}>Cancel</button><button className="btn btn-p btn-sm" onClick={saveXfer}><Ic n="ok" s={12} c="#fff"/>Save</button></>}>
-        <div className="alert ai mb2"><Ic n="prov" s={13}/><span>Moving money between your own funds nets to zero overall, but each fund needs to see its side so reconciliation balances.</span></div>
-        <div className="f2 mb2">
-          <div className="fg"><label>From</label><select value={xfer.from} onChange={e=>setXfer(x=>({...x,from:e.target.value}))}>{FUND_BUCKETS.map(b=><option key={b.key} value={b.key}>{b.label}</option>)}</select></div>
-          <div className="fg"><label>To</label><select value={xfer.to} onChange={e=>setXfer(x=>({...x,to:e.target.value}))}>{FUND_BUCKETS.map(b=><option key={b.key} value={b.key}>{b.label}</option>)}</select></div>
-        </div>
-        <div className="f2 mb2">
-          <div className="fg"><label>Amount ({CUR.sym})</label><input type="number" min="0" placeholder="0" value={xfer.amount} onChange={e=>setXfer(x=>({...x,amount:e.target.value}))}/></div>
-          <div className="fg"><label>Date</label><input type="date" value={xfer.date} onChange={e=>setXfer(x=>({...x,date:e.target.value}))}/></div>
-        </div>
-        <div className="fg"><label>Note (optional)</label><input value={xfer.notes} onChange={e=>setXfer(x=>({...x,notes:e.target.value}))} placeholder="e.g. ATM withdrawal"/></div>
-      </Modal>}
-
-      {noAccounts?(
-        <div className="card" style={{textAlign:'center',padding:'40px 20px'}}>
-          <div style={{fontSize:36,marginBottom:10}}>🏦</div>
-          <div style={{fontSize:14,fontWeight:700,color:'var(--n600)',marginBottom:6}}>No bank, cash or wallet accounts yet</div>
-          <div style={{fontSize:12,color:'var(--n400)',marginBottom:16}}>
-            Add the accounts you actually hold and their balances, then come back here to check them
-            against your recorded transactions.
-          </div>
-          <button className="btn btn-p" style={{margin:'0 auto'}} onClick={()=>setPage('fund')}>→ Go to Bank Balance</button>
-        </div>
-      ):(
-      <>
-      {/* ── Verdict ── */}
-      <div className="card mb3 stl-card">
-        <div className="sh mb2">
-          <div className="sh-t">
-            <Ic n="shield" s={14} c={!r.hasOpenings?'var(--o)':r.balanced?'var(--g)':'var(--r)'}/>
-            {!r.hasOpenings?'Not yet reconcilable'
-              :r.balanced?(r.totals.allChecked?'Your books agree':'The funds you have checked agree')
-              :'Your books do not agree'}
-          </div>
-          <span className={`tag ${r.totals.assumedZero>0?'to':'tx'}`} style={{fontSize:10}}>
-            {r.totals.assumedZero>0
-              ? `${r.totals.assumedZero} account${r.totals.assumedZero>1?'s':''} assumed to open at ${CUR.sym}0`
-              : `${r.totals.reconcilable} of ${r.totals.tracked} fund types checked`}
-          </span>
-        </div>
-        <div className="stl-row">
-          <div className="stl-main">
-            <div className="stl-val" style={{color:!r.hasOpenings?'var(--warn)':r.balanced?'var(--pos)':'var(--neg)'}}>
-              {!r.hasOpenings?'–':r.balanced?fmtINR(0):fmtINR(Math.abs(r.totals.diff))}
-            </div>
-            <div className="stl-sub">
-              {!r.hasOpenings
-                ? <>Set an <strong>opening balance</strong> on your accounts below and this becomes a real check.
-                    Until then the table shows what your opening balance <em>must have been</em> for the ledger
-                    to land on today's figure.</>
-                : r.balanced
-                ? (r.totals.allChecked
-                    ? <>Every recorded movement accounts for the balance you hold. Nothing is missing from your ledger.</>
-                    : <>Everything you have given an opening balance reconciles exactly.
-                        {' '}{r.totals.assumedZero} account{r.totals.assumedZero===1?'':'s'} still
-                        {' '}{r.totals.assumedZero===1?'has':'have'} no opening balance and
-                        {' '}{r.totals.assumedZero===1?'is':'are'} being treated as opening at {CUR.sym}0,
-                        so set {r.totals.assumedZero===1?'it':'them'} below to be sure.</>)
-                : <>{r.totals.diff>0
-                    ? <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} more</strong> than your recorded transactions explain. Money came in that you have not logged.</>
-                    : <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} less</strong> than your recorded transactions explain. Money went out that you have not logged.</>}
-                    {r.totals.assumedZero>0&&<> {r.totals.assumedZero} account{r.totals.assumedZero>1?'s':''} without an opening balance {r.totals.assumedZero>1?'are':'is'} treated as opening at {CUR.sym}0, so set {r.totals.assumedZero>1?'them':'it'} below if that is wrong.</>}
-                  </>}
-            </div>
-          </div>
-          <div className="stl-calc">
-            {(()=>{
-              // Every term below covers the same funds, so the arithmetic on screen holds.
-              const v=r.hasOpenings?r.checked:r.totals;
-              const partial=r.hasOpenings&&!r.totals.allChecked;
-              return[
-              {l:'Opening',v:v.opening,op:null,c:'var(--n800)',note:r.hasOpenings?'as entered':'not set'},
-              {l:'Money In',v:v.inflow,op:'+',c:'var(--pos)'},
-              {l:'Money Out',v:v.outflow,op:'−',c:'var(--neg)'},
-              {l:'Invested',v:v.invested,op:'−',c:'var(--p)'},
-              {l:'Expected',v:v.expected,op:'=',c:'var(--n800)',bold:true,dash:!r.hasOpenings},
-              {l:'Actual Held',v:v.actual,op:'vs',c:'var(--b)',bold:true,note:partial?'checked funds only':''},
-            ];})().map(x=>(
-              <React.Fragment key={x.l}>
-                {x.op&&<span className="stl-op" aria-hidden="true">{x.op}</span>}
-                <div className="stl-term">
-                  <div className="stl-term-l">{x.l}</div>
-                  <div className="stl-term-v" style={{color:x.c,fontWeight:x.bold?800:700}}>{x.dash?'–':fmtINR(x.v,true)}</div>
-                  {x.note&&<div className="stl-term-n">{x.note}</div>}
-                </div>
-              </React.Fragment>
-            ))}
-          </div>
-        </div>
-        <div className="stl-foot">
-          <span>Fixed deposits ({fmtINR(r.fdBal,true)}) are excluded. They move by maturity, not by daily spending.</span>
-          <span>Differences under {fmtINR(r.tolerance)} are treated as rounding.</span>
-        </div>
-      </div>
-
-      {/* ── Per fund type ── */}
-      <div className="card mb3">
-        <div className="sh mb2">
-          <div className="sh-t"><Ic n="fund" s={14} c="var(--b)"/>By fund type</div>
-          <button className="btn btn-s btn-sm" style={{fontSize:11}} onClick={()=>setShowModes(v=>!v)}>
-            {showModes?'Hide':'Show'} payment modes
-          </button>
-        </div>
-        <div className="tw">
-          <table>
-            <thead><tr>
-              <th>Fund</th><th className="num">Opening</th><th className="num">In</th><th className="num">Out</th>
-              <th className="num">Invested</th><th className="num">Expected</th><th className="num">Actual</th><th>Status</th>
-            </tr></thead>
-            <tbody>
-              {r.tracked.map(row=>(
-                <React.Fragment key={row.key}>
-                  <tr>
-                    <td style={{fontWeight:700}}>{row.label}
-                      <div style={{fontSize:10,color:'var(--n400)',fontWeight:400}}>
-                        {row.accounts.length} account{row.accounts.length===1?'':'s'} · {row.inCount+row.outCount+row.invCount} entr{(row.inCount+row.outCount+row.invCount)===1?'y':'ies'}
-                      </div>
-                    </td>
-                    <td className="num">
-                      {row.openingSet?<>{fmtINR(row.opening,true)}
-                          {!row.fullyCovered&&<div style={{fontSize:9,color:'var(--warn)',fontStyle:'italic'}}>
-                            {row.accountsWithout.length} at {CUR.sym}0
-                          </div>}</>
-                        :<span style={{color:'var(--warn)',fontStyle:'italic'}}>{fmtINR(row.impliedOpening,true)} implied</span>}
-                    </td>
-                    <td className="num pos">{row.inflow?fmtINR(row.inflow,true):'–'}</td>
-                    <td className="num neg">{row.outflow?fmtINR(row.outflow,true):'–'}</td>
-                    <td className="num" style={{color:'var(--p)'}}>{row.invested?fmtINR(row.invested,true):'–'}</td>
-                    <td className="num bold">{row.openingSet?fmtINR(row.expected,true):'–'}</td>
-                    <td className="num bold" style={{color:'var(--b)'}}>{fmtINR(row.actual,true)}</td>
-                    <td>{row.openingSet
-                      ?<Diff v={row.diff}/>
-                      :<button className="btn btn-s btn-sm" style={{fontSize:10.5}} onClick={()=>adoptImplied(row)}>Use implied</button>}</td>
-                  </tr>
-                  {showModes&&Object.entries(row.byMode).map(([mode,v])=>(
-                    <tr key={row.key+mode} style={{background:'var(--n50)'}}>
-                      <td style={{paddingLeft:24,fontSize:11.5,color:'var(--n500)'}}>↳ {mode}</td>
-                      <td/>
-                      <td className="num" style={{fontSize:11.5}}>{v.in?fmtINR(v.in,true):'–'}</td>
-                      <td className="num" style={{fontSize:11.5}}>{v.out?fmtINR(v.out,true):'–'}</td>
-                      <td className="num" style={{fontSize:11.5}}>{v.inv?fmtINR(v.inv,true):'–'}</td>
-                      <td/><td/><td/>
-                    </tr>
-                  ))}
-                </React.Fragment>
-              ))}
-            </tbody>
-            <tfoot><tr className="tft">
-              <td style={{fontWeight:700}}>Total</td>
-              <td className="num bold">{r.hasOpenings?fmtINR(r.totals.opening,true):'–'}</td>
-              <td className="num bold pos">{fmtINR(r.totals.inflow,true)}</td>
-              <td className="num bold neg">{fmtINR(r.totals.outflow,true)}</td>
-              <td className="num bold" style={{color:'var(--p)'}}>{fmtINR(r.totals.invested,true)}</td>
-              <td className="num bold">{r.hasOpenings?fmtINR(r.totals.expected,true):'–'}</td>
-              <td className="num bold" style={{color:'var(--b)'}}>{fmtINR(r.totals.actual,true)}</td>
-              <td>{!r.hasOpenings?null
-                :<Diff v={r.totals.diff}/>}</td>
-            </tr></tfoot>
-          </table>
-        </div>
-      </div>
-
-      {/* ── Opening balances ── */}
-      <div className="card mb3">
-        <div className="sh mb2">
-          <div className="sh-t"><Ic n="edit" s={14} c="var(--g)"/>Opening balances</div>
-          <span className="tag tx" style={{fontSize:10}}>As at {months.length?months[0].label:'period start'}</span>
-        </div>
-        <div className="alert ai mb2"><Ic n="prov" s={13}/>
-          <span>What each account held on the first day of the period. Take it from your statement. This is
-          the anchor the whole check hangs on. Leave one blank and the table shows the figure it would need
-          to be for your ledger to balance.</span>
-        </div>
-        {r.tracked.map(row=>(
-          <div key={row.key} style={{marginBottom:14}}>
-            <div style={{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:.5,color:'var(--n500)',marginBottom:6}}>{row.label}</div>
-            {row.accounts.map(a=>(
-              <div key={a.id} className="sr">
-                <span className="sr-l">
-                  {a.name} <span style={{color:'var(--n400)',fontSize:11}}>· {a.accNo}</span>
-                  <div style={{fontSize:10.5,color:'var(--n400)'}}>Holds {fmtINR(a.balance,true)} today</div>
-                </span>
-                <span style={{display:'flex',alignItems:'center',gap:8}}>
-                  <input type="number" min="0" value={a.opening===null||a.opening===undefined?'':a.opening}
-                    onChange={e=>setOpening(a.id,e.target.value)}
-                    placeholder="not set"
-                    aria-label={`Opening balance for ${a.name}`}
-                    style={{width:130,textAlign:'right',fontFamily:'var(--m)',fontSize:12.5,padding:'6px 9px'}}/>
-                  {(a.opening!==null&&a.opening!==undefined)&&
-                    <button className="bic" title="Clear opening balance" aria-label={`Clear opening balance for ${a.name}`}
-                      onClick={()=>setOpening(a.id,'')}><Ic n="x" s={11}/></button>}
-                </span>
-              </div>
-            ))}
-          </div>
-        ))}
-      </div>
-
-      {/* ── What is not being checked ── */}
-      <div className="g2 mb3">
-        <div className="card">
-          <div className="sh mb2">
-            <div className="sh-t"><Ic n="bell" s={14} c={r.unclassified.length?'var(--o)':'var(--g)'}/>Entries that cannot be placed</div>
-            {r.unclassified.length>0&&<span className="tag tr">{r.unclassified.length}</span>}
-          </div>
-          {r.unclassified.length===0?(
-            <div style={{fontSize:12,color:'var(--n400)',padding:'10px 0'}}>
-              Every transaction in the period names a payment mode this page understands. Nothing is falling
-              through the cracks.
-            </div>
-          ):(
-            <>
-              <div style={{fontSize:11.5,color:'var(--n500)',marginBottom:8}}>
-                These carry no usable payment mode, so they cannot be assigned to a fund, the single most
-                common reason a reconciliation fails. Worth {fmtINR(r.unclassifiedIn+r.unclassifiedOut,true)} in total.
-              </div>
-              <div className="tw" style={{maxHeight:230,overflowY:'auto'}}>
-                <table>
-                  <thead><tr><th>Date</th><th>Description</th><th className="num">Amount</th><th>Why</th></tr></thead>
-                  <tbody>
-                    {r.unclassified.slice(0,25).map((t,i)=>(
-                      <tr key={t.id||i}>
-                        <td style={{whiteSpace:'nowrap'}}>{fmtDate(t.date)}</td>
-                        <td style={{fontSize:11.5}}>{t.desc||t.category||'–'}</td>
-                        <td className={`num ${t.type==='income'?'pos':'neg'}`}>{fmtINR(t.amount,true)}</td>
-                        <td style={{fontSize:11,color:'var(--n500)'}}>{t.why}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              {r.unclassified.length>25&&<div style={{fontSize:11,color:'var(--n400)',marginTop:6}}>+{r.unclassified.length-25} more</div>}
-              <button className="btn btn-s btn-sm" style={{marginTop:10}} onClick={()=>setPage('expense')}>
-                <Ic n="edit" s={11}/>Fix in Transactions
-              </button>
-            </>
-          )}
-        </div>
-
-        <div className="card">
-          <div className="sh mb2"><div className="sh-t"><Ic n="prov" s={14} c="var(--n500)"/>Deliberately not counted</div></div>
-          <div className="sr">
-            <span className="sr-l">Spending on credit cards
-              <div style={{fontSize:10.5,color:'var(--n400)'}}>{r.ccCount} entr{r.ccCount===1?'y':'ies'}. A card spend creates a liability, it does not move your cash</div>
-            </span>
-            <span className="sr-v">{fmtINR(r.ccSpend,true)}</span>
-          </div>
-          <div className="sr">
-            <span className="sr-l">Fixed deposits
-              <div style={{fontSize:10.5,color:'var(--n400)'}}>Move by maturity and transfer, not by daily spending</div>
-            </span>
-            <span className="sr-v">{fmtINR(r.fdBal,true)}</span>
-          </div>
-          <div style={{marginTop:12,padding:'10px 12px',background:'var(--ol)',borderRadius:8,border:'1px solid rgba(217,119,6,.2)'}}>
-            <div style={{fontSize:11.5,fontWeight:700,color:'var(--o)',marginBottom:5}}>Known gaps</div>
-            <div style={{fontSize:11,color:'var(--n600)',lineHeight:1.55}}>
-              <strong>Credit card bill payments</strong> are not recorded as transactions, so they will show up
-              as a difference. If your bank bucket is short by roughly what you paid off your cards this period,
-              that is almost certainly the reason. <strong>Transfers between your own funds</strong> are now
-              covered: use <strong>Record transfer</strong> above and both sides balance.
-            </div>
-          </div>
-        </div>
-      </div>
-      </>
-      )}
-    </div>
-  );
-}
 
 /* ══════════════════════════════════════
    TRANSACTIONS
@@ -2190,23 +1844,29 @@ function PageCC({data,setData,toast}){
   /* ── Pay a card bill ──────────────────────────────────────────────
      Real money leaves a fund and the card's payable drops. It is recorded as
      its own entry type, never an expense: the original card spend was already
-     the expense, so counting it again would double it. Reconciliation sees the
-     cash leave, which is what closes the usual unexplained bank gap. */
-  const PAY_MODES=PAYMENT_MODES.filter(m=>m!=='Credit Card');
+     the expense, so counting it again would double it. The account balance
+     falls by the amount paid, so net worth stays put instead of rising. */
   const [pay,setPay]=useState(null);
   const openPay=c=>setPay({cardId:c.id,bank:c.bank,type:c.type,max:c.payable,
-    amount:String(c.payable||''),date:new Date().toISOString().slice(0,10),paymentMode:'NEFT/Bank Transfer'});
+    amount:String(c.payable||''),date:new Date().toISOString().slice(0,10),
+    accountId:((data.accounts||[]).find(a=>a.type==='bank')||(data.accounts||[])[0]||{}).id||''});
   const savePay=()=>{
     const amt=+pay.amount;
     if(!amt||amt<=0){toast('Enter an amount','r');return;}
+    const acc=(data.accounts||[]).find(a=>a.id===pay.accountId);
+    if(!acc){toast('Pick the account you paid from','r');return;}
     const tx={id:uid(),type:'cardpay',cardId:pay.cardId,amount:amt,date:pay.date,
       month:pay.date.slice(0,7),category:'Credit card bill',
-      desc:`${pay.bank} ${pay.type} bill payment`,paymentMode:pay.paymentMode,merchant:''};
+      desc:`${pay.bank} ${pay.type} bill payment`,
+      paymentMode:MODE_OF_ACCT[acc.type]||'NEFT/Bank Transfer',accountId:acc.id,merchant:''};
     setData(d=>({...d,
       transactions:[...d.transactions,tx],
+      // Both sides move together. Clearing the payable alone lifted net worth by
+      // the amount paid, as if settling a bill made you richer.
+      accounts:d.accounts.map(a=>a.id===acc.id?{...a,balance:a.balance-amt}:a),
       creditCards:d.creditCards.map(c=>c.id===pay.cardId?{...c,payable:Math.max(0,(c.payable||0)-amt)}:c)
     }));
-    toast(`Paid ${fmtINR(amt,true)} · card cleared, cash recorded as leaving`,'g');
+    toast(`Paid ${fmtINR(amt,true)} · out of ${acc.name}, card cleared`,'g');
     setPay(null);
   };
 
@@ -2362,8 +2022,8 @@ function PageCC({data,setData,toast}){
             {pay.max>0&&<div style={{fontSize:10.5,color:'var(--n400)',marginTop:4}}>Outstanding {fmtINR(pay.max,true)}</div>}</div>
           <div className="fg"><label>Date</label><input type="date" value={pay.date} onChange={e=>setPay(x=>({...x,date:e.target.value}))}/></div>
           <div className="fg fg-full"><label>Paid From</label>
-            <select value={pay.paymentMode} onChange={e=>setPay(x=>({...x,paymentMode:e.target.value}))}>
-              {PAY_MODES.map(m=><option key={m} value={m}>{m}</option>)}
+            <select value={pay.accountId} onChange={e=>setPay(x=>({...x,accountId:e.target.value}))}>
+              {(data.accounts||[]).map(a=><option key={a.id} value={a.id}>{a.name} ({fmtINR(a.balance,true)})</option>)}
             </select>
           </div>
         </div>
@@ -2376,9 +2036,10 @@ function PageCC({data,setData,toast}){
    LOANS
 ══════════════════════════════════════ */
 /* ── LoanCard: extracted so useState(showAmort) is at component top-level (Rules of Hooks) ── */
-function LoanCard({l,buildAmort,openEdit,del,setData,toast}){
+function LoanCard({l,accounts,buildAmort,openEdit,del,setData,toast}){
   const [showAmort,setShowAmort]=useState(false);
   const [showHistory,setShowHistory]=useState(false);
+  const [payAcc,setPayAcc]=useState(null);
   const amort=buildAmort(l);
   const remInterest=amort.reduce((s,r)=>s+r.interest,0);
   const futurePayout=amort.reduce((s,r)=>s+r.emi,0);
@@ -2392,32 +2053,37 @@ function LoanCard({l,buildAmort,openEdit,del,setData,toast}){
   const nextDue=amort[0]||null;
   const isFullyPaid=l.outstanding<=0||amort.length===0;
 
-  /* Marking an EMI paid also posts it to the ledger, so the instalment leaves
-     the fund it was paid from. Only the interest is booked as a cost; the
-     principal repays debt, so it moves cash without being an expense. Without
-     this the cash silently vanished and reconciliation could never balance. */
-  const markPaid=(row)=>{
+  /* Marking an EMI paid moves money on BOTH sides of the balance sheet.
+
+     The loan's outstanding falls by the principal, which is a liability going
+     down. On its own that raised net worth by the principal every time you paid
+     an instalment, which is exactly backwards: paying a loan leaves you no
+     richer, because the cash left your account. So the full instalment is also
+     debited from the account you paid it from. Undo puts it back. */
+  const markPaid=(row,accountId)=>{
+    const acc=accounts.find(a=>a.id===accountId);
+    if(!acc){toast&&toast('Pick the account you paid from','r');return;}
     const txId=uid();
-    setData(d=>{
-      const emiMode=(d.profile&&d.profile.emiPaidFrom)||'NEFT/Bank Transfer';
-      return{...d,
+    setData(d=>({...d,
       transactions:[...d.transactions,{
         id:txId,type:'emi',loanId:l.id,emiNo:row.n,amount:row.emi,
         principal:row.principal,interest:row.interest,
         date:row.date,month:(row.date||'').slice(0,7),
         category:'Loan Interest',desc:`${l.bank} ${l.type} EMI #${row.n}`,
-        paymentMode:emiMode,merchant:''}],
+        paymentMode:MODE_OF_ACCT[acc.type]||'NEFT/Bank Transfer',accountId,merchant:''}],
+      // The cash side. Without this the liability fell and nothing paid for it.
+      accounts:d.accounts.map(a=>a.id===accountId?{...a,balance:a.balance-row.emi}:a),
       loans:d.loans.map(lo=>{
         if(lo.id!==l.id)return lo;
         const newPaid=[...(lo.paidEmis||[]),{
           n:row.n,date:row.date,emi:row.emi,principal:row.principal,
           interest:row.interest,opening:row.opening,closing:row.closing,
-          paidOn:new Date().toISOString().slice(0,10),txId
+          paidOn:new Date().toISOString().slice(0,10),txId,accountId
         }];
         return{...lo,outstanding:Math.max(0,row.closing),remaining:Math.max(0,(lo.remaining||0)-1),paidEmis:newPaid};
-      })};
-    });
-    toast&&toast(`EMI #${row.n} paid ✓ · ${fmtINR(row.emi,true)} posted to your ledger`,'g');
+      })}));
+    setPayAcc(null);
+    toast&&toast(`EMI #${row.n} paid ✓ · ${fmtINR(row.emi,true)} out of ${acc.name}`,'g');
   };
 
   const undoLastPaid=()=>{
@@ -2426,12 +2092,14 @@ function LoanCard({l,buildAmort,openEdit,del,setData,toast}){
     setData(d=>({...d,
       // Remove the ledger entry this EMI posted, so undo leaves nothing behind.
       transactions:d.transactions.filter(t=>!(last.txId&&t.id===last.txId)),
+      // Put the cash back in the account it was taken from.
+      accounts:d.accounts.map(a=>a.id===last.accountId?{...a,balance:a.balance+(last.emi||0)}:a),
       loans:d.loans.map(lo=>{
         if(lo.id!==l.id)return lo;
         return{...lo,outstanding:last.opening!==undefined?last.opening:lo.outstanding+last.principal,
           remaining:(lo.remaining||0)+1,paidEmis:lo.paidEmis.slice(0,-1)};
       })}));
-    toast&&toast('Last EMI payment undone · ledger entry removed','o');
+    toast&&toast('Last EMI payment undone · cash and balance restored','o');
   };
 
   return(
@@ -2506,7 +2174,7 @@ function LoanCard({l,buildAmort,openEdit,del,setData,toast}){
               </div>
             </div>
             <button
-              onClick={()=>markPaid(nextDue)}
+              onClick={()=>setPayAcc({accountId:(accounts[0]||{}).id||''})}
               style={{background:'var(--g)',color:'#fff',border:'none',borderRadius:8,padding:'8px 16px',fontSize:12,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:6,fontFamily:'var(--f)',whiteSpace:'nowrap'}}>
               ✓ Mark as Paid
             </button>
@@ -2619,11 +2287,24 @@ function LoanCard({l,buildAmort,openEdit,del,setData,toast}){
           </table>
         </div>
       )}
+      {payAcc&&nextDue&&<Modal title={`Record EMI #${nextDue.n}`} onClose={()=>setPayAcc(null)}
+        foot={<><button className="btn btn-s btn-sm" onClick={()=>setPayAcc(null)}>Cancel</button>
+          <button className="btn btn-p btn-sm" onClick={()=>markPaid(nextDue,payAcc.accountId)}><Ic n="ok" s={12} c="#fff"/>Record payment</button></>}>
+        <div className="alert ai mb2"><Ic n="prov" s={13}/><span>
+          {fmtINR(nextDue.emi,true)} leaves the account you pick. {fmtINR(nextDue.principal,true)} repays the loan and {fmtINR(nextDue.interest,true)} is booked as interest cost, so your net worth falls by the interest, not by the whole instalment.
+        </span></div>
+        <div className="fg"><label>Paid From</label>
+          <select value={payAcc.accountId} onChange={e=>setPayAcc(x=>({...x,accountId:e.target.value}))}>
+            {accounts.map(a=><option key={a.id} value={a.id}>{a.name} ({fmtINR(a.balance,true)})</option>)}
+          </select>
+          {!accounts.length&&<div style={{fontSize:10.5,color:'var(--r)',marginTop:4}}>Add an account first, under Bank Balance.</div>}
+        </div>
+      </Modal>}
     </div>
   );
 }
 function PageLoans({data,setData,toast}){
-  const {loans}=data;
+  const {loans,accounts}=data;
   const ef={bank:'',accNo:'XXXX-0000',type:'Personal Loan',original:'',outstanding:'',emi:'',roi:'',startDate:'',endDate:'',tenure:'60',phases:[]};
   const [modal,setModal]=useState(null);const [form,setForm]=useState(ef);
   // Amortization engine: builds schedule from current outstanding using phases
@@ -2631,9 +2312,12 @@ function PageLoans({data,setData,toast}){
     const phases=l.phases&&l.phases.length?[...l.phases].sort((a,b)=>a.fromMonth-b.fromMonth):[{fromMonth:1,emi:l.emi,roi:l.roi}];
     const now=new Date(),start=new Date(l.startDate||new Date());
     const elapsed=Math.max(0,(now.getFullYear()-start.getFullYear())*12+(now.getMonth()-start.getMonth()));
-    // Use paid EMI count as the source of truth for next installment. Whichever is higher wins
-    const paidCount=(l.paidEmis||[]).length;
-    const startFrom=Math.max(elapsed,paidCount);
+    // The next instalment is the one after the highest you have actually paid.
+    // Counting payments instead of reading their instalment numbers was wrong: a
+    // loan 32 months old with one payment logged gave max(32,1)=32, so the same
+    // EMI kept reappearing as "next due" no matter how often you marked it paid.
+    const lastPaidN=(l.paidEmis||[]).reduce((m,p)=>Math.max(m,p.n||0),0);
+    const startFrom=Math.max(elapsed,lastPaidN);
     const rows=[];let bal=l.outstanding;
     for(let i=0;i<l.tenure-startFrom&&bal>0;i++){
       const inst=startFrom+i+1;
@@ -2800,7 +2484,7 @@ function PageLoans({data,setData,toast}){
           </table>
         </div>
       </div>
-      {loans.map(l=><LoanCard key={l.id} l={l} buildAmort={buildAmort} openEdit={openEdit} del={del} setData={setData} toast={toast}/>)}
+      {loans.map(l=><LoanCard key={l.id} l={l} accounts={accounts} buildAmort={buildAmort} openEdit={openEdit} del={del} setData={setData} toast={toast}/>)}
       {modal&&<Modal title={modal==='add'?'Add Loan':'Edit Loan'} onClose={close} foot={<><button className="btn btn-s btn-sm" onClick={close}>Cancel</button><button className="btn btn-p btn-sm" onClick={save}><Ic n={modal==='add'?'plus':'ok'} s={12} c="#fff"/>{modal==='add'?'Add':'Save'}</button></>}>{LF}</Modal>}
     </div>
   );
@@ -3067,11 +2751,11 @@ function PageMaster({data,setData,toast}){
               ):(
                 <span style={{fontSize:12.5,display:'flex',alignItems:'center',gap:6}}>
                   {c}
-                  {isMajor&&<span className="major-flag">\u2605 Major</span>}
+                  {isMajor&&<span className="major-flag">★ Major</span>}
                 </span>
               )}
               {!isEditing&&<div style={{display:'flex',gap:4}}>
-                <button className="bic" title={isMajor?'Remove Major Flag':'Mark as Major Expense'} onClick={()=>{setData(d=>{const mec=d.majorExpenseCategories||[];const newMec=mec.includes(c)?mec.filter(x=>x!==c):[...mec,c];return{...d,majorExpenseCategories:newMec};});}} style={{color:isMajor?'var(--o)':''}}><span style={{fontSize:10}}>{isMajor?'\u2605':'\u2606'}</span></button>
+                <button className="bic" title={isMajor?'Remove Major Flag':'Mark as Major Expense'} onClick={()=>{setData(d=>{const mec=d.majorExpenseCategories||[];const newMec=mec.includes(c)?mec.filter(x=>x!==c):[...mec,c];return{...d,majorExpenseCategories:newMec};});}} style={{color:isMajor?'var(--o)':''}}><span style={{fontSize:10}}>{isMajor?'★':'☆'}</span></button>
                 <button className="bic" title="Rename Category" onClick={()=>startEditCat(c,'expense')}><Ic n="edit" s={11}/></button>
                 <button className="bic red" aria-label={`Delete category ${c}`} onClick={()=>{
                   undoDel(`Category "${c}" and its budget limit removed`,d=>{const bl={...d.budgetLimits};delete bl[c];return{...d,expenseCategories:d.expenseCategories.filter(x=>x!==c),budgetLimits:bl,majorExpenseCategories:(d.majorExpenseCategories||[]).filter(x=>x!==c)};});
@@ -3433,8 +3117,7 @@ function PageData({data,setData,toast}){
     if(!d.goals)d.goals=[];
     if(!d.recurring)d.recurring=[];
     if(!d.investmentTxs)d.investmentTxs=[];
-    // Reconciliation: `opening` is the balance at the start of the reporting period.
-    // Left null for existing data. The Reconciliation page infers it and offers to adopt it.
+    // `opening` is the balance at the start of the reporting period. Left null for existing data.
     d.accounts=d.accounts.map(a=>({...a,opening:a.opening===undefined?null:a.opening}));
     // One-time sweep for references left behind by older deletes: emergency fund
     // ids pointing at removed accounts, and contributions whose goal is gone.
@@ -3466,7 +3149,7 @@ function PageData({data,setData,toast}){
       });
       delete d.investments;
     } else { delete d.investments; }
-    // Reconciliation needs to know which fund an investment was paid from.
+    // Which fund an investment was paid from.
     // Pre-existing entries predate the field; a bank transfer is the safe default.
     d.investmentTxs=d.investmentTxs.map(t=>({...t,paymentMode:t.paymentMode||'NEFT/Bank Transfer'}));
     // Migrate investmentTxs: ensure goalId field exists
@@ -6400,7 +6083,7 @@ const NAV=[
 
 // Leaf page id → the tabs it sits alongside. Order defines the tab strip.
 const TABS={
-  fund:      [{id:'fund',l:'Bank Balance'},{id:'reconcile',l:'Reconciliation'}],
+  fund:      [{id:'fund',l:'Bank Balance'}],
   expense:   [{id:'expense',l:'Expenses'},{id:'income',l:'Income'},{id:'invtracker',l:'Investments'}],
   budget:    [{id:'budget',l:'Budget vs Actual'}],
   cc:        [{id:'cc',l:'Credit Cards'},{id:'loan',l:'Loans'},{id:'debt',l:'Debt Optimizer'},{id:'provision',l:'Future Outflows'}],
@@ -6412,7 +6095,7 @@ const TABS={
 const OWNER={};
 Object.entries(TABS).forEach(([root,tabs])=>tabs.forEach(t=>{OWNER[t.id]=root;}));
 
-const PT={dashboard:'Dashboard',fund:'Bank Balance Sheet',reconcile:'Reconciliation',pnl:'P & L Statement',expense:'Expense Tracker',invtracker:'Investment Tracker',income:'Income Tracker',budget:'Budget vs Actual',provision:'Expected Future Outflows',cc:'Credit Cards',loan:'Loan Tracker',cfo:'CFO Dashboard',forecast:'Financial Forecast',debt:'Debt Optimizer',ai:'AI Insights',master:'Master Settings',data:'Data Management',drive:'Google Drive Sync',profile:'Profile & Period',goals:'Savings Goals',recurring:'Recurring Transactions'};
+const PT={dashboard:'Dashboard',fund:'Bank Balance Sheet',pnl:'P & L Statement',expense:'Expense Tracker',invtracker:'Investment Tracker',income:'Income Tracker',budget:'Budget vs Actual',provision:'Expected Future Outflows',cc:'Credit Cards',loan:'Loan Tracker',cfo:'CFO Dashboard',forecast:'Financial Forecast',debt:'Debt Optimizer',ai:'AI Insights',master:'Master Settings',data:'Data Management',drive:'Google Drive Sync',profile:'Profile & Period',goals:'Savings Goals',recurring:'Recurring Transactions'};
 // Heading shown in the topbar for the whole destination (tabs name the leaf).
 const GROUP_TITLE={fund:'Bank Balance Sheet',expense:'Transactions',budget:'Budget',cc:'Liabilities',goals:'Plan',pnl:'Reports',master:'Settings'};
 
@@ -6711,7 +6394,6 @@ function App(){
     const p={data,setData,toast:showToast,setPage:setPg};
     switch(pg){
       case 'dashboard': return <PageDashboard {...p}/>;
-      case 'reconcile': return <PageReconcile {...p}/>;
       case 'fund': return <PageFund {...p}/>;
       case 'pnl': return <PagePnL {...p}/>;
       case 'expense': return <PageTx {...p} type="expense"/>;
