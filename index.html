@@ -4919,7 +4919,9 @@ function PageTx({
   const [selM, setSelM] = useState('all');
   const [selPM, setSelPM] = useState('all');
   const [selMerchant, setSelMerchant] = useState('all');
+  const [selCat, setSelCat] = useState('all');
   const [showAllMerchants, setShowAllMerchants] = useState(false);
+  const [showAllCats, setShowAllCats] = useState(false);
   const ef = {
     date: new Date().toISOString().slice(0, 10),
     category: '',
@@ -4935,9 +4937,15 @@ function PageTx({
   const [sel, setSel] = useState(new Set());
   const [bulk, setBulk] = useState(null);
   const fileRef = useRef();
-  const filtered = useMemo(() => [...transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && (selPM === 'all' || t.paymentMode === selPM) && (selMerchant === 'all' || t.merchant === selMerchant))].sort((a, b) => new Date(b.date) - new Date(a.date)), [transactions, type, selM, selPM, selMerchant]);
-  const pmOptions = useMemo(() => [...new Set(transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && t.paymentMode).map(t => t.paymentMode))].sort(), [transactions, type, selM]);
-  const merchantOptions = useMemo(() => [...new Set(transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && (selPM === 'all' || t.paymentMode === selPM) && t.merchant).map(t => t.merchant))].sort(), [transactions, type, selM, selPM]);
+
+  /* Filters narrow in order: month, then category, then mode, then merchant.
+     Each list is built from what the filters ABOVE it already allow, so a chip
+     is never offered that would return nothing. Picking one clears the ones
+     below it, since those choices were made against a wider set. */
+  const filtered = useMemo(() => [...transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && (selCat === 'all' || t.category === selCat) && (selPM === 'all' || t.paymentMode === selPM) && (selMerchant === 'all' || t.merchant === selMerchant))].sort((a, b) => new Date(b.date) - new Date(a.date)), [transactions, type, selM, selCat, selPM, selMerchant]);
+  const catOptions = useMemo(() => [...new Set(transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && t.category).map(t => t.category))].sort(), [transactions, type, selM]);
+  const pmOptions = useMemo(() => [...new Set(transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && (selCat === 'all' || t.category === selCat) && t.paymentMode).map(t => t.paymentMode))].sort(), [transactions, type, selM, selCat]);
+  const merchantOptions = useMemo(() => [...new Set(transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && (selCat === 'all' || t.category === selCat) && (selPM === 'all' || t.paymentMode === selPM) && t.merchant).map(t => t.merchant))].sort(), [transactions, type, selM, selCat, selPM]);
   const total = filtered.reduce((s, t) => s + t.amount, 0);
   const allSel = filtered.length > 0 && sel.size === filtered.length;
   const save = () => {
@@ -5766,6 +5774,7 @@ function PageTx({
     className: `mchip ${selM === 'all' ? 'on' : ''}`,
     onClick: () => {
       setSelM('all');
+      setSelCat('all');
       setSelPM('all');
       setSelMerchant('all');
     }
@@ -5775,10 +5784,79 @@ function PageTx({
     className: `mchip ${selM === m.key ? 'on' : ''}`,
     onClick: () => {
       setSelM(m.key);
+      setSelCat('all');
       setSelPM('all');
       setSelMerchant('all');
     }
-  }, m.label))), pmOptions.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, m.label))), catOptions.length > 0 && (() => {
+    const LIMIT = 6;
+    const extra = catOptions.length - LIMIT;
+    const showSet = new Set(showAllCats ? catOptions : catOptions.slice(0, LIMIT));
+    // An active category chosen from the full list must stay visible after
+    // the list collapses, or the filter looks like it switched itself off.
+    if (selCat !== 'all') showSet.add(selCat);
+    const displayed = catOptions.filter(c => showSet.has(c));
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 4,
+        marginBottom: 8
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      type: "button",
+      className: `mchip ${selCat === 'all' ? 'on' : ''}`,
+      style: {
+        fontSize: 11
+      },
+      onClick: () => {
+        setSelCat('all');
+        setSelPM('all');
+        setSelMerchant('all');
+      }
+    }, "\uD83C\uDFF7 All Categories"), displayed.map(c => {
+      const n = transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && t.category === c).length;
+      return /*#__PURE__*/React.createElement("button", {
+        type: "button",
+        key: c,
+        className: `mchip ${selCat === c ? 'on' : ''}`,
+        style: {
+          fontSize: 11
+        },
+        onClick: () => {
+          const next = selCat === c ? 'all' : c;
+          setSelCat(next);
+          setSelPM('all');
+          setSelMerchant('all');
+        }
+      }, c, /*#__PURE__*/React.createElement("span", {
+        style: {
+          marginLeft: 5,
+          opacity: .6,
+          fontFamily: 'var(--m)',
+          fontSize: 10
+        }
+      }, n));
+    }), !showAllCats && extra > 0 && /*#__PURE__*/React.createElement("div", {
+      className: "mchip",
+      onClick: () => setShowAllCats(true),
+      style: {
+        fontSize: 11,
+        fontWeight: 700,
+        color: 'var(--p)',
+        borderColor: 'var(--p)'
+      }
+    }, "+", extra, " more"), showAllCats && extra > 0 && /*#__PURE__*/React.createElement("div", {
+      className: "mchip",
+      onClick: () => setShowAllCats(false),
+      style: {
+        fontSize: 11,
+        fontWeight: 700,
+        color: 'var(--n500)',
+        borderColor: 'var(--n300)'
+      }
+    }, "Show less \u2191"));
+  })(), pmOptions.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "mbar",
     style: {
       marginBottom: 8
@@ -5922,7 +6000,22 @@ function PageTx({
     style: {
       fontSize: 12.5
     }
-  }, t.category), /*#__PURE__*/React.createElement("td", {
+  }, t.category ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      cursor: 'pointer'
+    },
+    title: "Filter by this category",
+    onClick: () => {
+      const next = selCat === t.category ? 'all' : t.category;
+      setSelCat(next);
+      setSelPM('all');
+      setSelMerchant('all');
+    }
+  }, t.category) : /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--n400)'
+    }
+  }, "\u2013")), /*#__PURE__*/React.createElement("td", {
     style: {
       fontSize: 12,
       color: 'var(--n500)'
