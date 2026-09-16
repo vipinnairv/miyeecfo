@@ -2676,8 +2676,7 @@ function PageLoans({data,setData,toast}){
       if(looksLikeSchedule(raw)){
         const {rows,error}=parseScheduleCSV(raw,0);
         if(error){toast(error,'r');return;}
-        if(!loans.length){toast('Add the loan first, then attach its schedule','r');return;}
-        setSchedPick({rows,loanId:loans[0].id});
+        setSchedPick({rows,loanId:loans.length?loans[0].id:'__new',bank:'',type:'',accNo:''});
         return;
       }
       const hdr=parseCSVLine(lines[0]).map(h=>h.replace(/"/g,'').trim().toLowerCase().replace(/[\s_\-]/g,''));
@@ -2826,29 +2825,79 @@ function PageLoans({data,setData,toast}){
       </div>
       {loans.map(l=><LoanCard key={l.id} l={l} accounts={accounts} buildAmort={buildAmort} openEdit={openEdit} del={del} setData={setData} toast={toast}/>)}
       {schedPick&&(()=>{
-        const rows=schedPick.rows;const tgt=loans.find(l=>l.id===schedPick.loanId)||loans[0];
+        const rows=schedPick.rows;
+        const isNew=schedPick.loanId==='__new';
+        const tgt=isNew?null:(loans.find(l=>l.id===schedPick.loanId)||loans[0]);
         const emis=[...new Set(rows.map(r=>r.emi))];
+        const last=rows[rows.length-1];
+        /* A schedule already states the loan: what was borrowed, what is left,
+           the rate, the instalment and when it ends. Only the lender's name is
+           missing, so a new loan is two fields rather than a form filled twice.
+           Today's instalment sets the outstanding, so the figure is right from
+           the first moment rather than needing a correction afterwards. */
+        /* Pick the due instalment by the same rule the amortisation view uses,
+           elapsed months since the first one, not the next future date. They
+           disagree in the days after an instalment falls due, and a loan created
+           on such a day would open warning that it disagrees with its own
+           schedule. */
+        const st0=rows[0].date?new Date(rows[0].date):new Date();
+        const now=new Date();
+        const elapsed0=Math.max(0,(now.getFullYear()-st0.getFullYear())*12+(now.getMonth()-st0.getMonth()));
+        const due=rows.find(r=>r.n>elapsed0)||rows[0];
+        const createNew=()=>{
+          const l={id:uid(),bank:schedPick.bank.trim()||'Lender',
+            accNo:schedPick.accNo.trim()||'XXXX-0000',
+            type:schedPick.type.trim()||'Personal Loan',
+            original:Math.round(rows[0].opening||rows.reduce((a,r)=>a+r.principal,0)),
+            outstanding:Math.round(due.opening||0),
+            emi:due.emi,roi:due.roi||rows[0].roi||0,
+            startDate:rows[0].date||null,endDate:last.date||null,
+            tenure:last.n,remaining:rows.filter(r=>r.n>=due.n).length,
+            phases:[],paidEmis:[]};
+          setData(d=>({...d,loans:[...d.loans,attachSchedule(l,rows)]}));
+          toast(`${l.bank} ${l.type} created from the schedule`,'g');
+          setSchedPick(null);
+        };
+        const attachExisting=()=>{
+          setData(d=>({...d,loans:d.loans.map(lo=>lo.id!==schedPick.loanId?lo:attachSchedule(lo,rows))}));
+          toast(`Schedule attached to ${tgt.bank} ${tgt.type}: ${rows.length} instalments`,'g');
+          setSchedPick(null);
+        };
         return(
-        <Modal title="Attach this schedule" onClose={()=>setSchedPick(null)}
+        <Modal title={isNew?'New loan from this schedule':'Attach this schedule'} onClose={()=>setSchedPick(null)}
           foot={<><button className="btn btn-s btn-sm" onClick={()=>setSchedPick(null)}>Cancel</button>
-            <button className="btn btn-p btn-sm" onClick={()=>{
-              setData(d=>({...d,loans:d.loans.map(lo=>lo.id!==schedPick.loanId?lo:attachSchedule(lo,rows))}));
-              toast(`Schedule attached to ${tgt.bank} ${tgt.type}: ${rows.length} instalments`,'g');
-              setSchedPick(null);
-            }}><Ic n="ok" s={12} c="#fff"/>Attach</button></>}>
+            <button className="btn btn-p btn-sm" onClick={isNew?createNew:attachExisting}>
+              <Ic n={isNew?'plus':'ok'} s={12} c="#fff"/>{isNew?'Create loan':'Attach'}</button></>}>
           <div className="alert ai mb2"><Ic n="prov" s={13}/><span>
-            That file is an instalment schedule, not a list of loans, so it belongs to one loan rather than creating new ones.
+            That file is an instalment schedule. Attach it to a loan you already track, or let it create the loan for you.
           </span></div>
           <div className="fg mb2"><label>Attach to</label>
             <select value={schedPick.loanId} onChange={e=>setSchedPick(x=>({...x,loanId:e.target.value}))}>
               {loans.map(l=><option key={l.id} value={l.id}>{l.bank} {l.type} ({fmtINR(l.outstanding,true)})</option>)}
+              <option value="__new">+ Create a new loan from this schedule</option>
             </select>
           </div>
+          {isNew&&(
+            <div className="f2 mb2">
+              <div className="fg"><label>Lender</label>
+                <input autoFocus value={schedPick.bank} placeholder="e.g. HDFC Bank"
+                  onChange={e=>setSchedPick(x=>({...x,bank:e.target.value}))}/></div>
+              <div className="fg"><label>Loan Type</label>
+                <input value={schedPick.type} placeholder="e.g. Business Loan"
+                  onChange={e=>setSchedPick(x=>({...x,type:e.target.value}))}/></div>
+              <div className="fg fg-full"><label>Account Number</label>
+                <input value={schedPick.accNo} placeholder="optional"
+                  onChange={e=>setSchedPick(x=>({...x,accNo:e.target.value}))}/></div>
+            </div>
+          )}
           <div style={{fontSize:11.5,color:'var(--n600)',lineHeight:1.6,background:'var(--n50)',borderRadius:8,padding:'9px 11px'}}>
-            <strong>{rows.length}</strong> instalments, {fmtDate(rows[0].date)} to {fmtDate(rows[rows.length-1].date)}.<br/>
+            <strong>{rows.length}</strong> instalments, {fmtDate(rows[0].date)} to {fmtDate(last.date)}.<br/>
             EMI {fmtINR(rows[0].emi)}{emis.length>1&&<> stepping down to {fmtINR(emis[emis.length-1])}</>}.<br/>
             Total payable {fmtINR(rows.reduce((a,r)=>a+r.emi,0))}, of which {fmtINR(rows.reduce((a,r)=>a+r.interest,0))} is interest.
-            {tgt&&<><br/>This sets {tgt.bank}'s tenure to {rows[rows.length-1].n} and its end date to {fmtDate(rows[rows.length-1].date)}.</>}
+            {isNew
+              ? <><br/>Borrowed {fmtINR(rows[0].opening)} at {due.roi||rows[0].roi}%, with {fmtINR(due.opening)} outstanding
+                  as instalment #{due.n} falls due.</>
+              : tgt&&<><br/>This sets {tgt.bank}'s tenure to {last.n} and its end date to {fmtDate(last.date)}.</>}
           </div>
         </Modal>);
       })()}
