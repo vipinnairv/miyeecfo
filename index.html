@@ -7574,7 +7574,6 @@ const attachSchedule = (loan, rows) => ({
 /* ── LoanCard: extracted so useState(showAmort) is at component top-level (Rules of Hooks) ── */
 function LoanCard({
   l,
-  accounts,
   buildAmort,
   openEdit,
   del,
@@ -7583,7 +7582,6 @@ function LoanCard({
 }) {
   const [showAmort, setShowAmort] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [payAcc, setPayAcc] = useState(null);
   const schedRef = useRef();
 
   /* Import the bank's own amortisation schedule. Once attached it replaces the
@@ -7655,12 +7653,14 @@ function LoanCard({
      an instalment, which is exactly backwards: paying a loan leaves you no
      richer, because the cash left your account. So the full instalment is also
      debited from the account you paid it from. Undo puts it back. */
-  const markPaid = (row, accountId) => {
-    const acc = accounts.find(a => a.id === accountId);
-    if (!acc) {
-      toast && toast('Pick the account you paid from', 'r');
-      return;
-    }
+  /* Marking an EMI paid reduces the loan and records the instalment. It does
+     NOT move money out of an account: balances here are typed from your bank,
+     so debiting one as well would double-count the moment you next update it.
+      The consequence is worth stating plainly rather than hiding: between
+     recording the payment and updating that balance, net worth reads high by
+     the principal, because the debt has fallen and the cash has not. The
+     interest is booked as a cost either way, so the P&L is right throughout. */
+  const markPaid = row => {
     const txId = uid();
     setData(d => ({
       ...d,
@@ -7676,15 +7676,9 @@ function LoanCard({
         month: (row.date || '').slice(0, 7),
         category: 'Loan Interest',
         desc: `${l.bank} ${l.type} EMI #${row.n}`,
-        paymentMode: MODE_OF_ACCT[acc.type] || 'NEFT/Bank Transfer',
-        accountId,
+        paymentMode: d.profile && d.profile.emiPaidFrom || 'NEFT/Bank Transfer',
         merchant: ''
       }],
-      // The cash side. Without this the liability fell and nothing paid for it.
-      accounts: d.accounts.map(a => a.id === accountId ? {
-        ...a,
-        balance: a.balance - row.emi
-      } : a),
       loans: d.loans.map(lo => {
         if (lo.id !== l.id) return lo;
         const newPaid = [...(lo.paidEmis || []), {
@@ -7696,8 +7690,7 @@ function LoanCard({
           opening: row.opening,
           closing: row.closing,
           paidOn: new Date().toISOString().slice(0, 10),
-          txId,
-          accountId
+          txId
         }];
         return {
           ...lo,
@@ -7707,8 +7700,7 @@ function LoanCard({
         };
       })
     }));
-    setPayAcc(null);
-    toast && toast(`EMI #${row.n} paid ✓ · ${fmtINR(row.emi, true)} out of ${acc.name}`, 'g');
+    toast && toast(`EMI #${row.n} paid ✓ · outstanding now ${fmtINR(Math.max(0, row.closing), true)}`, 'g');
   };
   const undoLastPaid = () => {
     if (!paidEmis.length) return;
@@ -7717,11 +7709,6 @@ function LoanCard({
       ...d,
       // Remove the ledger entry this EMI posted, so undo leaves nothing behind.
       transactions: d.transactions.filter(t => !(last.txId && t.id === last.txId)),
-      // Put the cash back in the account it was taken from.
-      accounts: d.accounts.map(a => a.id === last.accountId ? {
-        ...a,
-        balance: a.balance + (last.emi || 0)
-      } : a),
       loans: d.loans.map(lo => {
         if (lo.id !== l.id) return lo;
         return {
@@ -7732,7 +7719,7 @@ function LoanCard({
         };
       })
     }));
-    toast && toast('Last EMI payment undone · cash and balance restored', 'o');
+    toast && toast('Last EMI payment undone · outstanding restored', 'o');
   };
   return /*#__PURE__*/React.createElement("div", {
     className: "card mb2"
@@ -8032,9 +8019,7 @@ function LoanCard({
       color: 'var(--r)'
     }
   }, fmtINR(nextDue.closing)))), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setPayAcc({
-      accountId: (accounts[0] || {}).id || ''
-    }),
+    onClick: () => markPaid(nextDue),
     style: {
       background: 'var(--g)',
       color: '#fff',
@@ -8050,7 +8035,17 @@ function LoanCard({
       fontFamily: 'var(--f)',
       whiteSpace: 'nowrap'
     }
-  }, "\u2713 Mark as Paid"))), paidEmis.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "\u2713 Mark as Paid")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: 'var(--n400)',
+      marginTop: 8
+    }
+  }, "Reduces the loan and records the instalment. Bank balances are yours to update, so this does not touch them."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'none'
+    }
+  })), paidEmis.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 10
     }
@@ -8408,43 +8403,7 @@ function LoanCard({
     }
   }, fmtINR(remInterest)), /*#__PURE__*/React.createElement("td", {
     colSpan: 2
-  }))))), payAcc && nextDue && /*#__PURE__*/React.createElement(Modal, {
-    title: `Record EMI #${nextDue.n}`,
-    onClose: () => setPayAcc(null),
-    foot: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
-      className: "btn btn-s btn-sm",
-      onClick: () => setPayAcc(null)
-    }, "Cancel"), /*#__PURE__*/React.createElement("button", {
-      className: "btn btn-p btn-sm",
-      onClick: () => markPaid(nextDue, payAcc.accountId)
-    }, /*#__PURE__*/React.createElement(Ic, {
-      n: "ok",
-      s: 12,
-      c: "#fff"
-    }), "Record payment"))
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "alert ai mb2"
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "prov",
-    s: 13
-  }), /*#__PURE__*/React.createElement("span", null, fmtINR(nextDue.emi, true), " leaves the account you pick. ", fmtINR(nextDue.principal, true), " repays the loan and ", fmtINR(nextDue.interest, true), " is booked as interest cost, so your net worth falls by the interest, not by the whole instalment.")), /*#__PURE__*/React.createElement("div", {
-    className: "fg"
-  }, /*#__PURE__*/React.createElement("label", null, "Paid From"), /*#__PURE__*/React.createElement("select", {
-    value: payAcc.accountId,
-    onChange: e => setPayAcc(x => ({
-      ...x,
-      accountId: e.target.value
-    }))
-  }, accounts.map(a => /*#__PURE__*/React.createElement("option", {
-    key: a.id,
-    value: a.id
-  }, a.name, " (", fmtINR(a.balance, true), ")"))), !accounts.length && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10.5,
-      color: 'var(--r)',
-      marginTop: 4
-    }
-  }, "Add an account first, under Bank Balance."))));
+  }))))));
 }
 function PageLoans({
   data,
@@ -9203,7 +9162,6 @@ function PageLoans({
   }, fmtINR(loans.reduce((s2, l) => s2 + buildAmort(l).reduce((x, r) => x + r.interest, 0), 0)))))))), loans.map(l => /*#__PURE__*/React.createElement(LoanCard, {
     key: l.id,
     l: l,
-    accounts: accounts,
     buildAmort: buildAmort,
     openEdit: openEdit,
     del: del,
