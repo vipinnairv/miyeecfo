@@ -2236,6 +2236,76 @@ function LoanCard({l,accounts,buildAmort,openEdit,del,setData,toast}){
   const [showAmort,setShowAmort]=useState(false);
   const [showHistory,setShowHistory]=useState(false);
   const [payAcc,setPayAcc]=useState(null);
+  const schedRef=useRef();
+
+  /* Import the bank's own amortisation schedule. Once attached it replaces the
+     projection entirely, so what the tracker shows is what the lender will
+     actually charge, step-downs and day-count quirks included. */
+  const schedTemplate=()=>{
+    const b=new Blob(['Installment No,Date,Opening,EMI,Principal,Interest,Closing,ROI\n'+
+      '1,2026-05-01,511442.33,13734,8599.32,5134.68,502843.01,12.36\n'+
+      '2,2026-06-01,502843.01,13734,8685.99,5048.01,494157.01,12.36\n'],{type:'text/csv'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(b);
+    a.download='loan-schedule-template.csv';a.click();
+  };
+  const importSchedule=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      try{
+        const lines=ev.target.result.replace(/\r/g,'').split('\n').filter(x=>x.trim());
+        if(lines.length<2){toast('That file has no rows','r');return;}
+        const hdr=parseCSVLine(lines[0]).map(h=>h.replace(/"/g,'').trim().toLowerCase().replace(/[\s_\-.]/g,''));
+        const at=(...names)=>{for(const n of names){const i=hdr.indexOf(n);if(i>=0)return i;}return -1;};
+        const iN=at('installmentno','instalmentno','no','sno','installment','month','n');
+        const iD=at('date','duedate','paymentdate');
+        const iO=at('opening','openingbalance','principaloutstanding','balance');
+        const iE=at('emi','instalment','installment','payment','amount');
+        const iP=at('principal','principalcomponent');
+        const iI=at('interest','interestcomponent');
+        const iC=at('closing','closingbalance');
+        const iR=at('roi','rate','interestrate');
+        if(iE<0||iI<0){toast('Need at least EMI and Interest columns','r');return;}
+        const num=v=>{const x=parseFloat(String(v==null?'':v).replace(/[^0-9.\-]/g,''));return isFinite(x)?x:0;};
+        const rows=[];
+        lines.slice(1).forEach((ln,k)=>{
+          const c=parseCSVLine(ln);
+          if(!c.length||!String(c[iE]||'').trim())return;
+          const emi=num(c[iE]),interest=num(c[iI]);
+          const principal=iP>=0?num(c[iP]):emi-interest;
+          const opening=iO>=0?num(c[iO]):0;
+          const closing=iC>=0?num(c[iC]):Math.max(0,opening-principal);
+          // A rate written as 0.1236 means the same as 12.36; both are accepted.
+          let roi=iR>=0?num(c[iR]):l.roi;if(roi>0&&roi<1)roi*=100;
+          let date=iD>=0?String(c[iD]||'').trim():'';
+          const dm=date.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+          if(dm)date=`${dm[3]}-${dm[2]}-${dm[1]}`;             // dd/mm/yyyy
+          else if(date&&!/^\d{4}-\d{2}-\d{2}/.test(date)){
+            const d2=new Date(date);date=isFinite(d2)?d2.toISOString().slice(0,10):'';
+          }else date=date.slice(0,10);
+          rows.push({n:iN>=0?(parseInt(num(c[iN]),10)||k+1):k+1,
+            date,opening,emi,principal,interest,closing,roi});
+        });
+        if(!rows.length){toast('No instalment rows found','r');return;}
+        rows.sort((a,b)=>a.n-b.n);
+        setData(d=>({...d,loans:d.loans.map(lo=>lo.id!==l.id?lo:{...lo,
+          schedule:rows,
+          // The schedule is now the authority, so the fields derived from it follow.
+          tenure:rows[rows.length-1].n,
+          endDate:rows[rows.length-1].date||lo.endDate,
+          phases:[]})}));
+        toast(`Schedule imported: ${rows.length} instalments`,'g');
+      }catch(err){toast('Could not read that file','r');}
+    };
+    r.readAsText(f);
+    e.target.value='';
+  };
+  const dropSchedule=()=>{
+    if(!window.confirm('Remove the imported schedule and go back to a calculated one?'))return;
+    setData(d=>({...d,loans:d.loans.map(lo=>lo.id!==l.id?lo:{...lo,schedule:null})}));
+    toast('Back to a calculated schedule','o');
+  };
+
   const amort=buildAmort(l);
   const remInterest=amort.reduce((s,r)=>s+r.interest,0);
   const futurePayout=amort.reduce((s,r)=>s+r.emi,0);
@@ -2247,6 +2317,11 @@ function LoanCard({l,accounts,buildAmort,openEdit,del,setData,toast}){
   const curRoi=curPhase?curPhase.roi:l.roi;
   const paidEmis=l.paidEmis||[];
   const nextDue=amort[0]||null;
+  /* What the schedule says you owe against what the record says. A stored
+     outstanding that has drifted is the difference between a tracker you trust
+     and one you argue with, so the gap is shown rather than quietly absorbed. */
+  const schedOpening=l.schedule&&nextDue?nextDue.opening:null;
+  const osDrift=schedOpening!==null?Math.round(l.outstanding-schedOpening):0;
   const isFullyPaid=l.outstanding<=0||amort.length===0;
 
   /* Marking an EMI paid moves money on BOTH sides of the balance sheet.
@@ -2314,6 +2389,8 @@ function LoanCard({l,accounts,buildAmort,openEdit,del,setData,toast}){
                 {isST?'Short Term':'Long Term'}</span>;
             })()}
             {l.phases&&l.phases.length>1&&<span className="tag to" style={{marginLeft:6,fontSize:9.5}}>Variable EMI</span>}
+            {l.schedule&&l.schedule.length>0&&<span className="tag tb" style={{marginLeft:6,fontSize:9.5}}
+              title={`Using the lender's own schedule: ${l.schedule.length} instalments. Nothing here is estimated.`}>Bank schedule</span>}
             {isFullyPaid&&<span className="tag tg" style={{marginLeft:6,fontSize:9.5}}>✓ Fully Paid</span>}
           </div>
           <div style={{fontSize:10.5,color:'var(--n400)',fontFamily:'var(--m)',marginTop:2}}>{l.accNo}</div>
@@ -2323,6 +2400,11 @@ function LoanCard({l,accounts,buildAmort,openEdit,del,setData,toast}){
             <div style={{fontSize:9.5,color:'var(--n400)',textTransform:'uppercase',fontWeight:600}}>Outstanding</div>
             <div style={{fontFamily:'var(--m)',fontSize:16,fontWeight:700,color:isFullyPaid?'var(--g)':'var(--r)'}}>{fmtINR(l.outstanding)}</div>
           </div>
+          <input type="file" accept=".csv" ref={schedRef} style={{display:'none'}} onChange={importSchedule}/>
+          <button className="bic" title={l.schedule?'Replace the imported schedule':'Import the lender\'s schedule (CSV)'}
+            onClick={()=>schedRef.current.click()}><Ic n="up" s={11}/></button>
+          {l.schedule&&<button className="bic" title="Remove the imported schedule" onClick={dropSchedule}><Ic n="x" s={11}/></button>}
+          <button className="bic" title="Schedule CSV template" onClick={schedTemplate}><Ic n="dl" s={11}/></button>
           <button className="bic" onClick={()=>openEdit(l)}><Ic n="edit" s={11}/></button>
           <button className="bic red" onClick={()=>del(l.id)}><Ic n="del" s={11}/></button>
         </div>
@@ -2351,6 +2433,16 @@ function LoanCard({l,accounts,buildAmort,openEdit,del,setData,toast}){
         <span style={{fontSize:10.5,color:'var(--n400)'}}>repaid</span>
       </div>
 
+      {Math.abs(osDrift)>1&&(
+        <div className="alert aw mb2" style={{alignItems:'flex-start'}}><Ic n="prov" s={13}/><span>
+          Your recorded outstanding is <strong>{fmtINR(l.outstanding)}</strong>, but the lender's schedule opens
+          instalment #{nextDue.n} at <strong>{fmtINR(schedOpening)}</strong>, a difference of <strong>{fmtINR(Math.abs(osDrift))}</strong>.
+          The schedule drives every figure below; the recorded number only feeds net worth.
+          <button className="btn btn-p btn-sm" style={{marginLeft:8,marginTop:6}}
+            onClick={()=>{setData(d=>({...d,loans:d.loans.map(lo=>lo.id!==l.id?lo:{...lo,outstanding:Math.round(schedOpening)})}));toast('Outstanding matched to the schedule','g');}}>
+            Use {fmtINR(schedOpening,true)}</button>
+        </span></div>
+      )}
       {/* ── NEXT DUE EMI ── */}
       {!isFullyPaid&&nextDue&&(
         <div style={{border:'2px solid var(--gl)',borderRadius:10,padding:'12px 14px',marginBottom:10,background:'linear-gradient(135deg,rgba(0,179,134,.05),rgba(0,179,134,.02))'}}>
@@ -2505,15 +2597,25 @@ function PageLoans({data,setData,toast}){
   const [modal,setModal]=useState(null);const [form,setForm]=useState(ef);
   // Amortization engine: builds schedule from current outstanding using phases
   const buildAmort=(l)=>{
-    const phases=l.phases&&l.phases.length?[...l.phases].sort((a,b)=>a.fromMonth-b.fromMonth):[{fromMonth:1,emi:l.emi,roi:l.roi}];
     const now=new Date(),start=new Date(l.startDate||new Date());
     const elapsed=Math.max(0,(now.getFullYear()-start.getFullYear())*12+(now.getMonth()-start.getMonth()));
+    const lastPaidN0=(l.paidEmis||[]).reduce((m,p)=>Math.max(m,p.n||0),0);
+    /* A bank's own schedule beats anything we can re-derive. Real loans step the
+       EMI and the rate part-way through, and banks compute interest on a day
+       count we cannot see: on this book the sheet's first instalment implies
+       12.05% where the loan is quoted at 12.36%, so a formula is always a few
+       hundred rupees out and the error compounds over four years. When the
+       schedule is on file, it is used verbatim. */
+    if(l.schedule&&l.schedule.length){
+      const from=Math.max(elapsed,lastPaidN0);
+      return l.schedule.filter(r=>r.n>from).map(r=>({...r}));
+    }
+    const phases=l.phases&&l.phases.length?[...l.phases].sort((a,b)=>a.fromMonth-b.fromMonth):[{fromMonth:1,emi:l.emi,roi:l.roi}];
     // The next instalment is the one after the highest you have actually paid.
     // Counting payments instead of reading their instalment numbers was wrong: a
     // loan 32 months old with one payment logged gave max(32,1)=32, so the same
     // EMI kept reappearing as "next due" no matter how often you marked it paid.
-    const lastPaidN=(l.paidEmis||[]).reduce((m,p)=>Math.max(m,p.n||0),0);
-    const startFrom=Math.max(elapsed,lastPaidN);
+    const startFrom=Math.max(elapsed,lastPaidN0);
     const rows=[];let bal=l.outstanding;
     for(let i=0;i<l.tenure-startFrom&&bal>0;i++){
       const inst=startFrom+i+1;
@@ -2650,19 +2752,28 @@ function PageLoans({data,setData,toast}){
       {/* Remaining Interest Payable Summary */}
       <div className="card mb3" style={{background:'linear-gradient(135deg,#fefce8,#fff7ed)',border:'1.5px solid #fcd34d'}}>
         <div className="sh mb2"><div className="sh-t" style={{color:'#92400e'}}><Ic n="prov" s={14} c="#d97706"/>Remaining Interest Payable (Future Interest Cost)</div></div>
-        <div className="alert aw" style={{marginBottom:12}}><Ic n="prov" s={13}/>Formula: (Remaining Tenure × EMI) − Outstanding Principal. This is the total interest you will pay from today until loan closure.</div>
+        <div className="alert aw" style={{marginBottom:12}}><Ic n="prov" s={13}/>Every instalment still to come, added up. Interest is summed from the schedule itself, not inferred from an average EMI, so a loan whose instalment steps down part-way is counted as it will actually be paid.</div>
         <div className="tw">
           <table>
             <thead><tr><th>Loan</th><th className="num">Remaining Months</th><th className="num">EMI ({CUR.sym})</th><th className="num">Remaining Payout ({CUR.sym})</th><th className="num">Outstanding ({CUR.sym})</th><th className="num" style={{background:'var(--ol)'}}>Remaining Interest ({CUR.sym})</th></tr></thead>
             <tbody>
+              {/* Summed from the same schedule the loan card shows, so the two can
+                  never disagree. The old version multiplied a stored `remaining`
+                  by a single EMI, which silently assumed the instalment never
+                  changes and took its interest as payout minus principal. On a
+                  step-down loan that overstated both the months and the cost. */}
               {loans.map(l=>{
-                const rem=l.remaining||0;
-                const remainingPayout=l.emi*rem;
-                const remainingInterest=Math.max(0,remainingPayout-l.outstanding);
+                const rows=buildAmort(l);
+                const rem=rows.length;
+                const remainingPayout=rows.reduce((s2,r)=>s2+r.emi,0);
+                const remainingInterest=rows.reduce((s2,r)=>s2+r.interest,0);
+                const emis=[...new Set(rows.map(r=>r.emi))];
                 return(<tr key={l.id}>
-                  <td style={{fontWeight:700}}>{l.bank} <span className="tag tb" style={{fontSize:10}}>{l.type}</span></td>
+                  <td style={{fontWeight:700}}>{l.bank} <span className="tag tb" style={{fontSize:10}}>{l.type}</span>
+                    {l.schedule&&l.schedule.length>0&&<span className="tag tg" style={{fontSize:9,marginLeft:4}}>bank schedule</span>}</td>
                   <td className="num">{rem}</td>
-                  <td className="num">{fmtINR(l.emi)}</td>
+                  <td className="num">{fmtINR(rows.length?rows[0].emi:l.emi)}
+                    {emis.length>1&&<div style={{fontSize:9.5,color:'var(--o)',fontWeight:600}}>steps down to {fmtINR(emis[emis.length-1],true)}</div>}</td>
                   <td className="num">{fmtINR(remainingPayout)}</td>
                   <td className="num neg">{fmtINR(l.outstanding)}</td>
                   <td className="num bold" style={{color:'var(--o)',background:'rgba(217,119,6,.06)'}}>{fmtINR(remainingInterest)}</td>
@@ -2673,9 +2784,9 @@ function PageLoans({data,setData,toast}){
               <td style={{fontWeight:700}}>Total</td>
               <td className="num">–</td>
               <td className="num bold">{fmtINR(tEMI)}/mo</td>
-              <td className="num bold">{fmtINR(loans.reduce((s,l)=>s+l.emi*(l.remaining||0),0))}</td>
+              <td className="num bold">{fmtINR(loans.reduce((s2,l)=>s2+buildAmort(l).reduce((x,r)=>x+r.emi,0),0))}</td>
               <td className="num neg bold">{fmtINR(tOS)}</td>
-              <td className="num bold" style={{color:'var(--r)',background:'rgba(220,38,38,.06)'}}>{fmtINR(loans.reduce((s,l)=>s+Math.max(0,l.emi*(l.remaining||0)-l.outstanding),0))}</td>
+              <td className="num bold" style={{color:'var(--r)',background:'rgba(220,38,38,.06)'}}>{fmtINR(loans.reduce((s2,l)=>s2+buildAmort(l).reduce((x,r)=>x+r.interest,0),0))}</td>
             </tr></tfoot>
           </table>
         </div>
