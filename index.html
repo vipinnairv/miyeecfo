@@ -4920,6 +4920,7 @@ function PageTx({
   const [selPM, setSelPM] = useState('all');
   const [selMerchant, setSelMerchant] = useState('all');
   const [selCat, setSelCat] = useState('all');
+  const [q, setQ] = useState('');
   const [showAllMerchants, setShowAllMerchants] = useState(false);
   const [showAllCats, setShowAllCats] = useState(false);
   const ef = {
@@ -4938,11 +4939,23 @@ function PageTx({
   const [bulk, setBulk] = useState(null);
   const fileRef = useRef();
 
+  /* Free-text search across every field you can see in a row, so you do not
+     have to remember which column a thing lives in. Terms are ANDed: typing
+     "swiggy upi" finds Swiggy paid by UPI without either being a filter.
+     A bare number matches the amount, on the digits rather than the rendered
+     string, so 1214 finds the same row whether it shows as 1,214 or 1214. */
+  const terms = useMemo(() => q.trim().toLowerCase().split(/\s+/).filter(Boolean), [q]);
+  const matchQ = useCallback(t => {
+    if (!terms.length) return true;
+    const hay = [t.desc, t.merchant, t.category, t.paymentMode, t.date, fmtMonth(t.month), String(t.amount), Math.round(t.amount).toLocaleString(CUR.locale)].filter(Boolean).join(' ').toLowerCase();
+    return terms.every(w => hay.includes(w));
+  }, [terms]);
+
   /* Filters narrow in order: month, then category, then mode, then merchant.
      Each list is built from what the filters ABOVE it already allow, so a chip
      is never offered that would return nothing. Picking one clears the ones
      below it, since those choices were made against a wider set. */
-  const filtered = useMemo(() => [...transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && (selCat === 'all' || t.category === selCat) && (selPM === 'all' || t.paymentMode === selPM) && (selMerchant === 'all' || t.merchant === selMerchant))].sort((a, b) => new Date(b.date) - new Date(a.date)), [transactions, type, selM, selCat, selPM, selMerchant]);
+  const filtered = useMemo(() => [...transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && (selCat === 'all' || t.category === selCat) && (selPM === 'all' || t.paymentMode === selPM) && (selMerchant === 'all' || t.merchant === selMerchant) && matchQ(t))].sort((a, b) => new Date(b.date) - new Date(a.date)), [transactions, type, selM, selCat, selPM, selMerchant, matchQ]);
   const catOptions = useMemo(() => [...new Set(transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && t.category).map(t => t.category))].sort(), [transactions, type, selM]);
   const pmOptions = useMemo(() => [...new Set(transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && (selCat === 'all' || t.category === selCat) && t.paymentMode).map(t => t.paymentMode))].sort(), [transactions, type, selM, selCat]);
   const merchantOptions = useMemo(() => [...new Set(transactions.filter(t => t.type === type && (selM === 'all' || t.month === selM) && (selCat === 'all' || t.category === selCat) && (selPM === 'all' || t.paymentMode === selPM) && t.merchant).map(t => t.merchant))].sort(), [transactions, type, selM, selCat, selPM]);
@@ -5768,6 +5781,91 @@ function PageTx({
       }
     }, "Changing the date also refiles these entries under that month."));
   })(), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 10,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative',
+      flex: '1 1 260px',
+      minWidth: 200
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: 'absolute',
+      left: 10,
+      top: '50%',
+      transform: 'translateY(-50%)',
+      pointerEvents: 'none',
+      display: 'flex',
+      color: 'var(--n400)'
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: "13",
+    height: "13",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2.4"
+  }, /*#__PURE__*/React.createElement("circle", {
+    cx: "11",
+    cy: "11",
+    r: "7"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M20 20l-3.5-3.5"
+  }))), /*#__PURE__*/React.createElement("input", {
+    value: q,
+    onChange: e => setQ(e.target.value),
+    onKeyDown: e => {
+      if (e.key === 'Escape') setQ('');
+    },
+    placeholder: "Search description, merchant, category, mode or amount",
+    style: {
+      width: '100%',
+      padding: '7px 30px 7px 30px',
+      fontSize: 12
+    }
+  }), q && /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setQ(''),
+    title: "Clear (Esc)",
+    style: {
+      position: 'absolute',
+      right: 6,
+      top: '50%',
+      transform: 'translateY(-50%)',
+      border: 'none',
+      background: 'none',
+      cursor: 'pointer',
+      color: 'var(--n400)',
+      fontSize: 15,
+      lineHeight: 1,
+      padding: '2px 5px'
+    }
+  }, "\xD7")), q.trim() && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11.5,
+      color: 'var(--n500)',
+      whiteSpace: 'nowrap'
+    }
+  }, filtered.length === 0 ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--r)',
+      fontWeight: 600
+    }
+  }, "No match") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("strong", {
+    style: {
+      fontFamily: 'var(--m)'
+    }
+  }, filtered.length), " match", filtered.length === 1 ? '' : 'es', ' · ', /*#__PURE__*/React.createElement("strong", {
+    style: {
+      fontFamily: 'var(--m)'
+    }
+  }, fmtINR(total, true))))), /*#__PURE__*/React.createElement("div", {
     className: "mbar"
   }, /*#__PURE__*/React.createElement("button", {
     type: "button",
