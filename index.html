@@ -563,7 +563,7 @@ input[type=checkbox]{width:14px;height:14px;accent-color:var(--g);cursor:pointer
 <body>
 <div id="root"><div style="min-height:100vh;display:grid;place-items:center;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f7f8fa"><div style="text-align:center"><div style="width:40px;height:40px;margin:0 auto 14px;border:3px solid #e2e8f0;border-top-color:#00b386;border-radius:50%;animation:mcfoSpin .8s linear infinite"></div><div style="font-size:14px;font-weight:700;color:#0f172a">MiyeeCFO</div><div style="font-size:12px;color:#64748b;margin-top:4px">Loading your workspace…</div></div></div></div><style>@keyframes mcfoSpin{to{transform:rotate(360deg)}}</style>
 <script id="app">/*__APP_START__*/
-function _extends() { _extends = Object.assign ? Object.assign.bind() : function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; }; return _extends.apply(this, arguments); }
+function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
 /* ══════════════════════════════════════
    FINANCIAL ENGINE: single source of truth
    Every page derives its numbers from here so that
@@ -955,290 +955,6 @@ function computeFin(data, months) {
 }
 // Memoised so a keystroke elsewhere doesn't re-run every reduce on the dashboard.
 
-/* ══════════════════════════════════════
-   RECONCILIATION ENGINE
-   Answers one question: does the money you have recorded moving
-   agree with the balances you say you hold?
-
-     Opening + Money In − Money Out = Expected Closing
-     Expected Closing vs Actual Balance = the difference to explain
-
-   Transactions carry a payment mode, not an account id, so the check runs
-   per FUND TYPE (bank / cash / wallet) rather than per account. Fixed
-   deposits are excluded. They move by maturity and transfer, not by
-   day-to-day spending, so folding them in would only add noise.
-══════════════════════════════════════ */
-
-// Which pot a payment mode draws on. Credit Card is deliberately absent:
-// spending on a card creates a liability, it does not move your own cash
-// until the bill is paid.
-const FUND_OF_MODE = {
-  'NEFT/Bank Transfer': 'bank',
-  'UPI': 'bank',
-  'Debit Card': 'bank',
-  'Cash': 'cash',
-  'Wallet': 'wallet'
-};
-const FUND_BUCKETS = [{
-  key: 'bank',
-  label: 'Bank',
-  types: ['bank'],
-  modes: ['NEFT/Bank Transfer', 'UPI', 'Debit Card']
-}, {
-  key: 'cash',
-  label: 'Cash In Hand',
-  types: ['cash'],
-  modes: ['Cash']
-}, {
-  key: 'wallet',
-  label: 'Digital Wallet',
-  types: ['wallet'],
-  modes: ['Wallet']
-}];
-function computeReconciliation(data, months) {
-  const {
-    accounts = [],
-    transactions = [],
-    investmentTxs = []
-  } = data;
-  const mSet = new Set(months.map(m => m.key));
-  const monthOf = t => t.month || (t.date || '').slice(0, 7);
-  const blank = () => ({
-    inflow: 0,
-    outflow: 0,
-    invested: 0,
-    inCount: 0,
-    outCount: 0,
-    invCount: 0,
-    byMode: {}
-  });
-  const mv = {};
-  FUND_BUCKETS.forEach(b => {
-    mv[b.key] = blank();
-  });
-  // Movements that never touch your own funds, tracked so the page can say so.
-  let ccSpend = 0,
-    ccCount = 0,
-    ccPaid = 0,
-    emiPaid = 0;
-  // Anything whose payment mode is missing or unrecognised: the reason a
-  // reconciliation fails to balance more often than not.
-  const unclassified = [];
-  let unclassifiedIn = 0,
-    unclassifiedOut = 0;
-  const note = (bucket, kind, mode, amt) => {
-    const m = mv[bucket];
-    if (!m) return;
-    m.byMode[mode] = m.byMode[mode] || {
-      in: 0,
-      out: 0,
-      inv: 0
-    };
-    m.byMode[mode][kind] += amt;
-  };
-  for (const t of transactions) {
-    if (!mSet.has(monthOf(t))) continue;
-    const amt = t.amount || 0;
-    // Self-transfer: money leaves one fund and lands in another. Net zero
-    // across your funds, but each bucket must see its side of the move.
-    if (t.type === 'transfer') {
-      const fb = FUND_OF_MODE[t.paymentMode || ''],
-        tb = FUND_OF_MODE[t.transferTo || ''];
-      if (fb) {
-        mv[fb].outflow += amt;
-        mv[fb].outCount++;
-        note(fb, 'out', 'Transfer out', amt);
-      }
-      if (tb) {
-        mv[tb].inflow += amt;
-        mv[tb].inCount++;
-        note(tb, 'in', 'Transfer in', amt);
-      }
-      if (!fb && !tb) {
-        unclassified.push({
-          ...t,
-          why: 'Transfer with no recognised fund on either side'
-        });
-      }
-      continue;
-    }
-    // Credit card bill payment: real money leaves a fund to clear the card.
-    // It is never an expense, because the original card spend already was one.
-    if (t.type === 'cardpay') {
-      const fb = FUND_OF_MODE[t.paymentMode || ''];
-      if (fb) {
-        mv[fb].outflow += amt;
-        mv[fb].outCount++;
-        note(fb, 'out', 'Card bill payment', amt);
-      } else unclassified.push({
-        ...t,
-        why: 'Card bill payment with no recognised fund'
-      });
-      ccPaid += amt;
-      continue;
-    }
-    // A loan EMI takes the whole instalment out of the fund it is paid from.
-    if (t.type === 'emi') {
-      const fb = FUND_OF_MODE[t.paymentMode || ''];
-      if (fb) {
-        mv[fb].outflow += amt;
-        mv[fb].outCount++;
-        note(fb, 'out', 'Loan EMI', amt);
-      } else unclassified.push({
-        ...t,
-        why: 'Loan EMI with no recognised fund'
-      });
-      emiPaid += amt;
-      continue;
-    }
-    if (t.type !== 'income' && t.type !== 'expense') continue;
-    const mode = t.paymentMode || '';
-    if (mode === 'Credit Card') {
-      // A card spend hits the card, not your cash. Income on a card is not a
-      // real thing, so only expenses are counted here.
-      if (t.type === 'expense') {
-        ccSpend += amt;
-        ccCount++;
-      } else {
-        unclassified.push({
-          ...t,
-          why: 'Income marked as paid by credit card'
-        });
-        unclassifiedIn += amt;
-      }
-      continue;
-    }
-    const bucket = FUND_OF_MODE[mode];
-    if (!bucket) {
-      unclassified.push({
-        ...t,
-        why: mode ? `Unrecognised payment mode "${mode}"` : 'No payment mode recorded'
-      });
-      if (t.type === 'income') unclassifiedIn += amt;else unclassifiedOut += amt;
-      continue;
-    }
-    const m = mv[bucket];
-    if (t.type === 'income') {
-      m.inflow += amt;
-      m.inCount++;
-      note(bucket, 'in', mode, amt);
-    } else {
-      m.outflow += amt;
-      m.outCount++;
-      note(bucket, 'out', mode, amt);
-    }
-  }
-
-  // Investment contributions leave the fund they were paid from.
-  for (const t of investmentTxs) {
-    if (!mSet.has(monthOf(t))) continue;
-    const amt = t.amount || 0;
-    const mode = t.paymentMode || 'NEFT/Bank Transfer';
-    const bucket = FUND_OF_MODE[mode];
-    if (!bucket) {
-      unclassified.push({
-        ...t,
-        type: 'investment',
-        category: 'Investment contribution',
-        why: mode ? `Unrecognised payment mode "${mode}"` : 'No payment mode recorded'
-      });
-      unclassifiedOut += amt;
-      continue;
-    }
-    mv[bucket].invested += amt;
-    mv[bucket].invCount++;
-    note(bucket, 'inv', mode, amt);
-  }
-
-  // ── Per-bucket reconciliation ──
-  const rows = FUND_BUCKETS.map(b => {
-    const accs = accounts.filter(a => b.types.includes(a.type));
-    const actual = accs.reduce((s, a) => s + (a.balance || 0), 0);
-    const m = mv[b.key];
-    const net = m.inflow - m.outflow - m.invested;
-    // A bucket is reconcilable as soon as ANY account in it has an opening.
-    // Accounts without one are counted as opening zero, which is stated in the
-    // UI, because silently skipping the whole bucket hides real gaps: a single
-    // unset opening on a tiny account used to mask a large discrepancy.
-    const withOpening = accs.filter(a => a.opening !== null && a.opening !== undefined);
-    const accountsWithout = accs.filter(a => a.opening === null || a.opening === undefined);
-    const openingSet = accs.length > 0 && withOpening.length > 0;
-    const fullyCovered = accs.length > 0 && accountsWithout.length === 0;
-    const opening = withOpening.reduce((s, a) => s + (a.opening || 0), 0);
-    // With no opening on file at all, the ledger still says what it must have been.
-    const impliedOpening = actual - net;
-    const expected = opening + net;
-    const diff = actual - expected;
-    return {
-      ...b,
-      accounts: accs,
-      actual,
-      opening,
-      openingSet,
-      fullyCovered,
-      impliedOpening,
-      net,
-      expected,
-      diff,
-      partialOpening: withOpening.length > 0 && accountsWithout.length > 0,
-      accountsWithout,
-      ...m
-    };
-  });
-  const tracked = rows.filter(r => r.accounts.length > 0);
-  const totals = {
-    actual: tracked.reduce((s, r) => s + r.actual, 0),
-    opening: tracked.reduce((s, r) => s + r.opening, 0),
-    inflow: tracked.reduce((s, r) => s + r.inflow, 0),
-    outflow: tracked.reduce((s, r) => s + r.outflow, 0),
-    invested: tracked.reduce((s, r) => s + r.invested, 0),
-    net: tracked.reduce((s, r) => s + r.net, 0)
-  };
-  // Only buckets with an opening on file can produce a meaningful difference.
-  const reconcilable = tracked.filter(r => r.openingSet);
-  totals.reconcilable = reconcilable.length;
-  totals.tracked = tracked.length;
-  totals.allChecked = tracked.length > 0 && tracked.every(r => r.fullyCovered);
-  totals.assumedZero = tracked.reduce((s, r) => s + r.accountsWithout.length, 0);
-  // A second set of totals over the checked buckets alone. The verdict is stated in
-  // these, so every term of `opening + in − out − invested = expected vs actual`
-  // covers the same funds and the sum actually holds.
-  const sum = (rs, k) => rs.reduce((s, r) => s + r[k], 0);
-  const checked = {
-    opening: sum(reconcilable, 'opening'),
-    inflow: sum(reconcilable, 'inflow'),
-    outflow: sum(reconcilable, 'outflow'),
-    invested: sum(reconcilable, 'invested'),
-    expected: sum(reconcilable, 'expected'),
-    actual: sum(reconcilable, 'actual'),
-    diff: sum(reconcilable, 'diff')
-  };
-  totals.expected = checked.expected;
-  totals.diff = checked.diff;
-
-  // A rupee or two of rounding is not a discrepancy worth chasing.
-  const TOL = 1;
-  const balanced = reconcilable.length > 0 && Math.abs(totals.diff) <= TOL;
-  const fdBal = accounts.filter(a => a.type === 'fd').reduce((s, a) => s + (a.balance || 0), 0);
-  return {
-    rows,
-    tracked,
-    totals,
-    checked,
-    balanced,
-    tolerance: TOL,
-    unclassified,
-    unclassifiedIn,
-    unclassifiedOut,
-    ccSpend,
-    ccCount,
-    ccPaid,
-    emiPaid,
-    fdBal,
-    hasOpenings: reconcilable.length > 0
-  };
-}
-
 /* Node test hook. In the browser `module` is undefined, so this is skipped and
    the file behaves as a plain concatenated script. */
 if (typeof module !== 'undefined' && module.exports) {
@@ -1246,7 +962,6 @@ if (typeof module !== 'undefined' && module.exports) {
     INSTR_COLOR,
     INSTR_BG,
     computeFin,
-    computeReconciliation,
     instrValueFromTxs,
     xirr,
     xirrFromTxs,
@@ -1254,8 +969,6 @@ if (typeof module !== 'undefined' && module.exports) {
     isUnitType,
     instrPrice,
     monthKey,
-    FUND_OF_MODE,
-    FUND_BUCKETS,
     UNIT_TYPES
   };
 }
@@ -2843,7 +2556,7 @@ function EfCard({
       fontSize: 10,
       opacity: .6
     }
-  }, majorCats.length > 0 ? `Based on \u2605 Major categories budget: ${fmtINR(majorMonthlyBudget, true)}/mo (${majorCats.join(', ')})` : 'No \u2605 Major categories set. Using avg monthly expense as fallback. Mark categories as Major in Master Settings.'), /*#__PURE__*/React.createElement("div", {
+  }, majorCats.length > 0 ? `Based on ★ Major categories budget: ${fmtINR(majorMonthlyBudget, true)}/mo (${majorCats.join(', ')})` : 'No ★ Major categories set. Using avg monthly expense as fallback. Mark categories as Major in Master Settings.'), /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 8,
       position: 'relative',
@@ -2949,6 +2662,13 @@ function PmCard({
   }, totalExp > 0 ? (v / totalExp * 100).toFixed(1) : 0, "% of expenses"))));
 }
 const PAYMENT_MODES = ['Credit Card', 'UPI', 'NEFT/Bank Transfer', 'Cash', 'Debit Card', 'Wallet'];
+// Which payment mode a debit from this kind of account is recorded as.
+const MODE_OF_ACCT = {
+  bank: 'NEFT/Bank Transfer',
+  fd: 'NEFT/Bank Transfer',
+  cash: 'Cash',
+  wallet: 'Wallet'
+};
 const pmClass = m => {
   if (!m) return 'tx';
   const l = m.toLowerCase();
@@ -2963,7 +2683,6 @@ const pmClass = m => {
 /* The pure financial engine lives in src/engine.js and is concatenated ahead
    of this file by the build. These two hooks memoise it for React. */
 const useFin = (data, months) => useMemo(() => computeFin(data, months), [data, months]);
-const useReconciliation = (data, months) => useMemo(() => computeReconciliation(data, months), [data, months]);
 
 /* ══════════════════════════════════════
    ACTION ENGINE: turns state into a short to-do list
@@ -3024,15 +2743,6 @@ function buildActions(data, fin, months) {
   const invOn = data.profile?.features?.investmentTracker !== false;
   if (invOn) {
     if (fin.invPeriod > fin.surplus && fin.surplus >= 0 && fin.invPeriod > 0) push(1, 'You are investing more than you earned this period', `${fmtINR(fin.invPeriod, true)} invested against a ${fmtINR(fin.surplus, true)} surplus. The difference is coming out of reserves.`, 'Review contributions', 'invtracker');else if (fin.surplus > 0 && fin.invPeriod === 0 && fin.savingsRate >= 15) push(2, `${fmtINR(fin.surplus, true)} surplus is sitting idle`, 'Nothing logged as invested this period. Money put to work moves from cash into net worth as an asset.', 'Open Investment Tracker', 'invtracker');
-  }
-
-  // 6c. Reconciliation: a balance your ledger cannot explain is worth knowing about
-  const rec = computeReconciliation(data, months);
-  if (rec.hasOpenings && !rec.balanced) {
-    const off = Math.abs(rec.totals.diff);
-    push(1, `Your funds are off by ${fmtINR(off, true)}`, `Recorded transactions do not explain the balance you hold. Usually a missing entry or a credit card bill payment.`, 'Open Reconciliation', 'reconcile');
-  } else if (rec.unclassified.length > 0) {
-    push(2, `${rec.unclassified.length} transaction${rec.unclassified.length > 1 ? 's' : ''} without a payment mode`, 'These cannot be traced to a bank, cash or wallet balance until a mode is set.', 'Open Reconciliation', 'reconcile');
   }
 
   // 7. Recurring transactions waiting
@@ -4496,7 +4206,7 @@ function PageFund({
       color: 'var(--n400)',
       marginTop: 4
     }
-  }, "What this account held on the first day of your reporting period. Reconciliation uses it to check your ledger against this balance. Leave it blank and the page will work out what it must have been.")), /*#__PURE__*/React.createElement("div", {
+  }, "What this account held on the first day of your reporting period. Used to check your ledger against this balance. Leave it blank and the page will work out what it must have been.")), /*#__PURE__*/React.createElement("div", {
     className: "fg"
   }, /*#__PURE__*/React.createElement("label", null, "Brand Color (for icon)"), /*#__PURE__*/React.createElement("input", {
     type: "color",
@@ -4724,643 +4434,6 @@ function PageFund({
       c: "#fff"
     }), modal === 'add' ? 'Add' : 'Save'))
   }, AccForm));
-}
-
-/* ══════════════════════════════════════
-   RECONCILIATION
-   Book balance vs the balance you actually hold, per fund type.
-══════════════════════════════════════ */
-function PageReconcile({
-  data,
-  setData,
-  toast,
-  setPage
-}) {
-  const {
-    profile,
-    accounts
-  } = data;
-  const months = useMemo(() => getPeriodMonths(profile.periodStart, profile.periodEnd), [profile.periodStart, profile.periodEnd]);
-  const r = useReconciliation(data, months);
-  const [showModes, setShowModes] = useState(false);
-  // ── Record a self-transfer between two of your own funds ──
-  const BUCKET_MODE = {
-    bank: 'NEFT/Bank Transfer',
-    cash: 'Cash',
-    wallet: 'Wallet'
-  };
-  const tef = {
-    from: 'bank',
-    to: 'cash',
-    amount: '',
-    date: new Date().toISOString().slice(0, 10),
-    notes: ''
-  };
-  const [xfer, setXfer] = useState(null);
-  const saveXfer = () => {
-    if (!xfer.amount || +xfer.amount <= 0) {
-      toast('Enter an amount', 'r');
-      return;
-    }
-    if (xfer.from === xfer.to) {
-      toast('Pick two different funds', 'r');
-      return;
-    }
-    const tx = {
-      id: uid(),
-      type: 'transfer',
-      amount: +xfer.amount,
-      date: xfer.date,
-      month: xfer.date.slice(0, 7),
-      category: 'Self-transfer',
-      desc: xfer.notes || `Transfer ${xfer.from} → ${xfer.to}`,
-      paymentMode: BUCKET_MODE[xfer.from],
-      transferTo: BUCKET_MODE[xfer.to],
-      merchant: ''
-    };
-    setData(d => ({
-      ...d,
-      transactions: [...d.transactions, tx]
-    }));
-    toast('Transfer recorded', 'g');
-    setXfer(null);
-  };
-  const setOpening = (id, val) => setData(d => ({
-    ...d,
-    accounts: d.accounts.map(a => a.id === id ? {
-      ...a,
-      opening: val === '' || val === null ? null : +val
-    } : a)
-  }));
-
-  // Adopting the implied opening makes a bucket balance by construction. It is
-  // the right move only when the ledger is complete and the balance is trusted.
-  const adoptImplied = row => {
-    if (!row.accounts.length) return;
-    // One account: it takes the whole figure. Several: only meaningful if the
-    // rest already have openings, so the remainder lands on the odd one out.
-    const missing = row.accountsWithout;
-    if (missing.length !== 1) {
-      toast(missing.length === 0 ? 'Every account here already has an opening balance' : 'Set openings on all but one account first', 'r');
-      return;
-    }
-    const known = row.accounts.filter(a => a.opening !== null && a.opening !== undefined).reduce((s, a) => s + (a.opening || 0), 0);
-    setOpening(missing[0].id, row.impliedOpening - known);
-    toast(`Opening balance set on ${missing[0].name}`, 'g');
-  };
-  const Diff = ({
-    v
-  }) => {
-    const ok = Math.abs(v) <= r.tolerance;
-    return /*#__PURE__*/React.createElement("span", {
-      className: `tag ${ok ? 'tg' : 'tr'}`
-    }, ok ? '✓ Reconciled' : `${v > 0 ? '+' : '−'}${fmtINR(Math.abs(v), true)}`);
-  };
-  const noAccounts = r.tracked.length === 0;
-  return /*#__PURE__*/React.createElement("div", {
-    className: "page"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "ph mb3"
-  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "ptitle"
-  }, "Reconciliation"), /*#__PURE__*/React.createElement("div", {
-    className: "psub"
-  }, "Does what you recorded moving agree with what you say you hold? \xB7 ", periodLabel(profile.periodStart, profile.periodEnd))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      gap: 6
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    className: "btn btn-s btn-sm",
-    onClick: () => setXfer(tef)
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "refresh",
-    s: 12
-  }), "Record transfer"), /*#__PURE__*/React.createElement("button", {
-    className: "btn btn-s btn-sm",
-    onClick: () => setPage('fund')
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "bank",
-    s: 12
-  }), "Edit accounts"))), xfer && /*#__PURE__*/React.createElement(Modal, {
-    title: "Record a self-transfer",
-    onClose: () => setXfer(null),
-    foot: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
-      className: "btn btn-s btn-sm",
-      onClick: () => setXfer(null)
-    }, "Cancel"), /*#__PURE__*/React.createElement("button", {
-      className: "btn btn-p btn-sm",
-      onClick: saveXfer
-    }, /*#__PURE__*/React.createElement(Ic, {
-      n: "ok",
-      s: 12,
-      c: "#fff"
-    }), "Save"))
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "alert ai mb2"
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "prov",
-    s: 13
-  }), /*#__PURE__*/React.createElement("span", null, "Moving money between your own funds nets to zero overall, but each fund needs to see its side so reconciliation balances.")), /*#__PURE__*/React.createElement("div", {
-    className: "f2 mb2"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "fg"
-  }, /*#__PURE__*/React.createElement("label", null, "From"), /*#__PURE__*/React.createElement("select", {
-    value: xfer.from,
-    onChange: e => setXfer(x => ({
-      ...x,
-      from: e.target.value
-    }))
-  }, FUND_BUCKETS.map(b => /*#__PURE__*/React.createElement("option", {
-    key: b.key,
-    value: b.key
-  }, b.label)))), /*#__PURE__*/React.createElement("div", {
-    className: "fg"
-  }, /*#__PURE__*/React.createElement("label", null, "To"), /*#__PURE__*/React.createElement("select", {
-    value: xfer.to,
-    onChange: e => setXfer(x => ({
-      ...x,
-      to: e.target.value
-    }))
-  }, FUND_BUCKETS.map(b => /*#__PURE__*/React.createElement("option", {
-    key: b.key,
-    value: b.key
-  }, b.label))))), /*#__PURE__*/React.createElement("div", {
-    className: "f2 mb2"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "fg"
-  }, /*#__PURE__*/React.createElement("label", null, "Amount (", CUR.sym, ")"), /*#__PURE__*/React.createElement("input", {
-    type: "number",
-    min: "0",
-    placeholder: "0",
-    value: xfer.amount,
-    onChange: e => setXfer(x => ({
-      ...x,
-      amount: e.target.value
-    }))
-  })), /*#__PURE__*/React.createElement("div", {
-    className: "fg"
-  }, /*#__PURE__*/React.createElement("label", null, "Date"), /*#__PURE__*/React.createElement("input", {
-    type: "date",
-    value: xfer.date,
-    onChange: e => setXfer(x => ({
-      ...x,
-      date: e.target.value
-    }))
-  }))), /*#__PURE__*/React.createElement("div", {
-    className: "fg"
-  }, /*#__PURE__*/React.createElement("label", null, "Note (optional)"), /*#__PURE__*/React.createElement("input", {
-    value: xfer.notes,
-    onChange: e => setXfer(x => ({
-      ...x,
-      notes: e.target.value
-    })),
-    placeholder: "e.g. ATM withdrawal"
-  }))), noAccounts ? /*#__PURE__*/React.createElement("div", {
-    className: "card",
-    style: {
-      textAlign: 'center',
-      padding: '40px 20px'
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 36,
-      marginBottom: 10
-    }
-  }, "\uD83C\uDFE6"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 14,
-      fontWeight: 700,
-      color: 'var(--n600)',
-      marginBottom: 6
-    }
-  }, "No bank, cash or wallet accounts yet"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: 'var(--n400)',
-      marginBottom: 16
-    }
-  }, "Add the accounts you actually hold and their balances, then come back here to check them against your recorded transactions."), /*#__PURE__*/React.createElement("button", {
-    className: "btn btn-p",
-    style: {
-      margin: '0 auto'
-    },
-    onClick: () => setPage('fund')
-  }, "\u2192 Go to Bank Balance")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-    className: "card mb3 stl-card"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sh mb2"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sh-t"
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "shield",
-    s: 14,
-    c: !r.hasOpenings ? 'var(--o)' : r.balanced ? 'var(--g)' : 'var(--r)'
-  }), !r.hasOpenings ? 'Not yet reconcilable' : r.balanced ? r.totals.allChecked ? 'Your books agree' : 'The funds you have checked agree' : 'Your books do not agree'), /*#__PURE__*/React.createElement("span", {
-    className: `tag ${r.totals.assumedZero > 0 ? 'to' : 'tx'}`,
-    style: {
-      fontSize: 10
-    }
-  }, r.totals.assumedZero > 0 ? `${r.totals.assumedZero} account${r.totals.assumedZero > 1 ? 's' : ''} assumed to open at ${CUR.sym}0` : `${r.totals.reconcilable} of ${r.totals.tracked} fund types checked`)), /*#__PURE__*/React.createElement("div", {
-    className: "stl-row"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "stl-main"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "stl-val",
-    style: {
-      color: !r.hasOpenings ? 'var(--warn)' : r.balanced ? 'var(--pos)' : 'var(--neg)'
-    }
-  }, !r.hasOpenings ? '–' : r.balanced ? fmtINR(0) : fmtINR(Math.abs(r.totals.diff))), /*#__PURE__*/React.createElement("div", {
-    className: "stl-sub"
-  }, !r.hasOpenings ? /*#__PURE__*/React.createElement(React.Fragment, null, "Set an ", /*#__PURE__*/React.createElement("strong", null, "opening balance"), " on your accounts below and this becomes a real check. Until then the table shows what your opening balance ", /*#__PURE__*/React.createElement("em", null, "must have been"), " for the ledger to land on today's figure.") : r.balanced ? r.totals.allChecked ? /*#__PURE__*/React.createElement(React.Fragment, null, "Every recorded movement accounts for the balance you hold. Nothing is missing from your ledger.") : /*#__PURE__*/React.createElement(React.Fragment, null, "Everything you have given an opening balance reconciles exactly.", ' ', r.totals.assumedZero, " account", r.totals.assumedZero === 1 ? '' : 's', " still", ' ', r.totals.assumedZero === 1 ? 'has' : 'have', " no opening balance and", ' ', r.totals.assumedZero === 1 ? 'is' : 'are', " being treated as opening at ", CUR.sym, "0, so set ", r.totals.assumedZero === 1 ? 'it' : 'them', " below to be sure.") : /*#__PURE__*/React.createElement(React.Fragment, null, r.totals.diff > 0 ? /*#__PURE__*/React.createElement(React.Fragment, null, "You hold ", /*#__PURE__*/React.createElement("strong", null, fmtINR(Math.abs(r.totals.diff), true), " more"), " than your recorded transactions explain. Money came in that you have not logged.") : /*#__PURE__*/React.createElement(React.Fragment, null, "You hold ", /*#__PURE__*/React.createElement("strong", null, fmtINR(Math.abs(r.totals.diff), true), " less"), " than your recorded transactions explain. Money went out that you have not logged."), r.totals.assumedZero > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, " ", r.totals.assumedZero, " account", r.totals.assumedZero > 1 ? 's' : '', " without an opening balance ", r.totals.assumedZero > 1 ? 'are' : 'is', " treated as opening at ", CUR.sym, "0, so set ", r.totals.assumedZero > 1 ? 'them' : 'it', " below if that is wrong.")))), /*#__PURE__*/React.createElement("div", {
-    className: "stl-calc"
-  }, (() => {
-    // Every term below covers the same funds, so the arithmetic on screen holds.
-    const v = r.hasOpenings ? r.checked : r.totals;
-    const partial = r.hasOpenings && !r.totals.allChecked;
-    return [{
-      l: 'Opening',
-      v: v.opening,
-      op: null,
-      c: 'var(--n800)',
-      note: r.hasOpenings ? 'as entered' : 'not set'
-    }, {
-      l: 'Money In',
-      v: v.inflow,
-      op: '+',
-      c: 'var(--pos)'
-    }, {
-      l: 'Money Out',
-      v: v.outflow,
-      op: '−',
-      c: 'var(--neg)'
-    }, {
-      l: 'Invested',
-      v: v.invested,
-      op: '−',
-      c: 'var(--p)'
-    }, {
-      l: 'Expected',
-      v: v.expected,
-      op: '=',
-      c: 'var(--n800)',
-      bold: true,
-      dash: !r.hasOpenings
-    }, {
-      l: 'Actual Held',
-      v: v.actual,
-      op: 'vs',
-      c: 'var(--b)',
-      bold: true,
-      note: partial ? 'checked funds only' : ''
-    }];
-  })().map(x => /*#__PURE__*/React.createElement(React.Fragment, {
-    key: x.l
-  }, x.op && /*#__PURE__*/React.createElement("span", {
-    className: "stl-op",
-    "aria-hidden": "true"
-  }, x.op), /*#__PURE__*/React.createElement("div", {
-    className: "stl-term"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "stl-term-l"
-  }, x.l), /*#__PURE__*/React.createElement("div", {
-    className: "stl-term-v",
-    style: {
-      color: x.c,
-      fontWeight: x.bold ? 800 : 700
-    }
-  }, x.dash ? '–' : fmtINR(x.v, true)), x.note && /*#__PURE__*/React.createElement("div", {
-    className: "stl-term-n"
-  }, x.note)))))), /*#__PURE__*/React.createElement("div", {
-    className: "stl-foot"
-  }, /*#__PURE__*/React.createElement("span", null, "Fixed deposits (", fmtINR(r.fdBal, true), ") are excluded. They move by maturity, not by daily spending."), /*#__PURE__*/React.createElement("span", null, "Differences under ", fmtINR(r.tolerance), " are treated as rounding."))), /*#__PURE__*/React.createElement("div", {
-    className: "card mb3"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sh mb2"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sh-t"
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "fund",
-    s: 14,
-    c: "var(--b)"
-  }), "By fund type"), /*#__PURE__*/React.createElement("button", {
-    className: "btn btn-s btn-sm",
-    style: {
-      fontSize: 11
-    },
-    onClick: () => setShowModes(v => !v)
-  }, showModes ? 'Hide' : 'Show', " payment modes")), /*#__PURE__*/React.createElement("div", {
-    className: "tw"
-  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "Fund"), /*#__PURE__*/React.createElement("th", {
-    className: "num"
-  }, "Opening"), /*#__PURE__*/React.createElement("th", {
-    className: "num"
-  }, "In"), /*#__PURE__*/React.createElement("th", {
-    className: "num"
-  }, "Out"), /*#__PURE__*/React.createElement("th", {
-    className: "num"
-  }, "Invested"), /*#__PURE__*/React.createElement("th", {
-    className: "num"
-  }, "Expected"), /*#__PURE__*/React.createElement("th", {
-    className: "num"
-  }, "Actual"), /*#__PURE__*/React.createElement("th", null, "Status"))), /*#__PURE__*/React.createElement("tbody", null, r.tracked.map(row => /*#__PURE__*/React.createElement(React.Fragment, {
-    key: row.key
-  }, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
-    style: {
-      fontWeight: 700
-    }
-  }, row.label, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10,
-      color: 'var(--n400)',
-      fontWeight: 400
-    }
-  }, row.accounts.length, " account", row.accounts.length === 1 ? '' : 's', " \xB7 ", row.inCount + row.outCount + row.invCount, " entr", row.inCount + row.outCount + row.invCount === 1 ? 'y' : 'ies')), /*#__PURE__*/React.createElement("td", {
-    className: "num"
-  }, row.openingSet ? /*#__PURE__*/React.createElement(React.Fragment, null, fmtINR(row.opening, true), !row.fullyCovered && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 9,
-      color: 'var(--warn)',
-      fontStyle: 'italic'
-    }
-  }, row.accountsWithout.length, " at ", CUR.sym, "0")) : /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: 'var(--warn)',
-      fontStyle: 'italic'
-    }
-  }, fmtINR(row.impliedOpening, true), " implied")), /*#__PURE__*/React.createElement("td", {
-    className: "num pos"
-  }, row.inflow ? fmtINR(row.inflow, true) : '–'), /*#__PURE__*/React.createElement("td", {
-    className: "num neg"
-  }, row.outflow ? fmtINR(row.outflow, true) : '–'), /*#__PURE__*/React.createElement("td", {
-    className: "num",
-    style: {
-      color: 'var(--p)'
-    }
-  }, row.invested ? fmtINR(row.invested, true) : '–'), /*#__PURE__*/React.createElement("td", {
-    className: "num bold"
-  }, row.openingSet ? fmtINR(row.expected, true) : '–'), /*#__PURE__*/React.createElement("td", {
-    className: "num bold",
-    style: {
-      color: 'var(--b)'
-    }
-  }, fmtINR(row.actual, true)), /*#__PURE__*/React.createElement("td", null, row.openingSet ? /*#__PURE__*/React.createElement(Diff, {
-    v: row.diff
-  }) : /*#__PURE__*/React.createElement("button", {
-    className: "btn btn-s btn-sm",
-    style: {
-      fontSize: 10.5
-    },
-    onClick: () => adoptImplied(row)
-  }, "Use implied"))), showModes && Object.entries(row.byMode).map(([mode, v]) => /*#__PURE__*/React.createElement("tr", {
-    key: row.key + mode,
-    style: {
-      background: 'var(--n50)'
-    }
-  }, /*#__PURE__*/React.createElement("td", {
-    style: {
-      paddingLeft: 24,
-      fontSize: 11.5,
-      color: 'var(--n500)'
-    }
-  }, "\u21B3 ", mode), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", {
-    className: "num",
-    style: {
-      fontSize: 11.5
-    }
-  }, v.in ? fmtINR(v.in, true) : '–'), /*#__PURE__*/React.createElement("td", {
-    className: "num",
-    style: {
-      fontSize: 11.5
-    }
-  }, v.out ? fmtINR(v.out, true) : '–'), /*#__PURE__*/React.createElement("td", {
-    className: "num",
-    style: {
-      fontSize: 11.5
-    }
-  }, v.inv ? fmtINR(v.inv, true) : '–'), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", null)))))), /*#__PURE__*/React.createElement("tfoot", null, /*#__PURE__*/React.createElement("tr", {
-    className: "tft"
-  }, /*#__PURE__*/React.createElement("td", {
-    style: {
-      fontWeight: 700
-    }
-  }, "Total"), /*#__PURE__*/React.createElement("td", {
-    className: "num bold"
-  }, r.hasOpenings ? fmtINR(r.totals.opening, true) : '–'), /*#__PURE__*/React.createElement("td", {
-    className: "num bold pos"
-  }, fmtINR(r.totals.inflow, true)), /*#__PURE__*/React.createElement("td", {
-    className: "num bold neg"
-  }, fmtINR(r.totals.outflow, true)), /*#__PURE__*/React.createElement("td", {
-    className: "num bold",
-    style: {
-      color: 'var(--p)'
-    }
-  }, fmtINR(r.totals.invested, true)), /*#__PURE__*/React.createElement("td", {
-    className: "num bold"
-  }, r.hasOpenings ? fmtINR(r.totals.expected, true) : '–'), /*#__PURE__*/React.createElement("td", {
-    className: "num bold",
-    style: {
-      color: 'var(--b)'
-    }
-  }, fmtINR(r.totals.actual, true)), /*#__PURE__*/React.createElement("td", null, !r.hasOpenings ? null : /*#__PURE__*/React.createElement(Diff, {
-    v: r.totals.diff
-  }))))))), /*#__PURE__*/React.createElement("div", {
-    className: "card mb3"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sh mb2"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sh-t"
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "edit",
-    s: 14,
-    c: "var(--g)"
-  }), "Opening balances"), /*#__PURE__*/React.createElement("span", {
-    className: "tag tx",
-    style: {
-      fontSize: 10
-    }
-  }, "As at ", months.length ? months[0].label : 'period start')), /*#__PURE__*/React.createElement("div", {
-    className: "alert ai mb2"
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "prov",
-    s: 13
-  }), /*#__PURE__*/React.createElement("span", null, "What each account held on the first day of the period. Take it from your statement. This is the anchor the whole check hangs on. Leave one blank and the table shows the figure it would need to be for your ledger to balance.")), r.tracked.map(row => /*#__PURE__*/React.createElement("div", {
-    key: row.key,
-    style: {
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      fontWeight: 700,
-      textTransform: 'uppercase',
-      letterSpacing: .5,
-      color: 'var(--n500)',
-      marginBottom: 6
-    }
-  }, row.label), row.accounts.map(a => /*#__PURE__*/React.createElement("div", {
-    key: a.id,
-    className: "sr"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "sr-l"
-  }, a.name, " ", /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: 'var(--n400)',
-      fontSize: 11
-    }
-  }, "\xB7 ", a.accNo), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10.5,
-      color: 'var(--n400)'
-    }
-  }, "Holds ", fmtINR(a.balance, true), " today")), /*#__PURE__*/React.createElement("span", {
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement("input", {
-    type: "number",
-    min: "0",
-    value: a.opening === null || a.opening === undefined ? '' : a.opening,
-    onChange: e => setOpening(a.id, e.target.value),
-    placeholder: "not set",
-    "aria-label": `Opening balance for ${a.name}`,
-    style: {
-      width: 130,
-      textAlign: 'right',
-      fontFamily: 'var(--m)',
-      fontSize: 12.5,
-      padding: '6px 9px'
-    }
-  }), a.opening !== null && a.opening !== undefined && /*#__PURE__*/React.createElement("button", {
-    className: "bic",
-    title: "Clear opening balance",
-    "aria-label": `Clear opening balance for ${a.name}`,
-    onClick: () => setOpening(a.id, '')
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "x",
-    s: 11
-  })))))))), /*#__PURE__*/React.createElement("div", {
-    className: "g2 mb3"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "card"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sh mb2"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sh-t"
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "bell",
-    s: 14,
-    c: r.unclassified.length ? 'var(--o)' : 'var(--g)'
-  }), "Entries that cannot be placed"), r.unclassified.length > 0 && /*#__PURE__*/React.createElement("span", {
-    className: "tag tr"
-  }, r.unclassified.length)), r.unclassified.length === 0 ? /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: 'var(--n400)',
-      padding: '10px 0'
-    }
-  }, "Every transaction in the period names a payment mode this page understands. Nothing is falling through the cracks.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11.5,
-      color: 'var(--n500)',
-      marginBottom: 8
-    }
-  }, "These carry no usable payment mode, so they cannot be assigned to a fund, the single most common reason a reconciliation fails. Worth ", fmtINR(r.unclassifiedIn + r.unclassifiedOut, true), " in total."), /*#__PURE__*/React.createElement("div", {
-    className: "tw",
-    style: {
-      maxHeight: 230,
-      overflowY: 'auto'
-    }
-  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "Date"), /*#__PURE__*/React.createElement("th", null, "Description"), /*#__PURE__*/React.createElement("th", {
-    className: "num"
-  }, "Amount"), /*#__PURE__*/React.createElement("th", null, "Why"))), /*#__PURE__*/React.createElement("tbody", null, r.unclassified.slice(0, 25).map((t, i) => /*#__PURE__*/React.createElement("tr", {
-    key: t.id || i
-  }, /*#__PURE__*/React.createElement("td", {
-    style: {
-      whiteSpace: 'nowrap'
-    }
-  }, fmtDate(t.date)), /*#__PURE__*/React.createElement("td", {
-    style: {
-      fontSize: 11.5
-    }
-  }, t.desc || t.category || '–'), /*#__PURE__*/React.createElement("td", {
-    className: `num ${t.type === 'income' ? 'pos' : 'neg'}`
-  }, fmtINR(t.amount, true)), /*#__PURE__*/React.createElement("td", {
-    style: {
-      fontSize: 11,
-      color: 'var(--n500)'
-    }
-  }, t.why)))))), r.unclassified.length > 25 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      color: 'var(--n400)',
-      marginTop: 6
-    }
-  }, "+", r.unclassified.length - 25, " more"), /*#__PURE__*/React.createElement("button", {
-    className: "btn btn-s btn-sm",
-    style: {
-      marginTop: 10
-    },
-    onClick: () => setPage('expense')
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "edit",
-    s: 11
-  }), "Fix in Transactions"))), /*#__PURE__*/React.createElement("div", {
-    className: "card"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sh mb2"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sh-t"
-  }, /*#__PURE__*/React.createElement(Ic, {
-    n: "prov",
-    s: 14,
-    c: "var(--n500)"
-  }), "Deliberately not counted")), /*#__PURE__*/React.createElement("div", {
-    className: "sr"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "sr-l"
-  }, "Spending on credit cards", /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10.5,
-      color: 'var(--n400)'
-    }
-  }, r.ccCount, " entr", r.ccCount === 1 ? 'y' : 'ies', ". A card spend creates a liability, it does not move your cash")), /*#__PURE__*/React.createElement("span", {
-    className: "sr-v"
-  }, fmtINR(r.ccSpend, true))), /*#__PURE__*/React.createElement("div", {
-    className: "sr"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "sr-l"
-  }, "Fixed deposits", /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10.5,
-      color: 'var(--n400)'
-    }
-  }, "Move by maturity and transfer, not by daily spending")), /*#__PURE__*/React.createElement("span", {
-    className: "sr-v"
-  }, fmtINR(r.fdBal, true))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 12,
-      padding: '10px 12px',
-      background: 'var(--ol)',
-      borderRadius: 8,
-      border: '1px solid rgba(217,119,6,.2)'
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11.5,
-      fontWeight: 700,
-      color: 'var(--o)',
-      marginBottom: 5
-    }
-  }, "Known gaps"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      color: 'var(--n600)',
-      lineHeight: 1.55
-    }
-  }, /*#__PURE__*/React.createElement("strong", null, "Credit card bill payments"), " are not recorded as transactions, so they will show up as a difference. If your bank bucket is short by roughly what you paid off your cards this period, that is almost certainly the reason. ", /*#__PURE__*/React.createElement("strong", null, "Transfers between your own funds"), " are now covered: use ", /*#__PURE__*/React.createElement("strong", null, "Record transfer"), " above and both sides balance."))))));
 }
 
 /* ══════════════════════════════════════
@@ -6858,9 +5931,8 @@ function PageCC({
   /* ── Pay a card bill ──────────────────────────────────────────────
      Real money leaves a fund and the card's payable drops. It is recorded as
      its own entry type, never an expense: the original card spend was already
-     the expense, so counting it again would double it. Reconciliation sees the
-     cash leave, which is what closes the usual unexplained bank gap. */
-  const PAY_MODES = PAYMENT_MODES.filter(m => m !== 'Credit Card');
+     the expense, so counting it again would double it. The account balance
+     falls by the amount paid, so net worth stays put instead of rising. */
   const [pay, setPay] = useState(null);
   const openPay = c => setPay({
     cardId: c.id,
@@ -6869,12 +5941,17 @@ function PageCC({
     max: c.payable,
     amount: String(c.payable || ''),
     date: new Date().toISOString().slice(0, 10),
-    paymentMode: 'NEFT/Bank Transfer'
+    accountId: ((data.accounts || []).find(a => a.type === 'bank') || (data.accounts || [])[0] || {}).id || ''
   });
   const savePay = () => {
     const amt = +pay.amount;
     if (!amt || amt <= 0) {
       toast('Enter an amount', 'r');
+      return;
+    }
+    const acc = (data.accounts || []).find(a => a.id === pay.accountId);
+    if (!acc) {
+      toast('Pick the account you paid from', 'r');
       return;
     }
     const tx = {
@@ -6886,18 +5963,25 @@ function PageCC({
       month: pay.date.slice(0, 7),
       category: 'Credit card bill',
       desc: `${pay.bank} ${pay.type} bill payment`,
-      paymentMode: pay.paymentMode,
+      paymentMode: MODE_OF_ACCT[acc.type] || 'NEFT/Bank Transfer',
+      accountId: acc.id,
       merchant: ''
     };
     setData(d => ({
       ...d,
       transactions: [...d.transactions, tx],
+      // Both sides move together. Clearing the payable alone lifted net worth by
+      // the amount paid, as if settling a bill made you richer.
+      accounts: d.accounts.map(a => a.id === acc.id ? {
+        ...a,
+        balance: a.balance - amt
+      } : a),
       creditCards: d.creditCards.map(c => c.id === pay.cardId ? {
         ...c,
         payable: Math.max(0, (c.payable || 0) - amt)
       } : c)
     }));
-    toast(`Paid ${fmtINR(amt, true)} · card cleared, cash recorded as leaving`, 'g');
+    toast(`Paid ${fmtINR(amt, true)} · out of ${acc.name}, card cleared`, 'g');
     setPay(null);
   };
   const CCForm = /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
@@ -7494,15 +6578,15 @@ function PageCC({
   })), /*#__PURE__*/React.createElement("div", {
     className: "fg fg-full"
   }, /*#__PURE__*/React.createElement("label", null, "Paid From"), /*#__PURE__*/React.createElement("select", {
-    value: pay.paymentMode,
+    value: pay.accountId,
     onChange: e => setPay(x => ({
       ...x,
-      paymentMode: e.target.value
+      accountId: e.target.value
     }))
-  }, PAY_MODES.map(m => /*#__PURE__*/React.createElement("option", {
-    key: m,
-    value: m
-  }, m)))))));
+  }, (data.accounts || []).map(a => /*#__PURE__*/React.createElement("option", {
+    key: a.id,
+    value: a.id
+  }, a.name, " (", fmtINR(a.balance, true), ")")))))));
 }
 
 /* ══════════════════════════════════════
@@ -7511,6 +6595,7 @@ function PageCC({
 /* ── LoanCard: extracted so useState(showAmort) is at component top-level (Rules of Hooks) ── */
 function LoanCard({
   l,
+  accounts,
   buildAmort,
   openEdit,
   del,
@@ -7519,6 +6604,7 @@ function LoanCard({
 }) {
   const [showAmort, setShowAmort] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [payAcc, setPayAcc] = useState(null);
   const amort = buildAmort(l);
   const remInterest = amort.reduce((s, r) => s + r.interest, 0);
   const futurePayout = amort.reduce((s, r) => s + r.emi, 0);
@@ -7532,54 +6618,66 @@ function LoanCard({
   const nextDue = amort[0] || null;
   const isFullyPaid = l.outstanding <= 0 || amort.length === 0;
 
-  /* Marking an EMI paid also posts it to the ledger, so the instalment leaves
-     the fund it was paid from. Only the interest is booked as a cost; the
-     principal repays debt, so it moves cash without being an expense. Without
-     this the cash silently vanished and reconciliation could never balance. */
-  const markPaid = row => {
+  /* Marking an EMI paid moves money on BOTH sides of the balance sheet.
+      The loan's outstanding falls by the principal, which is a liability going
+     down. On its own that raised net worth by the principal every time you paid
+     an instalment, which is exactly backwards: paying a loan leaves you no
+     richer, because the cash left your account. So the full instalment is also
+     debited from the account you paid it from. Undo puts it back. */
+  const markPaid = (row, accountId) => {
+    const acc = accounts.find(a => a.id === accountId);
+    if (!acc) {
+      toast && toast('Pick the account you paid from', 'r');
+      return;
+    }
     const txId = uid();
-    setData(d => {
-      const emiMode = d.profile && d.profile.emiPaidFrom || 'NEFT/Bank Transfer';
-      return {
-        ...d,
-        transactions: [...d.transactions, {
-          id: txId,
-          type: 'emi',
-          loanId: l.id,
-          emiNo: row.n,
-          amount: row.emi,
+    setData(d => ({
+      ...d,
+      transactions: [...d.transactions, {
+        id: txId,
+        type: 'emi',
+        loanId: l.id,
+        emiNo: row.n,
+        amount: row.emi,
+        principal: row.principal,
+        interest: row.interest,
+        date: row.date,
+        month: (row.date || '').slice(0, 7),
+        category: 'Loan Interest',
+        desc: `${l.bank} ${l.type} EMI #${row.n}`,
+        paymentMode: MODE_OF_ACCT[acc.type] || 'NEFT/Bank Transfer',
+        accountId,
+        merchant: ''
+      }],
+      // The cash side. Without this the liability fell and nothing paid for it.
+      accounts: d.accounts.map(a => a.id === accountId ? {
+        ...a,
+        balance: a.balance - row.emi
+      } : a),
+      loans: d.loans.map(lo => {
+        if (lo.id !== l.id) return lo;
+        const newPaid = [...(lo.paidEmis || []), {
+          n: row.n,
+          date: row.date,
+          emi: row.emi,
           principal: row.principal,
           interest: row.interest,
-          date: row.date,
-          month: (row.date || '').slice(0, 7),
-          category: 'Loan Interest',
-          desc: `${l.bank} ${l.type} EMI #${row.n}`,
-          paymentMode: emiMode,
-          merchant: ''
-        }],
-        loans: d.loans.map(lo => {
-          if (lo.id !== l.id) return lo;
-          const newPaid = [...(lo.paidEmis || []), {
-            n: row.n,
-            date: row.date,
-            emi: row.emi,
-            principal: row.principal,
-            interest: row.interest,
-            opening: row.opening,
-            closing: row.closing,
-            paidOn: new Date().toISOString().slice(0, 10),
-            txId
-          }];
-          return {
-            ...lo,
-            outstanding: Math.max(0, row.closing),
-            remaining: Math.max(0, (lo.remaining || 0) - 1),
-            paidEmis: newPaid
-          };
-        })
-      };
-    });
-    toast && toast(`EMI #${row.n} paid ✓ · ${fmtINR(row.emi, true)} posted to your ledger`, 'g');
+          opening: row.opening,
+          closing: row.closing,
+          paidOn: new Date().toISOString().slice(0, 10),
+          txId,
+          accountId
+        }];
+        return {
+          ...lo,
+          outstanding: Math.max(0, row.closing),
+          remaining: Math.max(0, (lo.remaining || 0) - 1),
+          paidEmis: newPaid
+        };
+      })
+    }));
+    setPayAcc(null);
+    toast && toast(`EMI #${row.n} paid ✓ · ${fmtINR(row.emi, true)} out of ${acc.name}`, 'g');
   };
   const undoLastPaid = () => {
     if (!paidEmis.length) return;
@@ -7588,6 +6686,11 @@ function LoanCard({
       ...d,
       // Remove the ledger entry this EMI posted, so undo leaves nothing behind.
       transactions: d.transactions.filter(t => !(last.txId && t.id === last.txId)),
+      // Put the cash back in the account it was taken from.
+      accounts: d.accounts.map(a => a.id === last.accountId ? {
+        ...a,
+        balance: a.balance + (last.emi || 0)
+      } : a),
       loans: d.loans.map(lo => {
         if (lo.id !== l.id) return lo;
         return {
@@ -7598,7 +6701,7 @@ function LoanCard({
         };
       })
     }));
-    toast && toast('Last EMI payment undone · ledger entry removed', 'o');
+    toast && toast('Last EMI payment undone · cash and balance restored', 'o');
   };
   return /*#__PURE__*/React.createElement("div", {
     className: "card mb2"
@@ -7833,7 +6936,9 @@ function LoanCard({
       color: 'var(--r)'
     }
   }, fmtINR(nextDue.closing)))), /*#__PURE__*/React.createElement("button", {
-    onClick: () => markPaid(nextDue),
+    onClick: () => setPayAcc({
+      accountId: (accounts[0] || {}).id || ''
+    }),
     style: {
       background: 'var(--g)',
       color: '#fff',
@@ -8207,7 +7312,43 @@ function LoanCard({
     }
   }, fmtINR(remInterest)), /*#__PURE__*/React.createElement("td", {
     colSpan: 2
-  }))))));
+  }))))), payAcc && nextDue && /*#__PURE__*/React.createElement(Modal, {
+    title: `Record EMI #${nextDue.n}`,
+    onClose: () => setPayAcc(null),
+    foot: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+      className: "btn btn-s btn-sm",
+      onClick: () => setPayAcc(null)
+    }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+      className: "btn btn-p btn-sm",
+      onClick: () => markPaid(nextDue, payAcc.accountId)
+    }, /*#__PURE__*/React.createElement(Ic, {
+      n: "ok",
+      s: 12,
+      c: "#fff"
+    }), "Record payment"))
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "alert ai mb2"
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "prov",
+    s: 13
+  }), /*#__PURE__*/React.createElement("span", null, fmtINR(nextDue.emi, true), " leaves the account you pick. ", fmtINR(nextDue.principal, true), " repays the loan and ", fmtINR(nextDue.interest, true), " is booked as interest cost, so your net worth falls by the interest, not by the whole instalment.")), /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "Paid From"), /*#__PURE__*/React.createElement("select", {
+    value: payAcc.accountId,
+    onChange: e => setPayAcc(x => ({
+      ...x,
+      accountId: e.target.value
+    }))
+  }, accounts.map(a => /*#__PURE__*/React.createElement("option", {
+    key: a.id,
+    value: a.id
+  }, a.name, " (", fmtINR(a.balance, true), ")"))), !accounts.length && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: 'var(--r)',
+      marginTop: 4
+    }
+  }, "Add an account first, under Bank Balance."))));
 }
 function PageLoans({
   data,
@@ -8215,7 +7356,8 @@ function PageLoans({
   toast
 }) {
   const {
-    loans
+    loans,
+    accounts
   } = data;
   const ef = {
     bank: '',
@@ -8242,9 +7384,12 @@ function PageLoans({
     const now = new Date(),
       start = new Date(l.startDate || new Date());
     const elapsed = Math.max(0, (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth()));
-    // Use paid EMI count as the source of truth for next installment. Whichever is higher wins
-    const paidCount = (l.paidEmis || []).length;
-    const startFrom = Math.max(elapsed, paidCount);
+    // The next instalment is the one after the highest you have actually paid.
+    // Counting payments instead of reading their instalment numbers was wrong: a
+    // loan 32 months old with one payment logged gave max(32,1)=32, so the same
+    // EMI kept reappearing as "next due" no matter how often you marked it paid.
+    const lastPaidN = (l.paidEmis || []).reduce((m, p) => Math.max(m, p.n || 0), 0);
+    const startFrom = Math.max(elapsed, lastPaidN);
     const rows = [];
     let bal = l.outstanding;
     for (let i = 0; i < l.tenure - startFrom && bal > 0; i++) {
@@ -8910,6 +8055,7 @@ function PageLoans({
   }, fmtINR(loans.reduce((s, l) => s + Math.max(0, l.emi * (l.remaining || 0) - l.outstanding), 0)))))))), loans.map(l => /*#__PURE__*/React.createElement(LoanCard, {
     key: l.id,
     l: l,
+    accounts: accounts,
     buildAmort: buildAmort,
     openEdit: openEdit,
     del: del,
@@ -9813,7 +8959,7 @@ function PageMaster({
       }
     }, c, isMajor && /*#__PURE__*/React.createElement("span", {
       className: "major-flag"
-    }, "\\u2605 Major")), !isEditing && /*#__PURE__*/React.createElement("div", {
+    }, "\u2605 Major")), !isEditing && /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'flex',
         gap: 4
@@ -9838,7 +8984,7 @@ function PageMaster({
       style: {
         fontSize: 10
       }
-    }, isMajor ? '\u2605' : '\u2606')), /*#__PURE__*/React.createElement("button", {
+    }, isMajor ? '★' : '☆')), /*#__PURE__*/React.createElement("button", {
       className: "bic",
       title: "Rename Category",
       onClick: () => startEditCat(c, 'expense')
@@ -10260,7 +9406,6 @@ const DriveService = {
       }); // no popup
     });
   },
-
   /* Explicit connect: prompt:'' uses existing Google session; GIS falls back to picker if needed */
   getToken() {
     return new Promise((resolve, reject) => {
@@ -10557,8 +9702,7 @@ function PageData({
     if (!d.goals) d.goals = [];
     if (!d.recurring) d.recurring = [];
     if (!d.investmentTxs) d.investmentTxs = [];
-    // Reconciliation: `opening` is the balance at the start of the reporting period.
-    // Left null for existing data. The Reconciliation page infers it and offers to adopt it.
+    // `opening` is the balance at the start of the reporting period. Left null for existing data.
     d.accounts = d.accounts.map(a => ({
       ...a,
       opening: a.opening === undefined ? null : a.opening
@@ -10623,7 +9767,7 @@ function PageData({
     } else {
       delete d.investments;
     }
-    // Reconciliation needs to know which fund an investment was paid from.
+    // Which fund an investment was paid from.
     // Pre-existing entries predate the field; a bank transfer is the safe default.
     d.investmentTxs = d.investmentTxs.map(t => ({
       ...t,
@@ -13743,7 +12887,6 @@ GOALS:${(() => {
               if (response.status === 429 || lastErr.includes('quota') || lastErr.includes('RESOURCE_EXHAUSTED')) {
                 continue; // try next model
               }
-
               throw new Error(lastErr);
             }
             const d = await response.json();
@@ -13909,7 +13052,7 @@ GOALS:${(() => {
     let key = 0;
     lines.forEach(line => {
       if (line.startsWith('##')) {
-        elements.push( /*#__PURE__*/React.createElement("div", {
+        elements.push(/*#__PURE__*/React.createElement("div", {
           key: key++,
           style: {
             fontSize: 14,
@@ -13923,7 +13066,7 @@ GOALS:${(() => {
           }
         }, line.replace(/^#+\s*/, '')));
       } else if (line.startsWith('**') && line.endsWith('**')) {
-        elements.push( /*#__PURE__*/React.createElement("div", {
+        elements.push(/*#__PURE__*/React.createElement("div", {
           key: key++,
           style: {
             fontSize: 13,
@@ -13934,7 +13077,7 @@ GOALS:${(() => {
           }
         }, line.replace(/\*\*/g, '')));
       } else if (line.startsWith('- ') || line.startsWith('• ')) {
-        elements.push( /*#__PURE__*/React.createElement("div", {
+        elements.push(/*#__PURE__*/React.createElement("div", {
           key: key++,
           style: {
             fontSize: 12.5,
@@ -13953,14 +13096,14 @@ GOALS:${(() => {
           }
         }, "\u2022"), line.replace(/^[-•]\s*/, '')));
       } else if (line.trim() === '') {
-        elements.push( /*#__PURE__*/React.createElement("div", {
+        elements.push(/*#__PURE__*/React.createElement("div", {
           key: key++,
           style: {
             height: 6
           }
         }));
       } else {
-        elements.push( /*#__PURE__*/React.createElement("div", {
+        elements.push(/*#__PURE__*/React.createElement("div", {
           key: key++,
           style: {
             fontSize: 12.5,
@@ -18408,9 +17551,6 @@ const TABS = {
   fund: [{
     id: 'fund',
     l: 'Bank Balance'
-  }, {
-    id: 'reconcile',
-    l: 'Reconciliation'
   }],
   expense: [{
     id: 'expense',
@@ -18478,7 +17618,6 @@ Object.entries(TABS).forEach(([root, tabs]) => tabs.forEach(t => {
 const PT = {
   dashboard: 'Dashboard',
   fund: 'Bank Balance Sheet',
-  reconcile: 'Reconciliation',
   pnl: 'P & L Statement',
   expense: 'Expense Tracker',
   invtracker: 'Investment Tracker',
@@ -19003,8 +18142,6 @@ function App() {
     switch (pg) {
       case 'dashboard':
         return /*#__PURE__*/React.createElement(PageDashboard, p);
-      case 'reconcile':
-        return /*#__PURE__*/React.createElement(PageReconcile, p);
       case 'fund':
         return /*#__PURE__*/React.createElement(PageFund, p);
       case 'pnl':
@@ -19670,7 +18807,7 @@ function App() {
     }, item.icon), item.l);
   }))));
 }
-ReactDOM.createRoot(document.getElementById('root')).render( /*#__PURE__*/React.createElement(Boundary, null, /*#__PURE__*/React.createElement(App, null)));
+ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(Boundary, null, /*#__PURE__*/React.createElement(App, null)));
 /*__APP_END__*/</script>
 <div id="gfooter" style="position:fixed;bottom:0;left:var(--sb);right:0;background:#0f172a;color:#94a3b8;font-size:10.5px;font-family:'Plus Jakarta Sans',sans-serif;padding:6px 20px;display:flex;align-items:center;justify-content:space-between;z-index:150;border-top:1px solid #1e293b;">
   <span>© 2024–2026 <strong style="color:#fff">Vipin Nair</strong> · MiyeeCFO · All Rights Reserved</span>
