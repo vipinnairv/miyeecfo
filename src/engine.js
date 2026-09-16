@@ -260,9 +260,318 @@ function computeFin(data,months){
 }
 // Memoised so a keystroke elsewhere doesn't re-run every reduce on the dashboard.
 
+
+/* ══════════════════════════════════════
+   CFO ENGINE
+   Five questions a finance app usually leaves you to work out yourself.
+   All pure functions of `data`, so the UI can run them on a hypothetical
+   copy just as easily as on your real books.
+══════════════════════════════════════ */
+
+// Assumed yields when you have not entered one. Deliberately conservative:
+// overstating what an asset earns would hide a negative carry, which is the
+// one thing this analysis exists to find.
+const DEFAULT_YIELD={fd:7,bank:3,cash:0,wallet:0};
+
+/* ── 1. NEGATIVE CARRY ──────────────────────────────────────────────
+   Money that earns less than your debt costs is money you are paying to
+   keep. Holding a deposit at 7% against a loan at 12.36% is not caution,
+   it is a 5.36% annual fee for the comfort of a bigger balance. This ranks
+   every asset against every debt and prices the overlap. */
+function computeCarry(data){
+  const {accounts=[],loans=[],creditCards=[]}=data;
+  const assets=accounts
+    .filter(a=>(a.balance||0)>0)
+    .map(a=>({id:a.id,name:a.name,type:a.type,amount:a.balance,
+      rate:a.rate===null||a.rate===undefined||a.rate===''?(DEFAULT_YIELD[a.type]||0):+a.rate,
+      assumed:a.rate===null||a.rate===undefined||a.rate===''}))
+    .sort((x,y)=>x.rate-y.rate);   // cheapest money to redeploy first
+  // Overdrafts are debt wearing an account's clothes. Rate unknown, so they
+  // are listed but never priced, rather than silently valued at zero.
+  const overdrafts=accounts.filter(a=>(a.balance||0)<0)
+    .map(a=>({id:a.id,name:a.name,amount:-a.balance}));
+  const debts=loans.filter(l=>(l.outstanding||0)>0)
+    .map(l=>({id:l.id,name:`${l.bank} ${l.type}`,amount:l.outstanding,rate:+l.roi||0,kind:'loan'}))
+    .sort((x,y)=>y.rate-x.rate);   // most expensive debt killed first
+
+  const liquidAssets=assets.reduce((s,a)=>s+a.amount,0);
+  const totalDebt=debts.reduce((s,d)=>s+d.amount,0);
+
+  // Greedy match: cheapest-yielding rupee against dearest debt. That pairing
+  // maximises the spread, so it is the best case available to you.
+  const pool=assets.map(a=>({...a,left:a.amount}));
+  const pairs=[];let annualGain=0,deployed=0;
+  for(const d of debts){
+    let need=d.amount;
+    for(const a of pool){
+      if(need<=0)break;
+      if(a.left<=0||a.rate>=d.rate)continue;   // no spread, no gain
+      const use=Math.min(a.left,need);
+      const spread=d.rate-a.rate;
+      const gain=use*spread/100;
+      pairs.push({from:a.name,fromRate:a.rate,assumed:a.assumed,to:d.name,toRate:d.rate,
+        amount:use,spread:+spread.toFixed(2),annualGain:Math.round(gain)});
+      a.left-=use;need-=use;annualGain+=gain;deployed+=use;
+    }
+  }
+  const idle=pool.reduce((s,a)=>s+a.left,0);
+  // Credit limit you are not using. Not an asset, but it is liquidity you can
+  // reach in a day, which changes how much cash you need to sit on.
+  const unusedCredit=creditCards.reduce((s,c)=>s+Math.max(0,(c.limit||0)-(c.payable||0)-(c.provision||0)),0);
+
+  return{assets,debts,overdrafts,pairs,
+    annualGain:Math.round(annualGain),monthlyGain:Math.round(annualGain/12),
+    deployed,idle,liquidAssets,totalDebt,unusedCredit,
+    worthDoing:annualGain>=1000};
+}
+
+/* ── 2. SURVIVAL TIMELINE ───────────────────────────────────────────
+   "Runway: 8 months" assumes one undifferentiated pot. Real money runs out
+   in an order: spending cash, then current accounts, then deposits you have
+   to break. This walks the calendar forward and dates each of those. */
+function survivalTimeline(data,fin,opts){
+  const o=opts||{};
+  const monthlyIn=o.monthlyIncome!==undefined?o.monthlyIncome:(fin.avgMonthlyInc||0);
+  const monthlyOut=(o.monthlyExpense!==undefined?o.monthlyExpense:(fin.avgMonthlyExp||0))+(fin.totalEmi||0);
+  const net=monthlyIn-monthlyOut;
+  const {accounts=[]}=data;
+  // Liquidation order: what you would actually spend first.
+  const rank={cash:0,wallet:1,bank:2,fd:3};
+  const tiers=accounts.filter(a=>(a.balance||0)>0)
+    .map(a=>({name:a.name,type:a.type,amount:a.balance,rank:rank[a.type]===undefined?2:rank[a.type]}))
+    .sort((x,y)=>x.rank-y.rank||x.amount-y.amount);
+  const total=tiers.reduce((s,t)=>s+t.amount,0);
+
+  const events=[];
+  if(net>=0)return{net,monthlyIn,monthlyOut,total,events,monthsLeft:Infinity,solvent:true};
+
+  const burn=-net;const start=new Date();let spent=0;
+  for(const t of tiers){
+    spent+=t.amount;
+    const months=spent/burn;
+    const d=new Date(start);d.setMonth(d.getMonth()+Math.floor(months));
+    events.push({name:t.name,type:t.type,amount:t.amount,
+      monthsOut:+months.toFixed(1),date:d.toISOString().slice(0,10),
+      cumulative:spent});
+  }
+  return{net,monthlyIn,monthlyOut,burn,total,events,
+    monthsLeft:+(total/burn).toFixed(1),
+    zeroDate:events.length?events[events.length-1].date:null,
+    solvent:false};
+}
+
+/* ── 3. GOAL REALITY ────────────────────────────────────────────────
+   A progress bar creeping from 0.2% to 0.3% is a lie of omission. This
+   inverts the arithmetic: at what you actually contribute, when do you
+   arrive, and what would it take to arrive on time. */
+function goalReality(goal,txs,nowRef){
+  const saved=goalSaved(goal,txs);
+  const target=+goal.targetAmount||0;
+  const mine=(txs||[]).filter(t=>t.goalId===goal.id);
+  // Actual run rate, measured from your own contributions rather than from
+  // the amount you once said you would invest.
+  const dates=mine.map(t=>t.date).filter(Boolean).sort();
+  const monthsSeen=[...new Set(mine.map(t=>t.month||(t.date||'').slice(0,7)))].filter(Boolean);
+  // One contribution in one month is not a run rate. Dividing by a single
+  // month would read a lump sum as a monthly habit and call a hopeless goal
+  // comfortably on track, which is exactly the flattery this is meant to end.
+  const enoughHistory=monthsSeen.length>=2;
+  let monthsActive=1;
+  if(dates.length>1){
+    const a=new Date(dates[0]),b=new Date(dates[dates.length-1]);
+    monthsActive=Math.max(1,(b.getFullYear()-a.getFullYear())*12+(b.getMonth()-a.getMonth())+1);
+  }
+  const actualMonthly=enoughHistory?mine.reduce((s,t)=>s+(t.amount||0),0)/monthsActive:0;
+  const rate=(goal.instruments||[]).length
+    ? (goal.instruments.reduce((s,i)=>s+(+i.returnRate||0),0)/goal.instruments.length)
+    : 0;
+  const r=rate/100/12;
+  const gap=Math.max(0,target-saved);
+  const now=nowRef||new Date();
+  const targetDate=goal.targetDate?new Date(goal.targetDate):null;
+  const monthsToTarget=targetDate&&isFinite(targetDate)
+    ? Math.max(0,(targetDate.getFullYear()-now.getFullYear())*12+(targetDate.getMonth()-now.getMonth()))
+    : null;
+
+  // Monthly contribution needed to close the gap by the target date, given
+  // compounding. Falls back to plain division at a zero return rate.
+  let requiredMonthly=null;
+  if(monthsToTarget&&monthsToTarget>0){
+    const grown=saved*Math.pow(1+r,monthsToTarget);
+    const need=Math.max(0,target-grown);
+    requiredMonthly=r>0?need*r/(Math.pow(1+r,monthsToTarget)-1):need/monthsToTarget;
+    requiredMonthly=Math.round(requiredMonthly);
+  }
+  // At your real pace, how long until you get there.
+  let monthsAtCurrent=null;
+  if(enoughHistory&&actualMonthly>0&&gap>0){
+    if(r>0){
+      const num=Math.log((target*r+actualMonthly)/(saved*r+actualMonthly));
+      monthsAtCurrent=num>0?Math.round(num/Math.log(1+r)):0;
+    }else monthsAtCurrent=Math.round(gap/actualMonthly);
+  }
+  const arrivalYear=monthsAtCurrent!==null&&isFinite(monthsAtCurrent)
+    ? now.getFullYear()+Math.floor((now.getMonth()+monthsAtCurrent)/12) : null;
+  const shortfall=requiredMonthly!==null?Math.round(requiredMonthly-actualMonthly):null;
+
+  return{saved,target,gap,pct:target>0?saved/target*100:0,
+    actualMonthly:Math.round(actualMonthly),rate,requiredMonthly,shortfall,
+    monthsToTarget,monthsAtCurrent,arrivalYear,enoughHistory,contributions:mine.length,
+    onTrack:enoughHistory&&requiredMonthly!==null&&actualMonthly>=requiredMonthly,
+    stalled:enoughHistory&&actualMonthly<=0&&gap>0};
+}
+
+/* ── 4. RECURRING RADAR ─────────────────────────────────────────────
+   Subscriptions do not announce themselves; they just show up every month
+   at roughly the same price. This finds them in the ledger you already
+   have, and prices them per YEAR, because people decide differently about
+   "₹750" than about "₹9,000 a year". */
+function detectRecurring(transactions,opts){
+  const o=opts||{};
+  const minHits=o.minHits||3;
+  const byMerchant={};
+  for(const t of (transactions||[])){
+    if(t.type!=='expense')continue;
+    const key=(t.merchant||'').trim();
+    if(!key||key.toUpperCase()==='NA')continue;   // unlabelled, nothing to learn
+    (byMerchant[key]=byMerchant[key]||[]).push(t);
+  }
+  const found=[];
+  for(const name in byMerchant){
+    const txs=byMerchant[name].slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+    if(txs.length<minHits)continue;
+    const months=[...new Set(txs.map(t=>t.month||(t.date||'').slice(0,7)))].sort();
+    if(months.length<minHits)continue;            // three charges in one month is a habit, not a subscription
+    const amts=txs.map(t=>t.amount||0);
+    const total=amts.reduce((s,x)=>s+x,0);
+    const avg=total/amts.length;
+    const spread=Math.max(...amts)-Math.min(...amts);
+    // A steady price every month is a subscription. A bill that arrives every
+    // month for a different amount (electricity, gas) is just as committed but
+    // cannot be cancelled the same way, so it is labelled apart from both.
+    const steady=avg>0&&spread/avg<=0.25;
+    // Consecutive months is the other subscription tell.
+    let consecutive=1,best=1;
+    for(let i=1;i<months.length;i++){
+      const [y1,m1]=months[i-1].split('-').map(Number),[y2,m2]=months[i].split('-').map(Number);
+      if((y2-y1)*12+(m2-m1)===1){consecutive++;best=Math.max(best,consecutive);}else consecutive=1;
+    }
+    found.push({merchant:name,count:txs.length,months:months.length,monthsRun:best,
+      avg:Math.round(avg),total,annual:Math.round(avg*12),
+      category:txs[txs.length-1].category||'',
+      paymentMode:txs[txs.length-1].paymentMode||'',
+      kind:steady&&best>=minHits?'subscription':(best>=minHits?'variable':(steady?'regular':'habit')),
+      steady,lastDate:txs[txs.length-1].date});
+  }
+  found.sort((a,b)=>b.annual-a.annual);
+  const subs=found.filter(f=>f.kind==='subscription');
+  const variable=found.filter(f=>f.kind==='variable');
+  return{found,subscriptions:subs,variable,habits:found.filter(f=>f.kind==='habit'),
+    // Everything that arrives every month whether you decide on it or not.
+    annualCommitted:subs.concat(variable).reduce((s,f)=>s+f.annual,0),
+    annualSubscriptions:subs.reduce((s,f)=>s+f.annual,0)};
+}
+
+/* ── 5. INTEGRITY ───────────────────────────────────────────────────
+   Every money bug in this app has had one shape: a stored running total
+   drifting from the entries that are supposed to add up to it. Rather than
+   trust them, recompute each one and report the difference. A number that
+   can be checked stops being able to lie quietly. */
+function integrityCheck(data){
+  const {goals=[],investmentTxs=[],loans=[],transactions=[],accounts=[]}=data;
+  const issues=[];
+  for(const g of goals){
+    const derived=goalSaved(g,investmentTxs);
+    const stored=+g.currentAmount||0;
+    if(Math.abs(derived-stored)>1)
+      issues.push({kind:'goal',name:g.name,stored,derived,diff:stored-derived,fixable:true,
+        detail:'Saved amount does not match its logged contributions.'});
+  }
+  for(const l of loans){
+    // Only a BROKEN LINK is drift. Instalments recorded before the ledger
+    // existed carry no txId and are simply history, not corruption: counting
+    // them would cry wolf on every older book and, worse, offer a repair that
+    // cannot repair them.
+    const linked=(l.paidEmis||[]).filter(p=>p.txId);
+    const txIds=new Set(transactions.filter(t=>t.type==='emi').map(t=>t.id));
+    const dangling=linked.filter(p=>!txIds.has(p.txId)).length;
+    if(dangling)
+      issues.push({kind:'loan',name:`${l.bank} ${l.type}`,stored:linked.length,derived:linked.length-dangling,
+        diff:dangling,fixable:true,
+        detail:'Instalments marked paid whose ledger entry has been deleted.'});
+    const emiTx=transactions.filter(t=>t.type==='emi'&&t.loanId===l.id);
+    const paidTxIds=new Set((l.paidEmis||[]).map(p=>p.txId).filter(Boolean));
+    const stray=emiTx.filter(t=>!paidTxIds.has(t.id)).length;
+    if(stray&&linked.length)
+      issues.push({kind:'loan',name:`${l.bank} ${l.type}`,stored:emiTx.length,derived:emiTx.length-stray,
+        diff:stray,fixable:false,
+        detail:'Ledger entries for instalments the loan no longer lists as paid.'});
+  }
+  // Entries pointing at something that no longer exists.
+  const accIds=new Set(accounts.map(a=>a.id));
+  const orphanTx=transactions.filter(t=>t.accountId&&!accIds.has(t.accountId)).length;
+  if(orphanTx)issues.push({kind:'orphan',name:'Transactions',stored:orphanTx,derived:0,diff:orphanTx,fixable:true,
+    detail:'Entries reference an account that has been deleted.'});
+  const goalIds=new Set(goals.map(g=>g.id));
+  const orphanInv=investmentTxs.filter(t=>t.goalId&&!goalIds.has(t.goalId)).length;
+  if(orphanInv)issues.push({kind:'orphan',name:'Contributions',stored:orphanInv,derived:0,diff:orphanInv,fixable:true,
+    detail:'Contributions reference a goal that has been deleted.'});
+
+  const checked=goals.length+loans.length+2;
+  return{issues,clean:issues.length===0,checked,
+    // Only claim a repair when one exists. An unfixable finding is still worth
+    // showing; offering a button that cannot help would be worse than silence.
+    fixable:issues.filter(i=>i.fixable).length,
+    score:checked>0?Math.round((checked-issues.length)/checked*100):100};
+}
+
+/* ── 6. SCENARIOS ───────────────────────────────────────────────────
+   computeFin is a pure function of `data`, so a hypothetical costs nothing
+   more than a copy. This is the whole "what if" feature: mutate a clone,
+   run the same engine, diff the answers. No separate projection code to
+   drift out of step with the real one. */
+function applyScenario(data,sc){
+  const d=JSON.parse(JSON.stringify(data));
+  if(!sc)return d;
+  if(sc.prepay&&sc.prepay.amount>0){
+    const amt=+sc.prepay.amount;
+    const loan=d.loans.find(l=>l.id===sc.prepay.loanId)||d.loans[0];
+    const acct=d.accounts.find(a=>a.id===sc.prepay.accountId)||d.accounts.find(a=>a.balance>=amt);
+    if(loan)loan.outstanding=Math.max(0,loan.outstanding-amt);
+    if(acct)acct.balance-=amt;
+  }
+  if(sc.incomeDelta)for(const t of d.transactions)if(t.type==='income')t.amount+=sc.incomeDelta;
+  if(sc.expenseDelta){
+    // Spread proportionally so one category does not absorb the whole change.
+    const exp=d.transactions.filter(t=>t.type==='expense');
+    const tot=exp.reduce((s,t)=>s+t.amount,0);
+    if(tot>0)for(const t of exp)t.amount=Math.max(0,t.amount+sc.expenseDelta*(t.amount/tot));
+  }
+  if(sc.extraSip&&sc.extraSip>0&&d.goals.length){
+    const g=d.goals.find(x=>x.id===sc.goalId)||d.goals[0];
+    const inst=(g.instruments||[])[0];
+    if(inst)d.investmentTxs.push({id:'sc_'+Math.random().toString(36).slice(2),
+      goalId:g.id,instrumentId:inst.id,amount:sc.extraSip,
+      date:new Date().toISOString().slice(0,10),month:monthKey(new Date()),
+      paymentMode:'NEFT/Bank Transfer',units:0});
+  }
+  return d;
+}
+
+// What changed, and did it help. Signed so the UI never has to guess.
+function scenarioDiff(base,alt){
+  const keys=['netWorth','liquidNetWorth','totalExp','surplus','cashBalance',
+    'liabilities','loanOS','totalEmi','monthlyInterestCost','liquidRunway','fundRunway'];
+  const out={};
+  for(const k of keys)out[k]={base:base[k],alt:alt[k],delta:(alt[k]||0)-(base[k]||0)};
+  return out;
+}
+
 /* Node test hook. In the browser `module` is undefined, so this is skipped and
    the file behaves as a plain concatenated script. */
 if(typeof module!=='undefined'&&module.exports){
   module.exports={INSTR_COLOR,INSTR_BG,computeFin,instrValueFromTxs,xirr,xirrFromTxs,goalSaved,
-    isUnitType,instrPrice,monthKey,UNIT_TYPES};
+    isUnitType,instrPrice,monthKey,UNIT_TYPES,
+    computeCarry,survivalTimeline,goalReality,detectRecurring,integrityCheck,
+    applyScenario,scenarioDiff,DEFAULT_YIELD};
 }
