@@ -553,394 +553,11 @@ function PmCard({pmMap,totalExp}){
 
 const PAYMENT_MODES=['Credit Card','UPI','NEFT/Bank Transfer','Cash','Debit Card','Wallet'];
 const pmClass=m=>{if(!m)return'tx';const l=m.toLowerCase();if(l.includes('credit'))return'pm-cc';if(l.includes('upi'))return'pm-upi';if(l.includes('neft')||l.includes('bank'))return'pm-neft';if(l.includes('cash'))return'pm-cash';if(l.includes('debit'))return'pm-dc';if(l.includes('wallet'))return'pm-wallet';return'tx';};
-
-/* ══════════════════════════════════════
-   FINANCIAL ENGINE: single source of truth
-   Every page derives its numbers from here so that
-   "Net Worth" means exactly one thing app-wide.
-══════════════════════════════════════ */
-const monthKey=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-
-/* ── Investment instrument valuation ──────────────────────────────
-   Unit-based holdings are worth what the market says today: units held
-   times the latest price you enter. Everything else (RD/FD/PPF) has no
-   quoted price, so it falls back to a modelled compound growth.
-   New types (Equity, Crypto) join the unit-based family. Their "NAV" is
-   just a share or coin price; enter it in your own reporting currency. */
-const UNIT_TYPES=['SIP','Mutual Fund','Equity (India)','Equity (US)','Crypto'];
-const isUnitType=t=>UNIT_TYPES.includes(t);
-// What the price field is called for a given type.
-const priceLabel=t=>(t==='SIP'||t==='Mutual Fund')?'NAV':'Price';
-const unitLabel=t=>t==='Crypto'?'Coins':(t==='Equity (India)'||t==='Equity (US)')?'Shares':'Units';
-// Latest price on file for an instrument, if any.
-const instrPrice=i=>i&&(i.currentNAV||i.lastBuyNAV)||0;
-/* Value of one instrument's logged contributions as of today.
-   Preference order:
-     1. unit-based with a latest price and units held → units × latest price
-     2. otherwise → each contribution compounded from its own date at the
-        instrument's modelled return rate.
-   Returns {value, invested, units, priced} so callers can show which basis
-   was used. */
-function instrValueFromTxs(instr,txs){
-  const invested=txs.reduce((s,t)=>s+(t.amount||0),0);
-  // Units come only from what you actually logged as contributions. A plan's
-  // "units held" field never creates value on its own, so an instrument you have
-  // not funded is worth nothing here.
-  const units=txs.reduce((s,t)=>s+(t.units||0),0);
-  const px=instrPrice(instr);
-  if(instr&&isUnitType(instr.type)&&px>0&&units>0){
-    return{value:units*px,invested,units,priced:true};
-  }
-  const r=(instr&&instr.returnRate||0)/100/12,now=Date.now();
-  const value=txs.reduce((sum,t)=>{
-    const mo=Math.max(0,(now-new Date(t.date).getTime())/(86400000*30.44));
-    return sum+(t.amount||0)*(r>0?Math.pow(1+r,mo):1);
-  },0);
-  return{value,invested,units,priced:false};
-}
-
-/* XIRR: the money-weighted annual return that discounts every dated cashflow
-   back to zero. Contributions are outflows (negative), today's value is one
-   inflow (positive). Solved by bisection, which always converges for a normal
-   invest-then-value profile. Returns a percentage, or null when it cannot be
-   defined (no flows, no time elapsed, or no sign change). */
-function xirr(flows){
-  if(!flows||flows.length<2)return null;
-  const t0=Math.min(...flows.map(f=>+new Date(f.date)));
-  const yrs=f=>(+new Date(f.date)-t0)/(365*86400000);
-  const hasPos=flows.some(f=>f.amount>0),hasNeg=flows.some(f=>f.amount<0);
-  if(!hasPos||!hasNeg)return null;
-  const npv=rate=>flows.reduce((s,f)=>s+f.amount/Math.pow(1+rate,yrs(f)),0);
-  let lo=-0.9999,hi=100;
-  if(npv(lo)*npv(hi)>0)return null;
-  for(let i=0;i<200;i++){
-    const mid=(lo+hi)/2,v=npv(mid);
-    if(Math.abs(v)<1e-6)return mid*100;
-    (npv(lo)*v<0?hi=mid:lo=mid);
-  }
-  return (lo+hi)/2*100;
-}
-// XIRR from a set of contributions plus the value they are worth today.
-const xirrFromTxs=(txs,valueToday)=>{
-  if(!txs.length||valueToday<=0)return null;
-  const flows=txs.map(t=>({amount:-(t.amount||0),date:t.date}));
-  flows.push({amount:valueToday,date:new Date().toISOString().slice(0,10)});
-  return xirr(flows);
-};
-
-function computeFin(data,months){
-  const {transactions=[],accounts=[],creditCards=[],loans=[],budgetLimits={},expenseCategories=[],investmentTxs=[],goals=[]}=data;
-
-  // ── Balance sheet ──
-  const bankBal=accounts.filter(a=>a.type==='bank').reduce((s,a)=>s+a.balance,0);
-  const cashBal=accounts.filter(a=>a.type==='cash'||a.type==='wallet').reduce((s,a)=>s+a.balance,0);
-  const fdBal=accounts.filter(a=>a.type==='fd').reduce((s,a)=>s+a.balance,0);
-  const liquid=bankBal+cashBal;
-  const assets=liquid+fdBal;
-  const ccPay=creditCards.reduce((s,c)=>s+c.payable,0);
-  const ccProv=creditCards.reduce((s,c)=>s+c.provision,0);
-  const ccLiab=ccPay+ccProv;
-  const totalLimit=creditCards.reduce((s,c)=>s+c.limit,0);
-  const ccUtil=totalLimit>0?ccLiab/totalLimit*100:0;
-  const loanOS=loans.reduce((s,l)=>s+l.outstanding,0);
-  const provTotal=(data.provisions||[]).filter(p=>!p.paid).reduce((s,p)=>s+p.amount,0);
-  const liabilities=ccLiab+loanOS+provTotal;
-  // Liquid assets only, net of every liability. Investments are deliberately absent:
-  // this is the figure the runway and fund-balance cards are built on.
-  const liquidNetWorth=assets-liabilities;
-
-  // ── Period flows (single pass; months lookup is a Set) ──
-  const mSet=new Set(months.map(m=>m.key));
-  const periodTxs=transactions.filter(t=>mSet.has(t.month));
-  let totalInc=0,totalExp=0;
-  const incByMonth={},expByMonth={},catMap={},merchantMap={},merchantCnt={},pmMap={};
-  for(const t of periodTxs){
-    if(t.type==='income'){totalInc+=t.amount;incByMonth[t.month]=(incByMonth[t.month]||0)+t.amount;}
-    else if(t.type==='expense'){
-      totalExp+=t.amount;expByMonth[t.month]=(expByMonth[t.month]||0)+t.amount;
-      catMap[t.category]=(catMap[t.category]||0)+t.amount;
-      if(t.merchant){merchantMap[t.merchant]=(merchantMap[t.merchant]||0)+t.amount;merchantCnt[t.merchant]=(merchantCnt[t.merchant]||0)+1;}
-      const pm=t.paymentMode||'Unknown';pmMap[pm]=(pmMap[pm]||0)+t.amount;
-    }
-  }
-  const surplus=totalInc-totalExp;
-  const savingsRate=totalInc>0?surplus/totalInc*100:0;
-  const mInc=months.map(m=>incByMonth[m.key]||0);
-  const mExp=months.map(m=>expByMonth[m.key]||0);
-
-  // ── Investments ──────────────────────────────────────────────
-  // Money you put into an instrument is not spending, so it never touches `totalExp`.
-  // It leaves your cash though, which is why the P&L waterfall carries on past the
-  // surplus:  Income − Expense = Surplus − Investments = Balance Cash.
-  // The same money does not vanish. It reappears on the balance sheet as `invCorpus`,
-  // grown from each contribution's own date at its instrument's rate, and lands in
-  // net worth as an asset.
-  const instrById={};
-  for(const g of goals)for(const i of (g.instruments||[]))instrById[i.id]=i;
-  const invMonthOf=t=>t.month||(t.date||'').slice(0,7);
-  const invByMonth={};
-  let invTotal=0,invPeriod=0,invCorpus=0;
-  const txsByInstr={};
-  for(const t of investmentTxs){
-    const amt=t.amount||0;
-    invTotal+=amt;
-    const k=invMonthOf(t);
-    if(mSet.has(k)){invPeriod+=amt;invByMonth[k]=(invByMonth[k]||0)+amt;}
-    (txsByInstr[t.instrumentId||'?']=txsByInstr[t.instrumentId||'?']||[]).push(t);
-  }
-  // Value only instruments you have actually funded (a logged contribution).
-  // See instrValueFromTxs for the exact rule.
-  for(const id in txsByInstr)invCorpus+=instrValueFromTxs(instrById[id],txsByInstr[id]).value;
-  const invGain=invCorpus-invTotal;
-  const mInv=months.map(m=>invByMonth[m.key]||0);
-  // What is genuinely left over once the money you committed to investing is set aside.
-  const cashBalance=surplus-invPeriod;
-  const investRate=totalInc>0?invPeriod/totalInc*100:0;
-  // THE canonical figure. Liquid net worth plus what your investments are worth today.
-  const netWorth=liquidNetWorth+invCorpus;
-
-  // ── Elapsed basis ── how much of the period has actually happened.
-  // Everything time-normalised (budgets, averages) MUST use this, never months.length,
-  // otherwise part-year spend gets compared against a full-year allowance.
-  const nowKey=monthKey(new Date());
-  const elapsedMonths=Math.min(months.length,Math.max(1,months.filter(m=>m.key<=nowKey).length));
-  const startDate=months.length?new Date(months[0].key+'-01'):new Date();
-  const [ey,em]=(months.length?months[months.length-1].key:nowKey).split('-').map(Number);
-  const endDate=new Date(ey,em,0); // last day of final month
-  const effectiveDate=new Date(Math.min(Date.now(),endDate.getTime()));
-  const daysElapsed=Math.max(1,Math.round((effectiveDate-startDate)/86400000));
-  const avgDailyBurn=totalExp/daysElapsed;
-  const avgMonthlyInc=totalInc/daysElapsed*30;
-  const avgMonthlyExp=totalExp/daysElapsed*30;
-  const cashSurplus=avgMonthlyInc-avgMonthlyExp;
-
-  // ── Budget, pro-rated to elapsed months ──
-  const budgetMonthly=expenseCategories.reduce((s,c)=>s+(budgetLimits[c]||0),0);
-  const budgetToDate=budgetMonthly*elapsedMonths;   // fair comparison vs totalExp
-  const budgetFullPeriod=budgetMonthly*months.length; // informational only
-  const budgetPct=budgetToDate>0?totalExp/budgetToDate*100:0;
-
-  // ── Liability tenure classification (the 12-month rule) ──
-  // A liability is SHORT TERM if it falls due within the next 12 months.
-  //  · Credit cards  are always short term by nature
-  //  · Overdraft     is a bank account with a negative balance; already inside `liquid`
-  //  · Loans         are short term only when they finish inside the window
-  //  · Expected future outflows are short term when their expected month is inside it
-  const horizon=new Date();horizon.setMonth(horizon.getMonth()+12);
-  const horizonKey=`${horizon.getFullYear()}-${String(horizon.getMonth()+1).padStart(2,'0')}`;
-  const isShortTermLoan=l=>{
-    if(!l.endDate)return false;                    // open-ended → treat as long term
-    const end=new Date(l.endDate);
-    return isFinite(end)&&end<=horizon;
-  };
-  const shortTermLoans=loans.filter(isShortTermLoan);
-  const longTermLoans=loans.filter(l=>!isShortTermLoan(l));
-  const shortTermLoanOS=shortTermLoans.reduce((s,l)=>s+(l.outstanding||0),0);
-  const longTermLoanOS=longTermLoans.reduce((s,l)=>s+(l.outstanding||0),0);
-  // Overdrafts, broken out for display only. They already reduce `bankBal`.
-  const odBal=Math.abs(accounts.filter(a=>a.type==='bank'&&a.balance<0).reduce((s,a)=>s+a.balance,0));
-  // Expected future outflows landing inside the window
-  const provShortTerm=(data.provisions||[]).filter(p=>!p.paid&&(p.month||'')<=horizonKey).reduce((s,p)=>s+p.amount,0);
-  const shortTermLiab=ccLiab+shortTermLoanOS+provShortTerm;
-  // THE figure: what your funds cover once only near-term obligations are netted off.
-  // Long-term loan principal is deliberately excluded. It is not due yet.
-  const fundBalExclLTL=assets-shortTermLiab;
-  // For context: the slice of long-term debt that *is* payable in the next 12 months.
-  const ltCurrentPortion=longTermLoans.reduce((s,l)=>s+Math.min((l.emi||0)*12,l.outstanding||0),0);
-
-  // ── Loans ──
-  const totalEmi=loans.reduce((s,l)=>s+(l.emi||0),0);
-  const monthlyInterestCost=loans.reduce((s,l)=>s+(l.outstanding||0)*((l.roi||0)/100/12),0);
-  const monthlyPrincipalRepaid=Math.max(0,totalEmi-monthlyInterestCost);
-  const monthlyNWGrowth=cashSurplus+monthlyPrincipalRepaid;
-  const emiRatio=avgMonthlyInc>0?totalEmi/avgMonthlyInc*100:0;
-
-  // ── Runway ──
-  const burnRate=avgDailyBurn*30;
-  const liquidRunway=burnRate>0?liquid/burnRate:99;
-  const fundRunway=burnRate>0?assets/burnRate:99;
-
-  // ── Month-over-month deltas (last two COMPLETE months) ──
-  const completed=months.filter(m=>m.key<nowKey);
-  const lastM=completed[completed.length-1],prevM=completed[completed.length-2];
-  const mom=(map)=>{
-    if(!lastM||!prevM)return null;
-    const cur=map[lastM.key]||0,prv=map[prevM.key]||0;
-    if(prv===0)return null;
-    return{pct:(cur-prv)/Math.abs(prv)*100,cur,prv,label:lastM.label};
-  };
-  const momInc=mom(incByMonth),momExp=mom(expByMonth);
-
-  return{
-    bankBal,cashBal,fdBal,liquid,assets,ccPay,ccProv,ccLiab,totalLimit,ccUtil,
-    loanOS,provTotal,liabilities,netWorth,liquidNetWorth,
-    invTotal,invPeriod,invCorpus,invGain,mInv,cashBalance,investRate,
-    shortTermLoans,longTermLoans,shortTermLoanOS,longTermLoanOS,odBal,
-    provShortTerm,shortTermLiab,fundBalExclLTL,ltCurrentPortion,
-    periodTxs,totalInc,totalExp,surplus,savingsRate,mInc,mExp,
-    catMap,merchantMap,merchantCnt,pmMap,
-    elapsedMonths,daysElapsed,avgDailyBurn,burnRate,avgMonthlyInc,avgMonthlyExp,cashSurplus,
-    budgetMonthly,budgetToDate,budgetFullPeriod,budgetPct,
-    totalEmi,monthlyInterestCost,monthlyPrincipalRepaid,monthlyNWGrowth,emiRatio,
-    liquidRunway,fundRunway,momInc,momExp,
-  };
-}
-// Memoised so a keystroke elsewhere doesn't re-run every reduce on the dashboard.
+/* The pure financial engine lives in src/engine.js and is concatenated ahead
+   of this file by the build. These two hooks memoise it for React. */
 const useFin=(data,months)=>useMemo(()=>computeFin(data,months),[data,months]);
-
-/* ══════════════════════════════════════
-   RECONCILIATION ENGINE
-   Answers one question: does the money you have recorded moving
-   agree with the balances you say you hold?
-
-     Opening + Money In − Money Out = Expected Closing
-     Expected Closing vs Actual Balance = the difference to explain
-
-   Transactions carry a payment mode, not an account id, so the check runs
-   per FUND TYPE (bank / cash / wallet) rather than per account. Fixed
-   deposits are excluded. They move by maturity and transfer, not by
-   day-to-day spending, so folding them in would only add noise.
-══════════════════════════════════════ */
-
-// Which pot a payment mode draws on. Credit Card is deliberately absent:
-// spending on a card creates a liability, it does not move your own cash
-// until the bill is paid.
-const FUND_OF_MODE={
-  'NEFT/Bank Transfer':'bank',
-  'UPI':'bank',
-  'Debit Card':'bank',
-  'Cash':'cash',
-  'Wallet':'wallet',
-};
-const FUND_BUCKETS=[
-  {key:'bank',  label:'Bank',          types:['bank'],   modes:['NEFT/Bank Transfer','UPI','Debit Card']},
-  {key:'cash',  label:'Cash In Hand',  types:['cash'],   modes:['Cash']},
-  {key:'wallet',label:'Digital Wallet',types:['wallet'], modes:['Wallet']},
-];
-
-function computeReconciliation(data,months){
-  const {accounts=[],transactions=[],investmentTxs=[]}=data;
-  const mSet=new Set(months.map(m=>m.key));
-  const monthOf=t=>t.month||(t.date||'').slice(0,7);
-
-  const blank=()=>({inflow:0,outflow:0,invested:0,inCount:0,outCount:0,invCount:0,byMode:{}});
-  const mv={};FUND_BUCKETS.forEach(b=>{mv[b.key]=blank();});
-  // Movements that never touch your own funds, tracked so the page can say so.
-  let ccSpend=0,ccCount=0;
-  // Anything whose payment mode is missing or unrecognised: the reason a
-  // reconciliation fails to balance more often than not.
-  const unclassified=[];
-  let unclassifiedIn=0,unclassifiedOut=0;
-
-  const note=(bucket,kind,mode,amt)=>{
-    const m=mv[bucket];if(!m)return;
-    m.byMode[mode]=m.byMode[mode]||{in:0,out:0,inv:0};
-    m.byMode[mode][kind]+=amt;
-  };
-
-  for(const t of transactions){
-    if(!mSet.has(monthOf(t)))continue;
-    const amt=t.amount||0;
-    // Self-transfer: money leaves one fund and lands in another. Net zero
-    // across your funds, but each bucket must see its side of the move.
-    if(t.type==='transfer'){
-      const fb=FUND_OF_MODE[t.paymentMode||''],tb=FUND_OF_MODE[t.transferTo||''];
-      if(fb){mv[fb].outflow+=amt;mv[fb].outCount++;note(fb,'out','Transfer out',amt);}
-      if(tb){mv[tb].inflow+=amt;mv[tb].inCount++;note(tb,'in','Transfer in',amt);}
-      if(!fb&&!tb){unclassified.push({...t,why:'Transfer with no recognised fund on either side'});}
-      continue;
-    }
-    if(t.type!=='income'&&t.type!=='expense')continue;
-    const mode=t.paymentMode||'';
-    if(mode==='Credit Card'){
-      // A card spend hits the card, not your cash. Income on a card is not a
-      // real thing, so only expenses are counted here.
-      if(t.type==='expense'){ccSpend+=amt;ccCount++;}
-      else{unclassified.push({...t,why:'Income marked as paid by credit card'});unclassifiedIn+=amt;}
-      continue;
-    }
-    const bucket=FUND_OF_MODE[mode];
-    if(!bucket){
-      unclassified.push({...t,why:mode?`Unrecognised payment mode "${mode}"`:'No payment mode recorded'});
-      if(t.type==='income')unclassifiedIn+=amt;else unclassifiedOut+=amt;
-      continue;
-    }
-    const m=mv[bucket];
-    if(t.type==='income'){m.inflow+=amt;m.inCount++;note(bucket,'in',mode,amt);}
-    else{m.outflow+=amt;m.outCount++;note(bucket,'out',mode,amt);}
-  }
-
-  // Investment contributions leave the fund they were paid from.
-  for(const t of investmentTxs){
-    if(!mSet.has(monthOf(t)))continue;
-    const amt=t.amount||0;
-    const mode=t.paymentMode||'NEFT/Bank Transfer';
-    const bucket=FUND_OF_MODE[mode];
-    if(!bucket){
-      unclassified.push({...t,type:'investment',category:'Investment contribution',
-        why:mode?`Unrecognised payment mode "${mode}"`:'No payment mode recorded'});
-      unclassifiedOut+=amt;continue;
-    }
-    mv[bucket].invested+=amt;mv[bucket].invCount++;note(bucket,'inv',mode,amt);
-  }
-
-  // ── Per-bucket reconciliation ──
-  const rows=FUND_BUCKETS.map(b=>{
-    const accs=accounts.filter(a=>b.types.includes(a.type));
-    const actual=accs.reduce((s,a)=>s+(a.balance||0),0);
-    const m=mv[b.key];
-    const net=m.inflow-m.outflow-m.invested;
-    // An account contributes to the opening figure only once someone has set one.
-    const withOpening=accs.filter(a=>a.opening!==null&&a.opening!==undefined);
-    const openingSet=accs.length>0&&withOpening.length===accs.length;
-    const opening=withOpening.reduce((s,a)=>s+(a.opening||0),0);
-    // With no opening on file, the ledger still tells you what it must have been.
-    const impliedOpening=actual-net;
-    const expected=opening+net;
-    const diff=actual-expected;
-    return{...b,accounts:accs,actual,opening,openingSet,impliedOpening,net,expected,diff,
-      partialOpening:withOpening.length>0&&withOpening.length<accs.length,
-      accountsWithout:accs.filter(a=>a.opening===null||a.opening===undefined),...m};
-  });
-
-  const tracked=rows.filter(r=>r.accounts.length>0);
-  const totals={
-    actual:tracked.reduce((s,r)=>s+r.actual,0),
-    opening:tracked.reduce((s,r)=>s+r.opening,0),
-    inflow:tracked.reduce((s,r)=>s+r.inflow,0),
-    outflow:tracked.reduce((s,r)=>s+r.outflow,0),
-    invested:tracked.reduce((s,r)=>s+r.invested,0),
-    net:tracked.reduce((s,r)=>s+r.net,0),
-  };
-  // Only buckets with an opening on file can produce a meaningful difference.
-  const reconcilable=tracked.filter(r=>r.openingSet);
-  totals.reconcilable=reconcilable.length;
-  totals.tracked=tracked.length;
-  totals.allChecked=tracked.length>0&&reconcilable.length===tracked.length;
-  // A second set of totals over the checked buckets alone. The verdict is stated in
-  // these, so every term of `opening + in − out − invested = expected vs actual`
-  // covers the same funds and the sum actually holds.
-  const sum=(rs,k)=>rs.reduce((s,r)=>s+r[k],0);
-  const checked={
-    opening:sum(reconcilable,'opening'),inflow:sum(reconcilable,'inflow'),
-    outflow:sum(reconcilable,'outflow'),invested:sum(reconcilable,'invested'),
-    expected:sum(reconcilable,'expected'),actual:sum(reconcilable,'actual'),
-    diff:sum(reconcilable,'diff'),
-  };
-  totals.expected=checked.expected;
-  totals.diff=checked.diff;
-
-  // A rupee or two of rounding is not a discrepancy worth chasing.
-  const TOL=1;
-  const balanced=reconcilable.length>0&&Math.abs(totals.diff)<=TOL;
-  const fdBal=accounts.filter(a=>a.type==='fd').reduce((s,a)=>s+(a.balance||0),0);
-
-  return{rows,tracked,totals,checked,balanced,tolerance:TOL,
-    unclassified,unclassifiedIn,unclassifiedOut,
-    ccSpend,ccCount,fdBal,
-    hasOpenings:reconcilable.length>0};
-}
 const useReconciliation=(data,months)=>useMemo(()=>computeReconciliation(data,months),[data,months]);
+
 
 /* ══════════════════════════════════════
    ACTION ENGINE: turns state into a short to-do list
@@ -1594,7 +1211,12 @@ function PageFund({data,setData,toast}){
     close();
   };
   const undoDel=makeUndoDelete(data,setData,toast);
-  const del=id=>undoDel('Account removed',d=>({...d,accounts:d.accounts.filter(a=>a.id!==id)}));
+  // Removing an account also drops it from the emergency fund, so no dangling
+  // reference is left behind silently shrinking your cover.
+  const del=id=>undoDel('Account removed',d=>({...d,
+    accounts:d.accounts.filter(a=>a.id!==id),
+    emergencyFund:{...(d.emergencyFund||{accountIds:[],targetMonths:6}),
+      accountIds:((d.emergencyFund||{}).accountIds||[]).filter(x=>x!==id)}}));
 
   const AccRow=({a})=>{
     const ini=a.name.split(/[\s–\-]/).filter(Boolean).map(w=>w[0]).slice(0,2).join('').toUpperCase();
@@ -1787,7 +1409,7 @@ function PageReconcile({data,setData,toast,setPage}){
           <div className="fg"><label>To</label><select value={xfer.to} onChange={e=>setXfer(x=>({...x,to:e.target.value}))}>{FUND_BUCKETS.map(b=><option key={b.key} value={b.key}>{b.label}</option>)}</select></div>
         </div>
         <div className="f2 mb2">
-          <div className="fg"><label>Amount ({CUR.sym})</label><input type="number" placeholder="0" value={xfer.amount} onChange={e=>setXfer(x=>({...x,amount:e.target.value}))}/></div>
+          <div className="fg"><label>Amount ({CUR.sym})</label><input type="number" min="0" placeholder="0" value={xfer.amount} onChange={e=>setXfer(x=>({...x,amount:e.target.value}))}/></div>
           <div className="fg"><label>Date</label><input type="date" value={xfer.date} onChange={e=>setXfer(x=>({...x,date:e.target.value}))}/></div>
         </div>
         <div className="fg"><label>Note (optional)</label><input value={xfer.notes} onChange={e=>setXfer(x=>({...x,notes:e.target.value}))} placeholder="e.g. ATM withdrawal"/></div>
@@ -1814,7 +1436,11 @@ function PageReconcile({data,setData,toast,setPage}){
               :r.balanced?(r.totals.allChecked?'Your books agree':'The funds you have checked agree')
               :'Your books do not agree'}
           </div>
-          <span className="tag tx" style={{fontSize:10}}>{r.totals.reconcilable} of {r.totals.tracked} fund types checked</span>
+          <span className={`tag ${r.totals.assumedZero>0?'to':'tx'}`} style={{fontSize:10}}>
+            {r.totals.assumedZero>0
+              ? `${r.totals.assumedZero} account${r.totals.assumedZero>1?'s':''} assumed to open at ${CUR.sym}0`
+              : `${r.totals.reconcilable} of ${r.totals.tracked} fund types checked`}
+          </span>
         </div>
         <div className="stl-row">
           <div className="stl-main">
@@ -1829,13 +1455,15 @@ function PageReconcile({data,setData,toast,setPage}){
                 : r.balanced
                 ? (r.totals.allChecked
                     ? <>Every recorded movement accounts for the balance you hold. Nothing is missing from your ledger.</>
-                    : <>The {r.totals.reconcilable} fund type{r.totals.reconcilable===1?'':'s'} you have given an opening
-                        balance reconcile exactly. Set openings on the remaining
-                        {' '}{r.tracked.filter(x=>!x.openingSet).map(x=>x.label).join(' and ')} to check
-                        {' '}{fmtINR(r.totals.actual-r.checked.actual,true)} more.</>)
+                    : <>Everything you have given an opening balance reconciles exactly.
+                        {' '}{r.totals.assumedZero} account{r.totals.assumedZero===1?'':'s'} still
+                        {' '}{r.totals.assumedZero===1?'has':'have'} no opening balance and
+                        {' '}{r.totals.assumedZero===1?'is':'are'} being treated as opening at {CUR.sym}0,
+                        so set {r.totals.assumedZero===1?'it':'them'} below to be sure.</>)
                 : <>{r.totals.diff>0
                     ? <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} more</strong> than your recorded transactions explain. Money came in that you have not logged.</>
                     : <>You hold <strong>{fmtINR(Math.abs(r.totals.diff),true)} less</strong> than your recorded transactions explain. Money went out that you have not logged.</>}
+                    {r.totals.assumedZero>0&&<> {r.totals.assumedZero} account{r.totals.assumedZero>1?'s':''} without an opening balance {r.totals.assumedZero>1?'are':'is'} treated as opening at {CUR.sym}0, so set {r.totals.assumedZero>1?'them':'it'} below if that is wrong.</>}
                   </>}
             </div>
           </div>
@@ -1893,7 +1521,10 @@ function PageReconcile({data,setData,toast,setPage}){
                       </div>
                     </td>
                     <td className="num">
-                      {row.openingSet?fmtINR(row.opening,true)
+                      {row.openingSet?<>{fmtINR(row.opening,true)}
+                          {!row.fullyCovered&&<div style={{fontSize:9,color:'var(--warn)',fontStyle:'italic'}}>
+                            {row.accountsWithout.length} at {CUR.sym}0
+                          </div>}</>
                         :<span style={{color:'var(--warn)',fontStyle:'italic'}}>{fmtINR(row.impliedOpening,true)} implied</span>}
                     </td>
                     <td className="num pos">{row.inflow?fmtINR(row.inflow,true):'–'}</td>
@@ -1927,8 +1558,7 @@ function PageReconcile({data,setData,toast,setPage}){
               <td className="num bold">{r.hasOpenings?fmtINR(r.totals.expected,true):'–'}</td>
               <td className="num bold" style={{color:'var(--b)'}}>{fmtINR(r.totals.actual,true)}</td>
               <td>{!r.hasOpenings?null
-                :r.totals.allChecked?<Diff v={r.totals.diff}/>
-                :<span className="tag tx">{r.totals.reconcilable} of {r.totals.tracked} checked</span>}</td>
+                :<Diff v={r.totals.diff}/>}</td>
             </tr></tfoot>
           </table>
         </div>
@@ -1955,7 +1585,7 @@ function PageReconcile({data,setData,toast,setPage}){
                   <div style={{fontSize:10.5,color:'var(--n400)'}}>Holds {fmtINR(a.balance,true)} today</div>
                 </span>
                 <span style={{display:'flex',alignItems:'center',gap:8}}>
-                  <input type="number" value={a.opening===null||a.opening===undefined?'':a.opening}
+                  <input type="number" min="0" value={a.opening===null||a.opening===undefined?'':a.opening}
                     onChange={e=>setOpening(a.id,e.target.value)}
                     placeholder="not set"
                     aria-label={`Opening balance for ${a.name}`}
@@ -2071,6 +1701,9 @@ function PageTx({data,setData,toast,type}){
 
   const save=()=>{
     if(!form.date||!form.category||!form.amount||isNaN(+form.amount))return;
+    // A minus sign here would silently flip a cost into income across every
+    // ratio downstream, so an amount must be positive.
+    if(!(+form.amount>0)){toast&&toast('Enter an amount greater than zero','r');return;}
     const month=form.date.slice(0,7);
     if(eid){
       setData(d=>({...d,transactions:d.transactions.map(t=>t.id===eid?{...t,...form,amount:+form.amount,month}:t)}));
@@ -2279,7 +1912,7 @@ function PageTx({data,setData,toast,type}){
             </select>
           </div>
           <div className="fg"><label>Amount ({CUR.sym})</label>
-            <input type="number" placeholder="0.00" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))}/>
+            <input type="number" min="0" placeholder="0.00" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))}/>
           </div>
           <button className="btn btn-p" onClick={save} style={{marginBottom:1}}><Ic n={eid?'ok':'plus'} s={13} c="#fff"/></button>
         </div>
@@ -2554,10 +2187,33 @@ function PageCC({data,setData,toast}){
   const undoDel=makeUndoDelete(data,setData,toast);
   const del=id=>undoDel('Card removed',d=>({...d,creditCards:d.creditCards.filter(c=>c.id!==id)}));
 
+  /* ── Pay a card bill ──────────────────────────────────────────────
+     Real money leaves a fund and the card's payable drops. It is recorded as
+     its own entry type, never an expense: the original card spend was already
+     the expense, so counting it again would double it. Reconciliation sees the
+     cash leave, which is what closes the usual unexplained bank gap. */
+  const PAY_MODES=PAYMENT_MODES.filter(m=>m!=='Credit Card');
+  const [pay,setPay]=useState(null);
+  const openPay=c=>setPay({cardId:c.id,bank:c.bank,type:c.type,max:c.payable,
+    amount:String(c.payable||''),date:new Date().toISOString().slice(0,10),paymentMode:'NEFT/Bank Transfer'});
+  const savePay=()=>{
+    const amt=+pay.amount;
+    if(!amt||amt<=0){toast('Enter an amount','r');return;}
+    const tx={id:uid(),type:'cardpay',cardId:pay.cardId,amount:amt,date:pay.date,
+      month:pay.date.slice(0,7),category:'Credit card bill',
+      desc:`${pay.bank} ${pay.type} bill payment`,paymentMode:pay.paymentMode,merchant:''};
+    setData(d=>({...d,
+      transactions:[...d.transactions,tx],
+      creditCards:d.creditCards.map(c=>c.id===pay.cardId?{...c,payable:Math.max(0,(c.payable||0)-amt)}:c)
+    }));
+    toast(`Paid ${fmtINR(amt,true)} · card cleared, cash recorded as leaving`,'g');
+    setPay(null);
+  };
+
   const CCForm=(<>
     <div className="f2 mb2"><div className="fg"><label>Bank Name</label><input value={form.bank} onChange={e=>setForm(f=>({...f,bank:e.target.value}))} placeholder="e.g. HDFC Bank"/></div><div className="fg"><label>Card Type / Network</label><input value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))} placeholder="e.g. Visa Infinite"/></div></div>
-    <div className="f2 mb2"><div className="fg"><label>Credit Limit ({CUR.sym})</label><input type="number" value={form.limit} onChange={e=>setForm(f=>({...f,limit:e.target.value}))}/></div><div className="fg"><label>Payment Due Date</label><input type="date" value={form.dueDate} onChange={e=>setForm(f=>({...f,dueDate:e.target.value}))}/></div></div>
-    <div className="f2"><div className="fg"><label>Billed Amount – Payable ({CUR.sym})</label><input type="number" value={form.payable} onChange={e=>setForm(f=>({...f,payable:e.target.value}))}/></div><div className="fg"><label>Unbilled – Not Yet Billed ({CUR.sym})</label><input type="number" value={form.provision} onChange={e=>setForm(f=>({...f,provision:e.target.value}))}/></div></div>
+    <div className="f2 mb2"><div className="fg"><label>Credit Limit ({CUR.sym})</label><input type="number" min="0" value={form.limit} onChange={e=>setForm(f=>({...f,limit:e.target.value}))}/></div><div className="fg"><label>Payment Due Date</label><input type="date" value={form.dueDate} onChange={e=>setForm(f=>({...f,dueDate:e.target.value}))}/></div></div>
+    <div className="f2"><div className="fg"><label>Billed Amount – Payable ({CUR.sym})</label><input type="number" min="0" value={form.payable} onChange={e=>setForm(f=>({...f,payable:e.target.value}))}/></div><div className="fg"><label>Unbilled – Not Yet Billed ({CUR.sym})</label><input type="number" min="0" value={form.provision} onChange={e=>setForm(f=>({...f,provision:e.target.value}))}/></div></div>
   </>);
 
   return(
@@ -2665,7 +2321,7 @@ function PageCC({data,setData,toast}){
                   <td className="num bold neg">{(c.payable+c.provision)>0?fmtINR(c.payable+c.provision):'–'}</td>
                   <td>{c.dueDate?<span className={`tag ${d!==null&&d<=3?'tr':d!==null&&d<=7?'to':'tb'}`}>{fmtDate(c.dueDate)}</span>:'–'}</td>
                   <td><span className={`tag ${u>30?'tr':u>15?'to':'tg'}`}>{u.toFixed(1)}%</span></td>
-                  <td><div style={{display:'flex',gap:4}}><button className="bic" onClick={()=>openEdit(c)}><Ic n="edit" s={11}/></button><button className="bic red" onClick={()=>del(c.id)}><Ic n="del" s={11}/></button></div></td>
+                  <td><div style={{display:'flex',gap:4}}>{c.payable>0&&<button className="btn btn-s btn-sm" style={{fontSize:10,padding:'3px 8px'}} onClick={()=>openPay(c)} aria-label={`Pay ${c.bank} bill`}>Pay</button>}<button className="bic" onClick={()=>openEdit(c)}><Ic n="edit" s={11}/></button><button className="bic red" onClick={()=>del(c.id)}><Ic n="del" s={11}/></button></div></td>
                 </tr>);
               })}
             </tbody>
@@ -2698,6 +2354,20 @@ function PageCC({data,setData,toast}){
         </div>
       </div>
       {modal&&<Modal title={modal==='add'?'Add Credit Card':'Edit Credit Card'} onClose={close} foot={<><button className="btn btn-s btn-sm" onClick={close}>Cancel</button><button className="btn btn-p btn-sm" onClick={save}><Ic n={modal==='add'?'plus':'ok'} s={12} c="#fff"/>{modal==='add'?'Add':'Save'}</button></>}>{CCForm}</Modal>}
+      {pay&&<Modal title={`Pay ${pay.bank} ${pay.type} bill`} onClose={()=>setPay(null)}
+        foot={<><button className="btn btn-s btn-sm" onClick={()=>setPay(null)}>Cancel</button><button className="btn btn-p btn-sm" onClick={savePay}><Ic n="ok" s={12} c="#fff"/>Record payment</button></>}>
+        <div className="alert ai mb2"><Ic n="prov" s={13}/><span>This records cash leaving the fund you pick and clears the card. It is not an expense, because the original card spend already was one.</span></div>
+        <div className="f2 mb2">
+          <div className="fg"><label>Amount ({CUR.sym})</label><input type="number" min="0" value={pay.amount} onChange={e=>setPay(x=>({...x,amount:e.target.value}))}/>
+            {pay.max>0&&<div style={{fontSize:10.5,color:'var(--n400)',marginTop:4}}>Outstanding {fmtINR(pay.max,true)}</div>}</div>
+          <div className="fg"><label>Date</label><input type="date" value={pay.date} onChange={e=>setPay(x=>({...x,date:e.target.value}))}/></div>
+          <div className="fg fg-full"><label>Paid From</label>
+            <select value={pay.paymentMode} onChange={e=>setPay(x=>({...x,paymentMode:e.target.value}))}>
+              {PAY_MODES.map(m=><option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+        </div>
+      </Modal>}
     </div>
   );
 }
@@ -2722,27 +2392,46 @@ function LoanCard({l,buildAmort,openEdit,del,setData,toast}){
   const nextDue=amort[0]||null;
   const isFullyPaid=l.outstanding<=0||amort.length===0;
 
+  /* Marking an EMI paid also posts it to the ledger, so the instalment leaves
+     the fund it was paid from. Only the interest is booked as a cost; the
+     principal repays debt, so it moves cash without being an expense. Without
+     this the cash silently vanished and reconciliation could never balance. */
   const markPaid=(row)=>{
-    setData(d=>({...d,loans:d.loans.map(lo=>{
-      if(lo.id!==l.id)return lo;
-      const newPaid=[...(lo.paidEmis||[]),{
-        n:row.n,date:row.date,emi:row.emi,principal:row.principal,
-        interest:row.interest,opening:row.opening,closing:row.closing,paidOn:new Date().toISOString().slice(0,10)
-      }];
-      return{...lo,outstanding:Math.max(0,row.closing),remaining:Math.max(0,(lo.remaining||0)-1),paidEmis:newPaid};
-    })}));
-    toast&&toast(`EMI #${row.n} paid ✓  |  New Outstanding: ${fmtINR(Math.max(0,row.closing))}`,'g');
+    const txId=uid();
+    setData(d=>{
+      const emiMode=(d.profile&&d.profile.emiPaidFrom)||'NEFT/Bank Transfer';
+      return{...d,
+      transactions:[...d.transactions,{
+        id:txId,type:'emi',loanId:l.id,emiNo:row.n,amount:row.emi,
+        principal:row.principal,interest:row.interest,
+        date:row.date,month:(row.date||'').slice(0,7),
+        category:'Loan Interest',desc:`${l.bank} ${l.type} EMI #${row.n}`,
+        paymentMode:emiMode,merchant:''}],
+      loans:d.loans.map(lo=>{
+        if(lo.id!==l.id)return lo;
+        const newPaid=[...(lo.paidEmis||[]),{
+          n:row.n,date:row.date,emi:row.emi,principal:row.principal,
+          interest:row.interest,opening:row.opening,closing:row.closing,
+          paidOn:new Date().toISOString().slice(0,10),txId
+        }];
+        return{...lo,outstanding:Math.max(0,row.closing),remaining:Math.max(0,(lo.remaining||0)-1),paidEmis:newPaid};
+      })};
+    });
+    toast&&toast(`EMI #${row.n} paid ✓ · ${fmtINR(row.emi,true)} posted to your ledger`,'g');
   };
 
   const undoLastPaid=()=>{
     if(!paidEmis.length)return;
     const last=paidEmis[paidEmis.length-1];
-    setData(d=>({...d,loans:d.loans.map(lo=>{
-      if(lo.id!==l.id)return lo;
-      return{...lo,outstanding:last.opening!==undefined?last.opening:lo.outstanding+last.principal,
-        remaining:(lo.remaining||0)+1,paidEmis:lo.paidEmis.slice(0,-1)};
-    })}));
-    toast&&toast('Last EMI payment undone','o');
+    setData(d=>({...d,
+      // Remove the ledger entry this EMI posted, so undo leaves nothing behind.
+      transactions:d.transactions.filter(t=>!(last.txId&&t.id===last.txId)),
+      loans:d.loans.map(lo=>{
+        if(lo.id!==l.id)return lo;
+        return{...lo,outstanding:last.opening!==undefined?last.opening:lo.outstanding+last.principal,
+          remaining:(lo.remaining||0)+1,paidEmis:lo.paidEmis.slice(0,-1)};
+      })}));
+    toast&&toast('Last EMI payment undone · ledger entry removed','o');
   };
 
   return(
@@ -3026,8 +2715,8 @@ function PageLoans({data,setData,toast}){
 
   const LF=(<>
     <div className="f2 mb2"><div className="fg"><label>Bank / Lender</label><input value={form.bank} onChange={e=>setForm(f=>({...f,bank:e.target.value}))}/></div><div className="fg"><label>Loan Type</label><select value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}><option>Personal Loan</option><option>Home Loan</option><option>Car Loan</option><option>Education Loan</option><option>Gold Loan</option><option>Business Loan</option><option>Other</option></select></div></div>
-    <div className="f3 mb2"><div className="fg"><label>Loan Amount ({CUR.sym})</label><input type="number" value={form.original} onChange={e=>setForm(f=>({...f,original:e.target.value}))}/></div><div className="fg"><label>Outstanding Balance ({CUR.sym})</label><input type="number" value={form.outstanding} onChange={e=>setForm(f=>({...f,outstanding:e.target.value}))}/></div><div className="fg"><label>EMI / Month ({CUR.sym})</label><input type="number" value={form.emi} onChange={e=>setForm(f=>({...f,emi:e.target.value}))}/></div></div>
-    <div className="f3 mb2"><div className="fg"><label>ROI (% p.a.)</label><input type="number" step="0.01" value={form.roi} onChange={e=>setForm(f=>({...f,roi:e.target.value}))}/></div><div className="fg"><label>Tenure (months)</label><input type="number" value={form.tenure} onChange={e=>setForm(f=>({...f,tenure:e.target.value}))}/></div><div className="fg"><label>Acc. No (Dummy)</label><input value={form.accNo} onChange={e=>setForm(f=>({...f,accNo:e.target.value}))}/></div></div>
+    <div className="f3 mb2"><div className="fg"><label>Loan Amount ({CUR.sym})</label><input type="number" min="0" value={form.original} onChange={e=>setForm(f=>({...f,original:e.target.value}))}/></div><div className="fg"><label>Outstanding Balance ({CUR.sym})</label><input type="number" min="0" value={form.outstanding} onChange={e=>setForm(f=>({...f,outstanding:e.target.value}))}/></div><div className="fg"><label>EMI / Month ({CUR.sym})</label><input type="number" min="0" value={form.emi} onChange={e=>setForm(f=>({...f,emi:e.target.value}))}/></div></div>
+    <div className="f3 mb2"><div className="fg"><label>ROI (% p.a.)</label><input type="number" min="0" step="0.01" value={form.roi} onChange={e=>setForm(f=>({...f,roi:e.target.value}))}/></div><div className="fg"><label>Tenure (months)</label><input type="number" min="0" value={form.tenure} onChange={e=>setForm(f=>({...f,tenure:e.target.value}))}/></div><div className="fg"><label>Acc. No (Dummy)</label><input value={form.accNo} onChange={e=>setForm(f=>({...f,accNo:e.target.value}))}/></div></div>
     <div className="f2">
       <div className="fg"><label>Start Date</label><input type="date" value={form.startDate} onChange={e=>{const ed=calcEnd(e.target.value,form.tenure);setForm(f=>({...f,startDate:e.target.value,endDate:ed}));}}/></div>
       <div className="fg"><label>End Date (auto-calculated)</label><input type="date" value={form.endDate} onChange={e=>setForm(f=>({...f,endDate:e.target.value}))}/></div>
@@ -3050,8 +2739,8 @@ function PageLoans({data,setData,toast}){
               {form.phases.map((ph,i)=>(
                 <tr key={i} style={{borderTop:'1px solid var(--n100)'}}>
                   <td style={{padding:'5px 8px'}}><input type="number" min={1} max={form.tenure||999} value={ph.fromMonth} style={{width:80,padding:'4px 7px',border:'1.5px solid var(--n200)',borderRadius:5,fontSize:12,fontFamily:'var(--f)'}} onChange={e=>{const p=[...form.phases];p[i]={...p[i],fromMonth:+e.target.value};setForm(f=>({...f,phases:p}));}}/></td>
-                  <td style={{padding:'5px 8px'}}><input type="number" value={ph.emi} style={{width:100,padding:'4px 7px',border:'1.5px solid var(--n200)',borderRadius:5,fontSize:12,fontFamily:'var(--f)'}} onChange={e=>{const p=[...form.phases];p[i]={...p[i],emi:+e.target.value};setForm(f=>({...f,phases:p}));}}/></td>
-                  <td style={{padding:'5px 8px'}}><input type="number" step="0.01" value={ph.roi} style={{width:90,padding:'4px 7px',border:'1.5px solid var(--n200)',borderRadius:5,fontSize:12,fontFamily:'var(--f)'}} onChange={e=>{const p=[...form.phases];p[i]={...p[i],roi:+e.target.value};setForm(f=>({...f,phases:p}));}}/></td>
+                  <td style={{padding:'5px 8px'}}><input type="number" min="0" value={ph.emi} style={{width:100,padding:'4px 7px',border:'1.5px solid var(--n200)',borderRadius:5,fontSize:12,fontFamily:'var(--f)'}} onChange={e=>{const p=[...form.phases];p[i]={...p[i],emi:+e.target.value};setForm(f=>({...f,phases:p}));}}/></td>
+                  <td style={{padding:'5px 8px'}}><input type="number" min="0" step="0.01" value={ph.roi} style={{width:90,padding:'4px 7px',border:'1.5px solid var(--n200)',borderRadius:5,fontSize:12,fontFamily:'var(--f)'}} onChange={e=>{const p=[...form.phases];p[i]={...p[i],roi:+e.target.value};setForm(f=>({...f,phases:p}));}}/></td>
                   <td style={{padding:'5px 8px'}}><button type="button" className="bic red" onClick={()=>setForm(f=>({...f,phases:f.phases.filter((_,j)=>j!==i)}))}><Ic n="del" s={11}/></button></td>
                 </tr>
               ))}
@@ -3226,7 +2915,7 @@ function PageProvision({data,setData,toast}){
           <div className="fg"><label>Expected Month</label><input type="month" value={form.month} onChange={e=>setForm(f=>({...f,month:e.target.value}))}/></div>
           <div className="fg"><label>For Whom</label><input value={form.entity} onChange={e=>setForm(f=>({...f,entity:e.target.value}))} placeholder="Self / Family…"/></div>
           <div className="fg"><label>Category</label><input value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))} placeholder="Medical / Repair…"/></div>
-          <div className="fg"><label>Estimated Amount ({CUR.sym})</label><input type="number" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))}/></div>
+          <div className="fg"><label>Estimated Amount ({CUR.sym})</label><input type="number" min="0" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))}/></div>
         </div>
         <div style={{display:'flex',gap:10}}>
           <div className="fg" style={{flex:1}}><label>What is it for?</label><input value={form.narration} onChange={e=>setForm(f=>({...f,narration:e.target.value}))} placeholder="e.g. Car insurance renewal"/></div>
@@ -3747,6 +3436,15 @@ function PageData({data,setData,toast}){
     // Reconciliation: `opening` is the balance at the start of the reporting period.
     // Left null for existing data. The Reconciliation page infers it and offers to adopt it.
     d.accounts=d.accounts.map(a=>({...a,opening:a.opening===undefined?null:a.opening}));
+    // One-time sweep for references left behind by older deletes: emergency fund
+    // ids pointing at removed accounts, and contributions whose goal is gone.
+    {
+      const accIds=new Set(d.accounts.map(a=>a.id));
+      const ef=d.emergencyFund||{accountIds:[],targetMonths:6};
+      d.emergencyFund={...ef,accountIds:(ef.accountIds||[]).filter(id=>accIds.has(id))};
+      const goalIds=new Set((d.goals||[]).map(g=>g.id));
+      if(goalIds.size)d.investmentTxs=(d.investmentTxs||[]).filter(t=>!t.goalId||goalIds.has(t.goalId));
+    }
     // Ensure profile.features exists
     if(!d.profile.features)d.profile.features={investmentTracker:true};
     // Ensure all goals have instruments array
@@ -4635,7 +4333,7 @@ function PageCFO({data}){
               <div className="f2">
                 <div className="fg"><label style={{color:'var(--n600)',fontSize:11}}>Loan Prepayment ({CUR.sym} one-time)</label><input type="number" min={0} max={loanOS} step={10000} placeholder="e.g. 100000" value={sim.prepay||''} onChange={e=>setSim(s=>({...s,prepay:e.target.value}))}/></div>
                 <div className="fg"><label style={{color:'var(--n600)',fontSize:11}}>Extra SIP / Month ({CUR.sym})</label><input type="number" min={0} step={500} placeholder="e.g. 5000" value={sim.sip||''} onChange={e=>setSim(s=>({...s,sip:e.target.value}))}/></div>
-                <div className="fg"><label style={{color:'var(--n600)',fontSize:11}}>Monthly Income Change ({CUR.sym} ±)</label><input type="number" step={1000} placeholder="e.g. +10000 or -5000" value={sim.incDelta||''} onChange={e=>setSim(s=>({...s,incDelta:e.target.value}))}/></div>
+                <div className="fg"><label style={{color:'var(--n600)',fontSize:11}}>Monthly Income Change ({CUR.sym} ±)</label><input type="number" min="0" step={1000} placeholder="e.g. +10000 or -5000" value={sim.incDelta||''} onChange={e=>setSim(s=>({...s,incDelta:e.target.value}))}/></div>
                 <div className="fg"><label style={{color:'var(--n600)',fontSize:11}}>Monthly Expense Cut ({CUR.sym})</label><input type="number" min={0} step={500} placeholder="e.g. 3000" value={sim.expDelta||''} onChange={e=>setSim(s=>({...s,expDelta:e.target.value}))}/></div>
               </div>
               <div>
@@ -4811,9 +4509,9 @@ function PageDebtOptimizer({data,setData,toast}){
       <div className="card">
         <div className="sh mb3"><div className="sh-t"><Ic n="loan" s={14} c="var(--b)"/>Auto EMI Calculator</div></div>
         <div className="f3 mb3">
-          <div className="fg"><label>Principal Amount ({CUR.sym})</label><input type="number" placeholder="e.g. 500000" value={calcP} onChange={e=>setCalcP(e.target.value)}/></div>
-          <div className="fg"><label>Annual Interest Rate (%)</label><input type="number" step="0.1" placeholder="e.g. 12.5" value={calcR} onChange={e=>setCalcR(e.target.value)}/></div>
-          <div className="fg"><label>Tenure (months)</label><input type="number" placeholder="e.g. 60" value={calcT} onChange={e=>setCalcT(e.target.value)}/></div>
+          <div className="fg"><label>Principal Amount ({CUR.sym})</label><input type="number" min="0" placeholder="e.g. 500000" value={calcP} onChange={e=>setCalcP(e.target.value)}/></div>
+          <div className="fg"><label>Annual Interest Rate (%)</label><input type="number" min="0" step="0.1" placeholder="e.g. 12.5" value={calcR} onChange={e=>setCalcR(e.target.value)}/></div>
+          <div className="fg"><label>Tenure (months)</label><input type="number" min="0" placeholder="e.g. 60" value={calcT} onChange={e=>setCalcT(e.target.value)}/></div>
         </div>
         {emi>0&&(
           <div className="g4" style={{gap:12}}>
@@ -5396,8 +5094,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
   const goals=(data.goals||[]).filter(g=>(g.instruments||[]).length>0);
   const allGoals=data.goals||[];
 
-  const TC={'SIP':'var(--g)','Mutual Fund':'var(--b)','Equity (India)':'var(--b)','Equity (US)':'var(--p)','Crypto':'var(--o)','RD':'var(--t)','FD':'var(--o)','PPF':'var(--p)'};
-  const TBG={'SIP':'var(--gl)','Mutual Fund':'var(--bl)','Equity (India)':'var(--bl)','Equity (US)':'var(--pl)','Crypto':'var(--ol)','RD':'var(--tl)','FD':'var(--ol)','PPF':'var(--pl)'};
+  const TC=INSTR_COLOR,TBG=INSTR_BG;
 
   // ── All instruments across goals, with stats ──
   // Corpus prefers the latest market price you have entered, else a modelled
@@ -5514,7 +5211,20 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
     toast(`Logged ${fmtINR(+form.amount,true)} · off your surplus, onto your net worth ✓`,'g');
   };
   const undoDel=makeUndoDelete(data,setData,toast);
-  const delTx=id=>undoDel('Entry deleted · goal amount not reversed',d=>({...d,investmentTxs:d.investmentTxs.filter(t=>t.id!==id)}));
+  // Deleting a contribution now reverses what it added. It used to leave the
+  // goal's saved amount overstated forever, so the figure drifted with each delete.
+  const delTx=id=>undoDel('Entry deleted · goal amount reversed',d=>{
+    const tx=(d.investmentTxs||[]).find(t=>t.id===id);
+    if(!tx)return d;
+    return{...d,
+      investmentTxs:d.investmentTxs.filter(t=>t.id!==id),
+      goals:d.goals.map(g=>{
+        if(g.id!==tx.goalId)return g;
+        return{...g,currentAmount:Math.max(0,(g.currentAmount||0)-(tx.amount||0)),
+          instruments:(g.instruments||[]).map(i=>i.id!==tx.instrumentId?i
+            :{...i,units:Math.max(0,(i.units||0)-(tx.units||0))})};
+      })};
+  });
 
   const sortedTxs=[...itxs].sort((a,b)=>b.date.localeCompare(a.date));
   const filtTxs=selGoalFilter==='all'?sortedTxs:sortedTxs.filter(t=>t.goalId===selGoalFilter);
@@ -5712,7 +5422,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                             {isUnitType(p.type)&&(
                               priceEdit===p.id?(
                                 <div style={{display:'flex',gap:5,marginTop:7,alignItems:'center'}}>
-                                  <input type="number" autoFocus placeholder={`Latest ${priceLabel(p.type)}`} value={priceVal}
+                                  <input type="number" min="0" autoFocus placeholder={`Latest ${priceLabel(p.type)}`} value={priceVal}
                                     onChange={e=>setPriceVal(e.target.value)}
                                     onKeyDown={e=>{if(e.key==='Enter')savePrice(g.id,p.id);if(e.key==='Escape'){setPriceEdit(null);setPriceVal('');}}}
                                     style={{flex:1,fontSize:11,padding:'4px 8px',fontFamily:'var(--m)'}}/>
@@ -5810,7 +5520,7 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                     {selInstrList.map(i=><option key={i.id} value={i.id}>{i.name} ({i.type} · {fmtINR(i.amount,true)}/mo)</option>)}
                   </select>
                 </div>
-                <div className="fg"><label>Amount ({CUR.sym}) *</label><input type="number" placeholder="0" value={form.amount} onChange={e=>ff({amount:e.target.value})}/></div>
+                <div className="fg"><label>Amount ({CUR.sym}) *</label><input type="number" min="0" placeholder="0" value={form.amount} onChange={e=>ff({amount:e.target.value})}/></div>
                 <div className="fg"><label>Date</label><input type="date" value={form.date} onChange={e=>ff({date:e.target.value})}/></div>
                 <div className="fg"><label>Paid From</label>
                   <select value={form.paymentMode} onChange={e=>ff({paymentMode:e.target.value})}>
@@ -5818,8 +5528,8 @@ function PageInvestmentTracker({data,setData,toast,setPage}){
                   </select>
                 </div>
                 {isNAV&&<>
-                  <div className="fg"><label>{selInstr?unitLabel(selInstr.type):'Units'} Bought</label><input type="number" placeholder="e.g. 12.345" value={form.units} onChange={e=>ff({units:e.target.value})}/></div>
-                  <div className="fg"><label>{selInstr?priceLabel(selInstr.type):'NAV'} at Purchase ({CUR.sym})</label><input type="number" placeholder="e.g. 48.50" value={form.nav} onChange={e=>ff({nav:e.target.value})}/></div>
+                  <div className="fg"><label>{selInstr?unitLabel(selInstr.type):'Units'} Bought</label><input type="number" min="0" placeholder="e.g. 12.345" value={form.units} onChange={e=>ff({units:e.target.value})}/></div>
+                  <div className="fg"><label>{selInstr?priceLabel(selInstr.type):'NAV'} at Purchase ({CUR.sym})</label><input type="number" min="0" placeholder="e.g. 48.50" value={form.nav} onChange={e=>ff({nav:e.target.value})}/></div>
                 </>}
                 <div className="fg fg-full"><label>Notes</label><input placeholder="e.g. April installment" value={form.notes||''} onChange={e=>ff({notes:e.target.value})}/></div>
               </div>
@@ -5934,8 +5644,7 @@ function PageForecast({data,toast}){
   const staleNavInstrs=allInstrs.filter(i=>(i.type==='SIP'||i.type==='Mutual Fund')&&i.lastNAVDate&&(Date.now()-new Date(i.lastNAVDate))/86400000>7);
 
   // ── Type meta ──
-  const TC={'SIP':'var(--g)','Mutual Fund':'var(--b)','Equity (India)':'var(--b)','Equity (US)':'var(--p)','Crypto':'var(--o)','RD':'var(--t)','FD':'var(--o)','PPF':'var(--p)'};
-  const TBG={'SIP':'var(--gl)','Mutual Fund':'var(--bl)','Equity (India)':'var(--bl)','Equity (US)':'var(--pl)','Crypto':'var(--ol)','RD':'var(--tl)','FD':'var(--ol)','PPF':'var(--pl)'};
+  const TC=INSTR_COLOR,TBG=INSTR_BG;
 
   return(
     <div className="page">
@@ -6182,7 +5891,11 @@ function PageGoals({data,setData,toast}){
     close();
   };
   const undoDel=makeUndoDelete(data,setData,toast);
-  const del=id=>undoDel('Goal deleted',d=>({...d,goals:d.goals.filter(g=>g.id!==id)}));
+  // Deleting a goal takes its contributions with it. Leaving them behind kept
+  // their money in net worth with no way to see or remove it from the UI.
+  const del=id=>undoDel('Goal deleted with its contributions',d=>({...d,
+    goals:d.goals.filter(g=>g.id!==id),
+    investmentTxs:(d.investmentTxs||[]).filter(t=>t.goalId!==id)}));
 
   // Instrument CRUD inside form
   const addInstr=()=>{
@@ -6206,7 +5919,12 @@ function PageGoals({data,setData,toast}){
       currentNAV:String(instr.currentNAV||''),lastBuyNAV:String(instr.lastBuyNAV||''),lastNAVDate:instr.lastNAVDate||''});
     setInstrEdit(instr.id);
   };
-  const delInstr=id=>setForm(f=>({...f,instruments:f.instruments.filter(i=>i.id!==id)}));
+  const delInstr=id=>{
+    const n=(data.investmentTxs||[]).filter(t=>t.instrumentId===id).length;
+    if(n&&!window.confirm(`This instrument has ${n} logged contribution${n>1?'s':''}. Removing it also removes ${n>1?'them':'it'}. Continue?`))return;
+    setForm(f=>({...f,instruments:f.instruments.filter(i=>i.id!==id)}));
+    if(n)setData(d=>({...d,investmentTxs:(d.investmentTxs||[]).filter(t=>t.instrumentId!==id)}));
+  };
 
   // Update NAV inline on goal card (read mode)
   const saveNav=(goalId,instrId)=>{
@@ -6250,8 +5968,8 @@ function PageGoals({data,setData,toast}){
     <div>
       <div className="f2 mb2">
         <div className="fg"><label>Goal Name</label><input placeholder="e.g. House Down Payment" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/></div>
-        <div className="fg"><label>Target Amount ({CUR.sym})</label><input type="number" value={form.targetAmount} onChange={e=>setForm(f=>({...f,targetAmount:e.target.value}))}/></div>
-        <div className="fg"><label>Amount Saved So Far ({CUR.sym})</label><input type="number" value={form.currentAmount} onChange={e=>setForm(f=>({...f,currentAmount:e.target.value}))}/></div>
+        <div className="fg"><label>Target Amount ({CUR.sym})</label><input type="number" min="0" value={form.targetAmount} onChange={e=>setForm(f=>({...f,targetAmount:e.target.value}))}/></div>
+        <div className="fg"><label>Amount Saved So Far ({CUR.sym})</label><input type="number" min="0" value={form.currentAmount} onChange={e=>setForm(f=>({...f,currentAmount:e.target.value}))}/></div>
         <div className="fg"><label>Target Date</label><input type="date" value={form.targetDate} onChange={e=>setForm(f=>({...f,targetDate:e.target.value}))}/></div>
         <div className="fg"><label>Color</label>
           <div style={{display:'flex',gap:6,marginTop:4}}>{COLORS.map(c=><div key={c} onClick={()=>setForm(f=>({...f,color:c}))} style={{width:22,height:22,borderRadius:99,background:c,cursor:'pointer',border:form.color===c?'3px solid var(--n800)':'3px solid transparent'}}/> )}</div>
@@ -6289,15 +6007,15 @@ function PageGoals({data,setData,toast}){
             <div className="fg"><label style={{fontSize:10.5}}>Type</label><select value={instrForm.type} onChange={e=>setInstrForm(f=>({...f,type:e.target.value}))}>
               {INV_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
             </select></div>
-            <div className="fg"><label style={{fontSize:10.5}}>{instrForm.type==='SIP'?`Monthly (${CUR.sym})`:`Investment Amount (${CUR.sym})`}</label><input type="number" placeholder="0" value={instrForm.amount} onChange={e=>setInstrForm(f=>({...f,amount:e.target.value}))}/></div>
-            <div className="fg"><label style={{fontSize:10.5}}>Return Rate (%)</label><input type="number" placeholder="12" value={instrForm.returnRate} onChange={e=>setInstrForm(f=>({...f,returnRate:e.target.value}))}/></div>
-            <div className="fg"><label style={{fontSize:10.5}}>Duration (Years)</label><input type="number" placeholder="5" value={instrForm.years} onChange={e=>setInstrForm(f=>({...f,years:e.target.value}))}/></div>
+            <div className="fg"><label style={{fontSize:10.5}}>{instrForm.type==='SIP'?`Monthly (${CUR.sym})`:`Investment Amount (${CUR.sym})`}</label><input type="number" min="0" placeholder="0" value={instrForm.amount} onChange={e=>setInstrForm(f=>({...f,amount:e.target.value}))}/></div>
+            <div className="fg"><label style={{fontSize:10.5}}>Return Rate (%)</label><input type="number" min="0" placeholder="12" value={instrForm.returnRate} onChange={e=>setInstrForm(f=>({...f,returnRate:e.target.value}))}/></div>
+            <div className="fg"><label style={{fontSize:10.5}}>Duration (Years)</label><input type="number" min="0" placeholder="5" value={instrForm.years} onChange={e=>setInstrForm(f=>({...f,years:e.target.value}))}/></div>
             <div className="fg"><label style={{fontSize:10.5}}>Color</label>
               <div style={{display:'flex',gap:5,marginTop:3}}>{COLORS.map(c=><div key={c} onClick={()=>setInstrForm(f=>({...f,color:c}))} style={{width:18,height:18,borderRadius:99,background:c,cursor:'pointer',border:instrForm.color===c?'2.5px solid var(--n800)':'2.5px solid transparent'}}/> )}</div>
             </div>
             {isUnitType(instrForm.type)&&<>
-              <div className="fg"><label style={{fontSize:10.5}}>{unitLabel(instrForm.type)} Held</label><input type="number" placeholder="0" value={instrForm.units} onChange={e=>setInstrForm(f=>({...f,units:e.target.value}))}/></div>
-              <div className="fg"><label style={{fontSize:10.5}}>Latest {priceLabel(instrForm.type)} ({CUR.sym})</label><input type="number" placeholder="0" value={instrForm.currentNAV} onChange={e=>setInstrForm(f=>({...f,currentNAV:e.target.value}))}/></div>
+              <div className="fg"><label style={{fontSize:10.5}}>{unitLabel(instrForm.type)} Held</label><input type="number" min="0" placeholder="0" value={instrForm.units} onChange={e=>setInstrForm(f=>({...f,units:e.target.value}))}/></div>
+              <div className="fg"><label style={{fontSize:10.5}}>Latest {priceLabel(instrForm.type)} ({CUR.sym})</label><input type="number" min="0" placeholder="0" value={instrForm.currentNAV} onChange={e=>setInstrForm(f=>({...f,currentNAV:e.target.value}))}/></div>
             </>}
           </div>
           <div style={{display:'flex',gap:6}}>
@@ -6377,7 +6095,7 @@ function PageGoals({data,setData,toast}){
                         {/* NAV update inline */}
                         {hasNAV&&navEditId===i.id&&(
                           <div style={{display:'flex',gap:5,marginTop:5,paddingLeft:11}}>
-                            <input type="number" placeholder={`New NAV ${CUR.sym}`} value={navVal} onChange={e=>setNavVal(e.target.value)}
+                            <input type="number" min="0" placeholder={`New NAV ${CUR.sym}`} value={navVal} onChange={e=>setNavVal(e.target.value)}
                               style={{width:110,padding:'4px 8px',fontSize:11,border:'1.5px solid var(--b)',borderRadius:5,fontFamily:'var(--f)'}} autoFocus/>
                             <button className="btn btn-p btn-sm" style={{padding:'3px 10px',fontSize:10}} onClick={()=>saveNav(g.id,i.id)}>Save</button>
                             <button className="btn btn-g btn-sm" style={{padding:'3px 8px',fontSize:10}} onClick={()=>{setNavEditId(null);setNavVal('');}}>✕</button>
@@ -6463,7 +6181,7 @@ function PageRecurring({data,setData,toast}){
         <div className="fg"><label>Category</label><select value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))}>
           <option value="">– Select –</option>{cats.map(c=><option key={c} value={c}>{c}</option>)}
         </select></div>
-        <div className="fg"><label>Amount ({CUR.sym})</label><input type="number" placeholder="0" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))}/></div>
+        <div className="fg"><label>Amount ({CUR.sym})</label><input type="number" min="0" placeholder="0" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))}/></div>
         <div className="fg"><label>Description</label><input placeholder="Details…" value={form.desc} onChange={e=>setForm(f=>({...f,desc:e.target.value}))}/></div>
         <div className="fg"><label>Merchant / Vendor</label><input placeholder="e.g. Netflix, HDFC" value={form.merchant} onChange={e=>setForm(f=>({...f,merchant:e.target.value}))}/></div>
         <div className="fg"><label>Payment Mode</label><select value={form.paymentMode} onChange={e=>setForm(f=>({...f,paymentMode:e.target.value}))}>
@@ -6698,6 +6416,44 @@ const PT={dashboard:'Dashboard',fund:'Bank Balance Sheet',reconcile:'Reconciliat
 // Heading shown in the topbar for the whole destination (tabs name the leaf).
 const GROUP_TITLE={fund:'Bank Balance Sheet',expense:'Transactions',budget:'Budget',cc:'Liabilities',goals:'Plan',pnl:'Reports',master:'Settings'};
 
+/* If a render throws, the whole app used to go blank with the data still in
+   localStorage but no UI left to export it from. Catch it and keep the data
+   reachable. */
+class Boundary extends React.Component{
+  constructor(p){super(p);this.state={err:null};}
+  static getDerivedStateFromError(err){return{err};}
+  componentDidCatch(err,info){try{console.error('MiyeeCFO crashed:',err,info);}catch(_){}}
+  render(){
+    if(!this.state.err)return this.props.children;
+    const save=()=>{try{
+      const raw=localStorage.getItem('ff_v5')||'{}';
+      const b=new Blob([raw],{type:'application/json'});
+      const a=document.createElement('a');a.href=URL.createObjectURL(b);
+      a.download=`miyeecfo-rescue-${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);a.click();a.remove();
+    }catch(_){}};
+    return <div style={{minHeight:'100vh',display:'grid',placeItems:'center',padding:24,
+      fontFamily:'system-ui,-apple-system,Segoe UI,Roboto,sans-serif',background:'#f7f8fa'}}>
+      <div style={{maxWidth:460,textAlign:'center'}}>
+        <div style={{fontSize:40,marginBottom:10}}>🛟</div>
+        <div style={{fontSize:17,fontWeight:800,marginBottom:8,color:'#0f172a'}}>Something broke on this screen</div>
+        <div style={{fontSize:13,color:'#475569',lineHeight:1.6,marginBottom:18}}>
+          Your data is still saved in this browser and has not been touched. Download a copy,
+          then reload. If it keeps happening, send the file along with what you were doing.
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>
+          <button onClick={save} style={{background:'#00b386',color:'#fff',border:'none',borderRadius:8,padding:'9px 16px',fontWeight:700,fontSize:13,cursor:'pointer'}}>Download my data</button>
+          <button onClick={()=>location.reload()} style={{background:'#fff',color:'#0f172a',border:'1.5px solid #cbd5e1',borderRadius:8,padding:'9px 16px',fontWeight:700,fontSize:13,cursor:'pointer'}}>Reload</button>
+        </div>
+        <details style={{marginTop:18,textAlign:'left'}}>
+          <summary style={{fontSize:11.5,color:'#64748b',cursor:'pointer'}}>Technical detail</summary>
+          <pre style={{fontSize:10.5,color:'#64748b',whiteSpace:'pre-wrap',marginTop:8}}>{String(this.state.err&&this.state.err.message||this.state.err)}</pre>
+        </details>
+      </div>
+    </div>;
+  }
+}
+
 function App(){
   const [pg,setPg]=useState('dashboard');
   const [data,setData]=useState(()=>{
@@ -6726,19 +6482,47 @@ function App(){
         if(!p.recurring)p.recurring=[];
         // Ensure transactions have paymentMode and merchant
         p.transactions=p.transactions.map(t=>({...t,paymentMode:t.paymentMode||t.payment_mode||t.mode||'',month:t.month||(t.date?t.date.slice(0,7):''),merchant:t.merchant||''}));
+        // Drop references left behind by older deletes: emergency fund ids for
+        // accounts that no longer exist, and contributions whose goal is gone.
+        {
+          const accIds=new Set((p.accounts||[]).map(a=>a.id));
+          p.emergencyFund={...p.emergencyFund,accountIds:(p.emergencyFund.accountIds||[]).filter(id=>accIds.has(id))};
+          const goalIds=new Set((p.goals||[]).map(g=>g.id));
+          if(goalIds.size)p.investmentTxs=(p.investmentTxs||[]).filter(t=>!t.goalId||goalIds.has(t.goalId));
+          // Re-derive each goal's saved amount from its contributions, healing any
+          // drift left by older deletes that never reversed the running total.
+          p.goals=(p.goals||[]).map(g=>({...g,currentAmount:goalSaved(g,p.investmentTxs||[])}));
+        }
         return p;
       }
       return JSON.parse(JSON.stringify(SEED));
     }catch{return JSON.parse(JSON.stringify(SEED));}
   });
   // ── ARCHITECTURE: save to localStorage on EVERY state change ──
+  // A write can fail on a full quota or in private mode. Swallowing that
+  // silently is the worst outcome: you keep working and lose everything on
+  // reload. Surface it instead, and keep an export within reach.
+  const [saveError,setSaveError]=useState(null);
   useEffect(()=>{try{
     const prev=JSON.parse(localStorage.getItem('ff_v5')||'{}');
     const merged={...data};
     if(prev.pfmModule) merged.pfmModule=prev.pfmModule;
     if(prev.pfmUpdatedAt) merged.pfmUpdatedAt=prev.pfmUpdatedAt;
     localStorage.setItem('ff_v5',JSON.stringify(merged));
-  }catch(e){};},[data]);
+    setSaveError(null);
+  }catch(e){
+    setSaveError(e&&/quota|exceeded/i.test(e.name+e.message)
+      ?'Your browser storage is full.'
+      :'Your browser is blocking local storage.');
+  }},[data]);
+  const exportNow=()=>{
+    try{
+      const b=new Blob([JSON.stringify({...dataRef.current,_version:'v6'},null,2)],{type:'application/json'});
+      const a=document.createElement('a');a.href=URL.createObjectURL(b);
+      a.download=`miyeecfo-rescue-${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);a.click();a.remove();
+    }catch(_){}
+  };
 
   // ── AUTO BACKUP: write a JSON snapshot to Downloads when the app opens ──
   // Modes: 'off' (default: MANUAL ONLY, no download on launch), 'daily', 'always'.
@@ -7118,6 +6902,18 @@ function App(){
 
       {toast&&<Toast key={toast.k} msg={toast.msg} type={toast.type} action={toast.action} onAction={toast.onAction} onClose={()=>setToast(null)}/>}
 
+      {saveError&&(
+        <div role="alert" style={{position:'fixed',left:0,right:0,bottom:0,zIndex:1200,
+          background:'var(--r)',color:'#fff',padding:'10px 16px',display:'flex',gap:12,
+          alignItems:'center',justifyContent:'center',flexWrap:'wrap',fontSize:12.5,
+          boxShadow:'0 -2px 14px rgba(0,0,0,.25)'}}>
+          <strong>Your changes are not being saved.</strong>
+          <span style={{opacity:.9}}>{saveError} Export now so nothing is lost.</span>
+          <button onClick={exportNow} style={{background:'#fff',color:'var(--r)',border:'none',
+            borderRadius:6,padding:'5px 12px',fontWeight:700,fontSize:12,cursor:'pointer'}}>Export my data</button>
+        </div>
+      )}
+
       {/* Floating Quick-Add button */}
       {!quickAdd&&<button className="qa-btn" onClick={()=>setQuickAdd(true)} aria-label="Quick add a transaction" title="Quick Add Transaction">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -7204,4 +7000,4 @@ function App(){
 }
 
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+ReactDOM.createRoot(document.getElementById('root')).render(<Boundary><App/></Boundary>);
