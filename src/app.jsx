@@ -1345,6 +1345,7 @@ function PageTx({data,setData,toast,type}){
   const [autoCat,setAutoCat]=useState('');
   const [autoMode,setAutoMode]=useState('');
   const [sel,setSel]=useState(new Set());
+  const [bulk,setBulk]=useState(null);
   const fileRef=useRef();
 
   const filtered=useMemo(()=>[...transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&(selPM==='all'||t.paymentMode===selPM)&&(selMerchant==='all'||t.merchant===selMerchant))].sort((a,b)=>new Date(b.date)-new Date(a.date)),[transactions,type,selM,selPM,selMerchant]);
@@ -1418,6 +1419,64 @@ function PageTx({data,setData,toast,type}){
     setSel(new Set());setSelM('all');
     toast(`Duplicated ${copies.length} entries into ${fmtMonth(tgtMonth)}`,'g');
   };
+  /* Bulk edit. Retyping the same merchant across forty rows is how a ledger
+     ends up with "NA" everywhere, which is exactly what stops the recurring
+     radar and the merchant filters from working.
+
+     A field changes only when its box is ticked, so setting a merchant cannot
+     quietly wipe descriptions. A ticked field left empty CLEARS that field,
+     which is stated on screen rather than left to be discovered. */
+  const BULK_FIELDS=[
+    {k:'merchant',l:'Merchant / Vendor',kind:'text',clearable:true},
+    {k:'desc',l:'Description',kind:'text',clearable:true},
+    {k:'category',l:'Category',kind:'select',clearable:false},
+    {k:'paymentMode',l:'Payment Mode',kind:'select',clearable:false},
+    {k:'date',l:'Date',kind:'date',clearable:false},
+  ];
+  const openBulk=()=>{
+    if(!sel.size)return;
+    const rows=filtered.filter(t=>sel.has(t.id));
+    // Seed each field from the selection when they already agree, so a common
+    // value is not retyped and a differing one is never implied.
+    const common=k=>{const v=[...new Set(rows.map(t=>t[k]||''))];return v.length===1?v[0]:'';};
+    const init={};
+    for(const f of BULK_FIELDS)init[f.k]={on:false,v:common(f.k)};
+    setBulk(init);
+  };
+  const applyBulk=()=>{
+    const on=BULK_FIELDS.filter(f=>bulk[f.k].on);
+    if(!on.length){toast('Tick at least one field to change','r');return;}
+    const clearing=on.filter(f=>!String(bulk[f.k].v).trim());
+    const bad=clearing.find(f=>!f.clearable);
+    if(bad){toast(`${bad.l} needs a value`,'r');return;}
+    const n=sel.size;
+    /* Confirm before applying. The undo lives in a toast, and a toast is a
+       single slot: any other alert firing in the same moment takes the undo
+       with it. That is survivable for one row and not for forty, so a bulk
+       edit states what it is about to do and waits for a yes. Clears are
+       named separately, because those are the ones that lose data. */
+    const setting=on.filter(f=>String(bulk[f.k].v).trim());
+    const lines=[`Change ${n} entr${n===1?'y':'ies'}:`];
+    for(const f of setting)lines.push(`  ${f.l} -> ${String(bulk[f.k].v).trim()}`);
+    for(const f of clearing)lines.push(`  ${f.l} -> CLEARED`);
+    if(!window.confirm(lines.join('\n')))return;
+    const patch={};
+    for(const f of on){
+      const v=String(bulk[f.k].v).trim();
+      patch[f.k]=v;
+      // Month is derived from the date, so changing one without the other
+      // would file entries under a month they are no longer in.
+      if(f.k==='date'&&v)patch.month=v.slice(0,7);
+    }
+    const before=data.transactions;
+    setData(d=>({...d,transactions:d.transactions.map(t=>sel.has(t.id)?{...t,...patch}:t)}));
+    const names=on.map(f=>f.l.toLowerCase()).join(', ');
+    // One undo, because a bulk edit is one decision.
+    toast(`Updated ${names} on ${n} entr${n===1?'y':'ies'}`,'x','Undo',
+      ()=>{setData(d=>({...d,transactions:before}));});
+    setBulk(null);setSel(new Set());
+  };
+
   const bulkDel=()=>{if(!sel.size)return;const n=sel.size;undoDel(`Deleted ${n} entr${n===1?'y':'ies'}`,d=>({...d,transactions:d.transactions.filter(t=>!sel.has(t.id))}));setSel(new Set());};
   const toggleAll=()=>setSel(allSel?new Set():new Set(filtered.map(t=>t.id)));
   const toggleOne=id=>setSel(s=>{const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n;});
@@ -1576,11 +1635,64 @@ function PageTx({data,setData,toast,type}){
         <div className="bulk-bar">
           <Ic n="del" s={13} c="var(--gd)"/>
           {sel.size} selected
+          <button className="btn btn-p btn-sm" onClick={openBulk}><Ic n="edit" s={12} c="#fff"/>Edit Selected</button>
           <button className="btn btn-s btn-sm" onClick={bulkDuplicate}>⧉ Duplicate to This Month</button>
           <button className="btn btn-d btn-sm" onClick={bulkDel}><Ic n="del" s={12}/>Delete Selected</button>
           <button className="btn btn-g btn-sm" onClick={()=>setSel(new Set())}>Clear</button>
         </div>
       )}
+
+      {bulk&&(()=>{
+        const on=BULK_FIELDS.filter(f=>bulk[f.k].on);
+        const clearing=on.filter(f=>!String(bulk[f.k].v).trim()&&f.clearable);
+        return(
+        <Modal title={`Edit ${sel.size} entr${sel.size===1?'y':'ies'}`} onClose={()=>setBulk(null)}
+          foot={<><button className="btn btn-s btn-sm" onClick={()=>setBulk(null)}>Cancel</button>
+            <button className="btn btn-p btn-sm" onClick={applyBulk}><Ic n="ok" s={12} c="#fff"/>
+              Apply to {sel.size}</button></>}>
+          <div className="alert ai mb2"><Ic n="prov" s={13}/><span>
+            Only the fields you tick change. Everything else on these entries is left exactly as it is.
+          </span></div>
+          {BULK_FIELDS.map(f=>{
+            const st=bulk[f.k];
+            return(
+              <div key={f.k} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 0',
+                borderTop:'1px solid var(--n100)',opacity:st.on?1:.55}}>
+                <input type="checkbox" checked={st.on} style={{flexShrink:0}}
+                  onChange={()=>setBulk(b=>({...b,[f.k]:{...b[f.k],on:!b[f.k].on}}))}/>
+                <label style={{width:140,flexShrink:0,fontSize:11.5,fontWeight:700,color:'var(--n600)',cursor:'pointer'}}
+                  onClick={()=>setBulk(b=>({...b,[f.k]:{...b[f.k],on:!b[f.k].on}}))}>{f.l}</label>
+                <div style={{flex:1,minWidth:0}}>
+                  {f.kind==='select'&&f.k==='category'
+                    ? <select disabled={!st.on} value={st.v} onChange={e=>setBulk(b=>({...b,category:{...b.category,v:e.target.value}}))}>
+                        <option value="">– Select –</option>
+                        {cats.map(c=><option key={c} value={c}>{c}</option>)}
+                      </select>
+                  : f.kind==='select'
+                    ? <select disabled={!st.on} value={st.v} onChange={e=>setBulk(b=>({...b,paymentMode:{...b.paymentMode,v:e.target.value}}))}>
+                        <option value="">– Select –</option>
+                        {PAYMENT_MODES.map(m=><option key={m} value={m}>{m}</option>)}
+                      </select>
+                  : <input type={f.kind==='date'?'date':'text'} disabled={!st.on} value={st.v}
+                      list={f.k==='merchant'?'bulk-merchants':undefined}
+                      placeholder={f.clearable?'leave empty to clear this field':''}
+                      onChange={e=>setBulk(b=>({...b,[f.k]:{...b[f.k],v:e.target.value}}))}/>}
+                </div>
+              </div>
+            );
+          })}
+          <datalist id="bulk-merchants">{merchantOptions.map(m=><option key={m} value={m}/>)}</datalist>
+          {clearing.length>0&&(
+            <div className="alert aw mt2"><Ic n="prov" s={13}/><span>
+              {clearing.map(f=>f.l.toLowerCase()).join(' and ')} {clearing.length===1?'is':'are'} ticked but empty,
+              so {clearing.length===1?'it':'they'} will be <strong>cleared</strong> on all {sel.size} entries.
+            </span></div>
+          )}
+          {on.some(f=>f.k==='date')&&<div style={{fontSize:10.5,color:'var(--n400)',marginTop:8}}>
+            Changing the date also refiles these entries under that month.
+          </div>}
+        </Modal>);
+      })()}
       {/* Month filter */}
       <div className="mbar">
         <button type="button" className={`mchip ${selM==='all'?'on':''}`} onClick={()=>{setSelM('all');setSelPM('all');setSelMerchant('all');}}>All Months</button>
