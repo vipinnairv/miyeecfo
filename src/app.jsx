@@ -1338,7 +1338,9 @@ function PageTx({data,setData,toast,type}){
   const [selM,setSelM]=useState('all');
   const [selPM,setSelPM]=useState('all');
   const [selMerchant,setSelMerchant]=useState('all');
+  const [selCat,setSelCat]=useState('all');
   const [showAllMerchants,setShowAllMerchants]=useState(false);
+  const [showAllCats,setShowAllCats]=useState(false);
   const ef={date:new Date().toISOString().slice(0,10),category:'',desc:'',amount:'',paymentMode:'',merchant:''};
   const [form,setForm]=useState(ef);
   const [eid,setEid]=useState(null);
@@ -1348,9 +1350,19 @@ function PageTx({data,setData,toast,type}){
   const [bulk,setBulk]=useState(null);
   const fileRef=useRef();
 
-  const filtered=useMemo(()=>[...transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&(selPM==='all'||t.paymentMode===selPM)&&(selMerchant==='all'||t.merchant===selMerchant))].sort((a,b)=>new Date(b.date)-new Date(a.date)),[transactions,type,selM,selPM,selMerchant]);
-  const pmOptions=useMemo(()=>[...new Set(transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&t.paymentMode).map(t=>t.paymentMode))].sort(),[transactions,type,selM]);
-  const merchantOptions=useMemo(()=>[...new Set(transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&(selPM==='all'||t.paymentMode===selPM)&&t.merchant).map(t=>t.merchant))].sort(),[transactions,type,selM,selPM]);
+  /* Filters narrow in order: month, then category, then mode, then merchant.
+     Each list is built from what the filters ABOVE it already allow, so a chip
+     is never offered that would return nothing. Picking one clears the ones
+     below it, since those choices were made against a wider set. */
+  const filtered=useMemo(()=>[...transactions.filter(t=>t.type===type
+    &&(selM==='all'||t.month===selM)
+    &&(selCat==='all'||t.category===selCat)
+    &&(selPM==='all'||t.paymentMode===selPM)
+    &&(selMerchant==='all'||t.merchant===selMerchant))]
+    .sort((a,b)=>new Date(b.date)-new Date(a.date)),[transactions,type,selM,selCat,selPM,selMerchant]);
+  const catOptions=useMemo(()=>[...new Set(transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&t.category).map(t=>t.category))].sort(),[transactions,type,selM]);
+  const pmOptions=useMemo(()=>[...new Set(transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&(selCat==='all'||t.category===selCat)&&t.paymentMode).map(t=>t.paymentMode))].sort(),[transactions,type,selM,selCat]);
+  const merchantOptions=useMemo(()=>[...new Set(transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&(selCat==='all'||t.category===selCat)&&(selPM==='all'||t.paymentMode===selPM)&&t.merchant).map(t=>t.merchant))].sort(),[transactions,type,selM,selCat,selPM]);
   const total=filtered.reduce((s,t)=>s+t.amount,0);
   const allSel=filtered.length>0&&sel.size===filtered.length;
 
@@ -1695,9 +1707,36 @@ function PageTx({data,setData,toast,type}){
       })()}
       {/* Month filter */}
       <div className="mbar">
-        <button type="button" className={`mchip ${selM==='all'?'on':''}`} onClick={()=>{setSelM('all');setSelPM('all');setSelMerchant('all');}}>All Months</button>
-        {months.map(m=><button type="button" key={m.key} className={`mchip ${selM===m.key?'on':''}`} onClick={()=>{setSelM(m.key);setSelPM('all');setSelMerchant('all');}}>{m.label}</button>)}
+        <button type="button" className={`mchip ${selM==='all'?'on':''}`} onClick={()=>{setSelM('all');setSelCat('all');setSelPM('all');setSelMerchant('all');}}>All Months</button>
+        {months.map(m=><button type="button" key={m.key} className={`mchip ${selM===m.key?'on':''}`} onClick={()=>{setSelM(m.key);setSelCat('all');setSelPM('all');setSelMerchant('all');}}>{m.label}</button>)}
       </div>
+      {/* Category filter */}
+      {catOptions.length>0&&(()=>{
+        const LIMIT=6;
+        const extra=catOptions.length-LIMIT;
+        const showSet=new Set(showAllCats?catOptions:catOptions.slice(0,LIMIT));
+        // An active category chosen from the full list must stay visible after
+        // the list collapses, or the filter looks like it switched itself off.
+        if(selCat!=='all')showSet.add(selCat);
+        const displayed=catOptions.filter(c=>showSet.has(c));
+        return(
+          <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:8}}>
+            <button type="button" className={`mchip ${selCat==='all'?'on':''}`} style={{fontSize:11}}
+              onClick={()=>{setSelCat('all');setSelPM('all');setSelMerchant('all');}}>🏷 All Categories</button>
+            {displayed.map(c=>{
+              const n=transactions.filter(t=>t.type===type&&(selM==='all'||t.month===selM)&&t.category===c).length;
+              return(
+                <button type="button" key={c} className={`mchip ${selCat===c?'on':''}`} style={{fontSize:11}}
+                  onClick={()=>{const next=selCat===c?'all':c;setSelCat(next);setSelPM('all');setSelMerchant('all');}}>
+                  {c}<span style={{marginLeft:5,opacity:.6,fontFamily:'var(--m)',fontSize:10}}>{n}</span>
+                </button>
+              );
+            })}
+            {!showAllCats&&extra>0&&<div className="mchip" onClick={()=>setShowAllCats(true)} style={{fontSize:11,fontWeight:700,color:'var(--p)',borderColor:'var(--p)'}}>+{extra} more</div>}
+            {showAllCats&&extra>0&&<div className="mchip" onClick={()=>setShowAllCats(false)} style={{fontSize:11,fontWeight:700,color:'var(--n500)',borderColor:'var(--n300)'}}>Show less ↑</div>}
+          </div>
+        );
+      })()}
       {/* Payment mode filter */}
       {pmOptions.length>0&&<div className="mbar" style={{marginBottom:8}}>
         <button type="button" className={`mchip ${selPM==='all'?'on':''}`} onClick={()=>{setSelPM('all');setSelMerchant('all');}} style={{fontSize:11}}>All Modes</button>
@@ -1738,7 +1777,10 @@ function PageTx({data,setData,toast,type}){
                 <td><input type="checkbox" checked={sel.has(t.id)} onChange={()=>toggleOne(t.id)}/></td>
                 <td style={{fontFamily:'var(--m)',fontSize:12}}>{fmtDate(t.date)}</td>
                 <td><span className="tag tx" style={{cursor:'pointer'}} onClick={()=>setSelM(t.month)} title="Filter by this month">{fmtMonth(t.month)}</span></td>
-                <td style={{fontSize:12.5}}>{t.category}</td>
+                <td style={{fontSize:12.5}}>{t.category
+                  ? <span style={{cursor:'pointer'}} title="Filter by this category"
+                      onClick={()=>{const next=selCat===t.category?'all':t.category;setSelCat(next);setSelPM('all');setSelMerchant('all');}}>{t.category}</span>
+                  : <span style={{color:'var(--n400)'}}>–</span>}</td>
                 <td style={{fontSize:12,color:'var(--n500)'}}>{t.desc}</td>
                 <td style={{fontSize:11.5}}>{t.merchant?<span style={{background:'var(--gl)',borderRadius:4,padding:'2px 7px',color:'var(--p)',fontWeight:600,cursor:'pointer'}} onClick={()=>setSelMerchant(selMerchant===t.merchant?'all':t.merchant)} title="Filter by this merchant">{t.merchant}</span>:<span style={{color:'var(--n400)'}}>–</span>}</td>
                 <td>{t.paymentMode?<span className={`pm-badge ${pmClass(t.paymentMode)}`} style={{cursor:'pointer'}} onClick={()=>{setSelPM(t.paymentMode);setSelMerchant('all');}} title="Filter by this mode">{t.paymentMode}</span>:'–'}</td>
